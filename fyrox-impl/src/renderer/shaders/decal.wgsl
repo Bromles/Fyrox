@@ -43,6 +43,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         (1.0 + screenPos.y) / 2.0 + (0.5 / resolution.y),
     );
 
+    // possibly incorrect, was u32 texture in original glsl
     let maskIndex: u32 = u32(round(textureSample(decalMask, sampler_2d, texCoord).r));
 
     if (maskIndex != layerIndex) {
