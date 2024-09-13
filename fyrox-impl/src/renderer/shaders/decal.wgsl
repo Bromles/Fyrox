@@ -20,7 +20,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @group(1) @binding(0) var sceneDepth: texture_2d<f32>;
 @group(1) @binding(1) var diffuseTexture: texture_2d<f32>;
 @group(1) @binding(2) var normalTexture: texture_2d<f32>;
-@group(1) @binding(3) var decalMask: texture_2d<f32>;
+@group(1) @binding(3) var decalMask: texture_2d<u32>;
 @group(1) @binding(4) var sampler_2d: sampler;
 
 @group(2) @binding(0) var<uniform> invViewProj: mat4x4<f32>;
@@ -42,9 +42,9 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         (1.0 + screenPos.x) / 2.0 + (0.5 / resolution.x),
         (1.0 + screenPos.y) / 2.0 + (0.5 / resolution.y),
     );
+    let texCoordLoad: vec2<u32> = vec2<u32>(texCoord);
 
-    // possibly incorrect, was u32 texture in original glsl
-    let maskIndex: u32 = u32(round(textureSample(decalMask, sampler_2d, texCoord).r));
+    let maskIndex: u32 = textureLoad(decalMask, texCoordLoad, 0).r;
 
     if (maskIndex != layerIndex) {
         discard;
