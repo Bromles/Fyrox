@@ -145,7 +145,7 @@ impl AssetPreviewGenerator for TexturePreview {
             };
 
             let mut material = Material::standard_two_sides();
-            Log::verify(material.set_property("diffuseTexture", texture));
+            material.bind("diffuseTexture", texture);
             let material = MaterialResource::new_ok(Default::default(), material);
 
             MeshBuilder::new(BaseBuilder::new())
@@ -285,7 +285,7 @@ impl AssetPreviewGenerator for SoundPreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/sound.png"))
+        load_image!("../../../resources/sound.png")
     }
 }
 
@@ -343,16 +343,13 @@ fn render_scene_to_texture(
                 .map(|a| a.texture.clone())
         })
     {
-        let mut ldr_texture = ldr_texture.borrow_mut();
+        let ldr_texture = ldr_texture.borrow_mut();
         let (width, height) = match ldr_texture.kind() {
             GpuTextureKind::Rectangle { width, height } => (width, height),
             _ => unreachable!(),
         };
 
-        let pipeline_state = graphics_context.renderer.pipeline_state();
-        let pixels = ldr_texture
-            .bind_mut(pipeline_state, 0)
-            .read_pixels(pipeline_state);
+        let pixels = ldr_texture.read_pixels();
 
         // TODO: This is a hack, refactor `render_scene` method to accept render data from
         // outside, instead of messing around with these temporary handles.
@@ -413,7 +410,7 @@ impl AssetPreviewGenerator for ModelPreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/model.png"))
+        load_image!("../../../resources/model.png")
     }
 }
 
@@ -454,7 +451,7 @@ impl AssetPreviewGenerator for SurfaceDataPreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/model.png"))
+        load_image!("../../../resources/model.png")
     }
 }
 
@@ -464,14 +461,12 @@ impl AssetPreviewGenerator for ShaderPreview {
     fn generate_scene(
         &mut self,
         resource: &UntypedResource,
-        resource_manager: &ResourceManager,
+        _resource_manager: &ResourceManager,
         scene: &mut Scene,
     ) -> Handle<Node> {
         if let Some(shader) = resource.try_cast::<Shader>() {
-            let material = MaterialResource::new_ok(
-                Default::default(),
-                Material::from_shader(shader, Some(resource_manager.clone())),
-            );
+            let material =
+                MaterialResource::new_ok(Default::default(), Material::from_shader(shader));
 
             MeshBuilder::new(BaseBuilder::new())
                 .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
@@ -500,7 +495,7 @@ impl AssetPreviewGenerator for ShaderPreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/shader.png"))
+        load_image!("../../../resources/shader.png")
     }
 }
 
@@ -544,7 +539,7 @@ impl AssetPreviewGenerator for MaterialPreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/material.png"))
+        load_image!("../../../resources/material.png")
     }
 }
 
@@ -575,7 +570,7 @@ impl AssetPreviewGenerator for HrirPreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/hrir.png"))
+        load_image!("../../../resources/hrir.png")
     }
 }
 
@@ -605,7 +600,7 @@ impl AssetPreviewGenerator for CurvePreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/curve.png"))
+        load_image!("../../../resources/curve.png")
     }
 }
 
@@ -663,7 +658,7 @@ impl AssetPreviewGenerator for FontPreview {
                 WidgetBuilder::new().with_child(
                     TextBuilder::new(WidgetBuilder::new())
                         .with_font(font)
-                        .with_font_size(16.0)
+                        .with_font_size(16.0.into())
                         .with_vertical_text_alignment(VerticalAlignment::Center)
                         .with_horizontal_text_alignment(HorizontalAlignment::Center)
                         .with_wrap(WrapMode::Letter)
@@ -683,7 +678,7 @@ impl AssetPreviewGenerator for FontPreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/font.png"))
+        load_image!("../../../resources/font.png")
     }
 }
 
@@ -718,6 +713,6 @@ impl AssetPreviewGenerator for UserInterfacePreview {
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
     ) -> Option<UntypedResource> {
-        load_image(include_bytes!("../../../resources/ui.png"))
+        load_image!("../../../resources/ui.png")
     }
 }

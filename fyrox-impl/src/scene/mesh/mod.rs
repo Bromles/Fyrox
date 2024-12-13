@@ -21,6 +21,12 @@
 //! Contains all structures and methods to create and manage mesh scene graph nodes. See [`Mesh`] docs for more info
 //! and usage examples.
 
+use crate::material::{
+    Material, MaterialResourceBinding, MaterialResourceExtension, MaterialTextureBinding,
+};
+use crate::resource::texture::PLACEHOLDER;
+use crate::scene::mesh::surface::SurfaceBuilder;
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector3, Vector4},
@@ -32,16 +38,13 @@ use crate::{
         type_traits::prelude::*,
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     graph::{BaseSceneGraph, SceneGraph},
     material::MaterialResource,
     renderer::{
         self,
-        bundle::{
-            PersistentIdentifier, RenderContext, RenderDataBundleStorageTrait, SurfaceInstanceData,
-        },
-        framework::geometry_buffer::ElementRange,
+        bundle::{RenderContext, RenderDataBundleStorageTrait, SurfaceInstanceData},
+        framework::ElementRange,
     },
     scene::{
         base::{Base, BaseBuilder},
@@ -59,6 +62,7 @@ use crate::{
     },
 };
 use fxhash::{FxHashMap, FxHasher};
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_resource::untyped::ResourceKind;
 use std::{
     cell::Cell,
@@ -167,18 +171,13 @@ struct BatchContainer {
 
 impl BatchContainer {
     fn fill(&mut self, from: Handle<Node>, ctx: &mut RenderContext) {
-        for descendant_handle in ctx.graph.traverse_handle_iter(from) {
+        for (descendant_handle, descendant) in ctx.graph.traverse_iter(from) {
             if descendant_handle == from {
                 continue;
             }
 
-            let descendant = &ctx.graph[descendant_handle];
             descendant.collect_render_data(&mut RenderContext {
-                observer_position: ctx.observer_position,
-                z_near: ctx.z_near,
-                z_far: ctx.z_far,
-                view_matrix: ctx.view_matrix,
-                projection_matrix: ctx.projection_matrix,
+                observer_info: ctx.observer_info,
                 frustum: None,
                 storage: self,
                 graph: ctx.graph,
@@ -317,7 +316,7 @@ impl RenderDataBundleStorageTrait for BatchContainer {
 ///
 /// This example creates a unit cube surface with default material and then creates a mesh with this surface. If you need to create
 /// custom surface, see [`crate::scene::mesh::surface::SurfaceData`] docs for more info.
-#[derive(Debug, Reflect, Clone, Visit)]
+#[derive(Debug, Reflect, Clone, Visit, ComponentProvider)]
 pub struct Mesh {
     #[visit(rename = "Common")]
     base: Base,
@@ -336,6 +335,9 @@ pub struct Mesh {
     meshes, that have skin or blend shapes. Such meshes will be drawn in a separate draw call."
     )]
     batching_mode: InheritableVariable<BatchingMode>,
+
+    #[visit(optional)]
+    blend_shapes_property_name: String,
 
     #[visit(optional)]
     blend_shapes: InheritableVariable<Vec<BlendShape>>,
@@ -367,6 +369,7 @@ impl Default for Mesh {
             local_bounding_box_dirty: Cell::new(true),
             render_path: InheritableVariable::new_modified(RenderPath::Deferred),
             batching_mode: Default::default(),
+            blend_shapes_property_name: Mesh::DEFAULT_BLEND_SHAPES_PROPERTY_NAME.to_string(),
             blend_shapes: Default::default(),
             batch_container: Default::default(),
         }
@@ -394,6 +397,9 @@ impl TypeUuidProvider for Mesh {
 }
 
 impl Mesh {
+    /// Default name of the blend shapes storage property in a shader.
+    pub const DEFAULT_BLEND_SHAPES_PROPERTY_NAME: &'static str = "blendShapesStorage";
+
     /// Sets surfaces for the mesh.
     pub fn set_surfaces(&mut self, surfaces: Vec<Surface>) -> Vec<Surface> {
         self.surfaces.set_value_and_mark_modified(surfaces)
@@ -457,11 +463,13 @@ impl Mesh {
             let data = data.data_ref();
             if surface.bones().is_empty() {
                 for view in data.vertex_buffer.iter() {
+                    let Ok(vertex_pos) = view.read_3_f32(VertexAttributeUsage::Position) else {
+                        break;
+                    };
+
                     bounding_box.add_point(
                         self.global_transform()
-                            .transform_point(&Point3::from(
-                                view.read_3_f32(VertexAttributeUsage::Position).unwrap(),
-                            ))
+                            .transform_point(&Point3::from(vertex_pos))
                             .coords,
                     );
                 }
@@ -481,20 +489,20 @@ impl Mesh {
 
                 for view in data.vertex_buffer.iter() {
                     let mut position = Vector3::default();
-                    for (&bone_index, &weight) in view
-                        .read_4_u8(VertexAttributeUsage::BoneIndices)
-                        .unwrap()
-                        .iter()
-                        .zip(
-                            view.read_4_f32(VertexAttributeUsage::BoneWeight)
-                                .unwrap()
-                                .iter(),
-                        )
-                    {
+
+                    let Ok(vertex_pos) = view.read_3_f32(VertexAttributeUsage::Position) else {
+                        break;
+                    };
+                    let Ok(bone_indices) = view.read_4_u8(VertexAttributeUsage::BoneIndices) else {
+                        break;
+                    };
+                    let Ok(bone_weights) = view.read_4_f32(VertexAttributeUsage::BoneWeight) else {
+                        break;
+                    };
+
+                    for (&bone_index, &weight) in bone_indices.iter().zip(bone_weights.iter()) {
                         position += bone_matrices[bone_index as usize]
-                            .transform_point(&Point3::from(
-                                view.read_3_f32(VertexAttributeUsage::Position).unwrap(),
-                            ))
+                            .transform_point(&Point3::from(vertex_pos))
                             .coords
                             .scale(weight);
                     }
@@ -537,9 +545,65 @@ fn extend_aabb_from_vertex_buffer(
     }
 }
 
-impl NodeTrait for Mesh {
-    crate::impl_query_component!();
+fn placeholder_material() -> MaterialResource {
+    let mut material = Material::standard();
+    material.bind("diffuseTexture", PLACEHOLDER.resource());
+    MaterialResource::new_ok(ResourceKind::Embedded, material)
+}
 
+impl ConstructorProvider<Node, Graph> for Mesh {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Empty", |_| {
+                MeshBuilder::new(BaseBuilder::new()).build_node().into()
+            })
+            .with_variant("Cube", |_| {
+                MeshBuilder::new(BaseBuilder::new().with_name("Cube"))
+                    .with_surfaces(vec![SurfaceBuilder::new(surface::CUBE.resource.clone())
+                        .with_material(placeholder_material())
+                        .build()])
+                    .build_node()
+                    .into()
+            })
+            .with_variant("Cone", |_| {
+                MeshBuilder::new(BaseBuilder::new().with_name("Cone"))
+                    .with_surfaces(vec![SurfaceBuilder::new(surface::CONE.resource.clone())
+                        .with_material(placeholder_material())
+                        .build()])
+                    .build_node()
+                    .into()
+            })
+            .with_variant("Cylinder", |_| {
+                MeshBuilder::new(BaseBuilder::new().with_name("Cylinder"))
+                    .with_surfaces(vec![SurfaceBuilder::new(
+                        surface::CYLINDER.resource.clone(),
+                    )
+                    .with_material(placeholder_material())
+                    .build()])
+                    .build_node()
+                    .into()
+            })
+            .with_variant("Sphere", |_| {
+                MeshBuilder::new(BaseBuilder::new().with_name("Sphere"))
+                    .with_surfaces(vec![SurfaceBuilder::new(surface::SPHERE.resource.clone())
+                        .with_material(placeholder_material())
+                        .build()])
+                    .build_node()
+                    .into()
+            })
+            .with_variant("Quad", |_| {
+                MeshBuilder::new(BaseBuilder::new().with_name("Quad"))
+                    .with_surfaces(vec![SurfaceBuilder::new(surface::QUAD.resource.clone())
+                        .with_material(placeholder_material())
+                        .build()])
+                    .build_node()
+                    .into()
+            })
+            .with_group("Mesh")
+    }
+}
+
+impl NodeTrait for Mesh {
     /// Returns current bounding box. Bounding box presented in *local coordinates*
     /// WARNING: This method does *not* includes bounds of bones!
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
@@ -576,7 +640,11 @@ impl NodeTrait for Mesh {
         Self::type_uuid()
     }
 
-    fn sync_transform(&self, _new_global_transform: &Matrix4<f32>, context: &mut SyncContext) {
+    fn on_global_transform_changed(
+        &self,
+        _new_global_transform: &Matrix4<f32>,
+        context: &mut SyncContext,
+    ) {
         if self.surfaces.iter().any(|s| !s.bones.is_empty()) {
             let mut world_aabb = self
                 .local_bounding_box()
@@ -613,10 +681,10 @@ impl NodeTrait for Mesh {
             let mut container = self.batch_container.0.lock();
 
             if container.batches.is_empty() {
-                container.fill(self.self_handle, ctx);
+                container.fill(self.handle(), ctx);
             }
 
-            for (index, batch) in container.batches.values().enumerate() {
+            for batch in container.batches.values() {
                 ctx.storage.push(
                     &batch.data,
                     &batch.material,
@@ -627,19 +695,14 @@ impl NodeTrait for Mesh {
                         bone_matrices: Default::default(),
                         blend_shapes_weights: Default::default(),
                         element_range: ElementRange::Full,
-                        persistent_identifier: PersistentIdentifier::new_combined(
-                            &batch.data,
-                            self.self_handle,
-                            index,
-                        ),
-                        node_handle: self.self_handle,
+                        node_handle: self.handle(),
                     },
                 );
             }
 
             RdcControlFlow::Break
         } else {
-            for (index, surface) in self.surfaces().iter().enumerate() {
+            for surface in self.surfaces().iter() {
                 let is_skinned = !surface.bones.is_empty();
 
                 let world = if is_skinned {
@@ -666,9 +729,26 @@ impl NodeTrait for Mesh {
 
                 match batching_mode {
                     BatchingMode::None => {
+                        let surface_data = surface.data_ref();
+                        let substitute_material = surface_data
+                            .data_ref()
+                            .blend_shapes_container
+                            .as_ref()
+                            .and_then(|c| c.blend_shape_storage.as_ref())
+                            .map(|texture| {
+                                let material_copy = surface.material().deep_copy();
+                                material_copy.data_ref().bind(
+                                    &self.blend_shapes_property_name,
+                                    MaterialResourceBinding::Texture(MaterialTextureBinding {
+                                        value: Some(texture.clone()),
+                                    }),
+                                );
+                                material_copy
+                            });
+
                         ctx.storage.push(
-                            surface.data_ref(),
-                            surface.material(),
+                            surface_data,
+                            substitute_material.as_ref().unwrap_or(surface.material()),
                             self.render_path(),
                             surface.material().key(),
                             SurfaceInstanceData {
@@ -691,12 +771,7 @@ impl NodeTrait for Mesh {
                                     .map(|bs| bs.weight / 100.0)
                                     .collect(),
                                 element_range: ElementRange::Full,
-                                persistent_identifier: PersistentIdentifier::new_combined(
-                                    surface.data_ref(),
-                                    self.self_handle,
-                                    index,
-                                ),
-                                node_handle: self.self_handle,
+                                node_handle: self.handle(),
                             },
                         );
                     }
@@ -711,7 +786,7 @@ impl NodeTrait for Mesh {
                             surface.material(),
                             *self.render_path,
                             0,
-                            self.self_handle,
+                            self.handle(),
                             &mut move |mut vertex_buffer, mut triangle_buffer| {
                                 let start_vertex_index = vertex_buffer.vertex_count();
 
@@ -799,6 +874,7 @@ pub struct MeshBuilder {
     render_path: RenderPath,
     blend_shapes: Vec<BlendShape>,
     batching_mode: BatchingMode,
+    blend_shapes_property_name: String,
 }
 
 impl MeshBuilder {
@@ -810,6 +886,7 @@ impl MeshBuilder {
             render_path: RenderPath::Deferred,
             blend_shapes: Default::default(),
             batching_mode: BatchingMode::None,
+            blend_shapes_property_name: Mesh::DEFAULT_BLEND_SHAPES_PROPERTY_NAME.to_string(),
         }
     }
 
@@ -839,6 +916,12 @@ impl MeshBuilder {
         self
     }
 
+    /// Sets a name of the blend shapes property in a material used by this mesh.
+    pub fn with_blend_shapes_property_name(mut self, name: String) -> Self {
+        self.blend_shapes_property_name = name;
+        self
+    }
+
     /// Creates new mesh.
     pub fn build_node(self) -> Node {
         Node::new(Mesh {
@@ -851,6 +934,7 @@ impl MeshBuilder {
             world_bounding_box: Default::default(),
             batching_mode: self.batching_mode.into(),
             batch_container: Default::default(),
+            blend_shapes_property_name: self.blend_shapes_property_name,
         })
     }
 

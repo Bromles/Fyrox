@@ -22,6 +22,7 @@
 //!
 //! For more info see [`Sprite`].
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::scene::node::RdcControlFlow;
 use crate::{
     core::{
@@ -30,10 +31,10 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, Rect, TriangleDefinition},
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
-        TypeUuidProvider,
     },
     material,
     material::{Material, MaterialResource},
@@ -53,6 +54,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use fyrox_core::value_as_u8_slice;
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
@@ -142,8 +144,7 @@ impl VertexTrait for SpriteVertex {
 ///     let mut material = Material::standard_sprite();
 ///
 ///     material
-///         .set_property("smoke.png", resource_manager.request::<Texture>("smoke.png"))
-///         .unwrap();
+///         .bind("smoke.png", resource_manager.request::<Texture>("smoke.png"));
 ///
 ///     SpriteBuilder::new(BaseBuilder::new())
 ///         .with_material(MaterialResource::new_ok(Default::default(), material))
@@ -155,7 +156,7 @@ impl VertexTrait for SpriteVertex {
 /// **does not** reuse it. Ideally, you should reuse the shared material across multiple instances
 /// to get best possible performance. Otherwise, each your sprite will be put in a separate batch
 /// which will force your GPU to render a single sprite in dedicated draw call which is quite slow.
-#[derive(Debug, Reflect, Clone)]
+#[derive(Debug, Reflect, Clone, ComponentProvider)]
 pub struct Sprite {
     base: Base,
 
@@ -293,9 +294,17 @@ impl Sprite {
     }
 }
 
-impl NodeTrait for Sprite {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Sprite {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>().with_variant("Sprite (3D)", |_| {
+            SpriteBuilder::new(BaseBuilder::new().with_name("Sprite"))
+                .build_node()
+                .into()
+        })
+    }
+}
 
+impl NodeTrait for Sprite {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         AxisAlignedBoundingBox::from_radius(*self.size)
     }
@@ -358,7 +367,7 @@ impl NodeTrait for Sprite {
             &self.material,
             RenderPath::Forward,
             sort_index,
-            self.self_handle,
+            self.handle(),
             &mut move |mut vertex_buffer, mut triangle_buffer| {
                 let start_vertex_index = vertex_buffer.vertex_count();
 

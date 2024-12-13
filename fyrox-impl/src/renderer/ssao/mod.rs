@@ -18,27 +18,32 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::framework::geometry_buffer::ElementRange;
+use crate::renderer::make_viewport_matrix;
 use crate::{
     core::{
         algebra::{Matrix3, Matrix4, Vector2, Vector3},
         color::Color,
         math::{lerpf, Rect},
-        scope_profile,
         sstorage::ImmutableString,
     },
     rand::Rng,
     renderer::{
+        cache::uniform::UniformBufferCache,
         framework::{
+            buffer::BufferUsage,
             error::FrameworkError,
-            framebuffer::{Attachment, AttachmentKind, DrawParameters, FrameBuffer},
-            geometry_buffer::{GeometryBuffer, GeometryBufferKind},
+            framebuffer::{
+                Attachment, AttachmentKind, FrameBuffer, ResourceBindGroup, ResourceBinding,
+            },
+            geometry_buffer::GeometryBuffer,
             gpu_program::{GpuProgram, UniformLocation},
             gpu_texture::{
-                Coordinate, GpuTexture, GpuTextureKind, MagnificationFilter, MinificationFilter,
-                PixelKind, WrapMode,
+                GpuTexture, GpuTextureKind, MagnificationFilter, MinificationFilter, PixelKind,
+                WrapMode,
             },
-            state::PipelineState,
+            server::GraphicsServer,
+            uniform::StaticUniformBuffer,
+            DrawParameters, ElementRange, GeometryBufferExt,
         },
         gbuffer::GBuffer,
         ssao::blur::Blur,
@@ -46,6 +51,8 @@ use crate::{
     },
     scene::mesh::surface::SurfaceData,
 };
+use fyrox_graphics::framebuffer::BufferLocation;
+use fyrox_graphics::gpu_texture::GpuTextureDescriptor;
 use std::{cell::RefCell, rc::Rc};
 
 mod blur;
@@ -57,41 +64,23 @@ const KERNEL_SIZE: usize = 32;
 const NOISE_SIZE: usize = 4;
 
 struct Shader {
-    program: GpuProgram,
+    program: Box<dyn GpuProgram>,
     depth_sampler: UniformLocation,
     normal_sampler: UniformLocation,
     noise_sampler: UniformLocation,
-    radius: UniformLocation,
-    kernel: UniformLocation,
-    projection_matrix: UniformLocation,
-    noise_scale: UniformLocation,
-    inv_proj_matrix: UniformLocation,
-    world_view_proj_matrix: UniformLocation,
-    view_matrix: UniformLocation,
+    uniform_block_index: usize,
 }
 
 impl Shader {
-    pub fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("../shaders/ssao_fs.glsl");
         let vertex_source = include_str!("../shaders/ssao_vs.glsl");
-        let program = GpuProgram::from_source(state, "SsaoShader", vertex_source, fragment_source)?;
+        let program = server.create_program("SsaoShader", vertex_source, fragment_source)?;
         Ok(Self {
-            depth_sampler: program
-                .uniform_location(state, &ImmutableString::new("depthSampler"))?,
-            normal_sampler: program
-                .uniform_location(state, &ImmutableString::new("normalSampler"))?,
-            noise_sampler: program
-                .uniform_location(state, &ImmutableString::new("noiseSampler"))?,
-            kernel: program.uniform_location(state, &ImmutableString::new("kernel"))?,
-            radius: program.uniform_location(state, &ImmutableString::new("radius"))?,
-            projection_matrix: program
-                .uniform_location(state, &ImmutableString::new("projectionMatrix"))?,
-            inv_proj_matrix: program
-                .uniform_location(state, &ImmutableString::new("inverseProjectionMatrix"))?,
-            noise_scale: program.uniform_location(state, &ImmutableString::new("noiseScale"))?,
-            world_view_proj_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
-            view_matrix: program.uniform_location(state, &ImmutableString::new("viewMatrix"))?,
+            depth_sampler: program.uniform_location(&ImmutableString::new("depthSampler"))?,
+            normal_sampler: program.uniform_location(&ImmutableString::new("normalSampler"))?,
+            noise_sampler: program.uniform_location(&ImmutableString::new("noiseSampler"))?,
+            uniform_block_index: program.uniform_block_index(&ImmutableString::new("Uniforms"))?,
             program,
         })
     }
@@ -100,18 +89,18 @@ impl Shader {
 pub struct ScreenSpaceAmbientOcclusionRenderer {
     blur: Blur,
     shader: Shader,
-    framebuffer: FrameBuffer,
-    quad: GeometryBuffer,
+    framebuffer: Box<dyn FrameBuffer>,
+    quad: Box<dyn GeometryBuffer>,
     width: i32,
     height: i32,
-    noise: Rc<RefCell<GpuTexture>>,
+    noise: Rc<RefCell<dyn GpuTexture>>,
     kernel: [Vector3<f32>; KERNEL_SIZE],
     radius: f32,
 }
 
 impl ScreenSpaceAmbientOcclusionRenderer {
     pub fn new(
-        state: &PipelineState,
+        server: &dyn GraphicsServer,
         frame_width: usize,
         frame_height: usize,
     ) -> Result<Self, FrameworkError> {
@@ -120,41 +109,24 @@ impl ScreenSpaceAmbientOcclusionRenderer {
         let width = (frame_width / 2).max(1);
         let height = (frame_height / 2).max(1);
 
-        let occlusion = {
-            let kind = GpuTextureKind::Rectangle { width, height };
-            let mut texture = GpuTexture::new(
-                state,
-                kind,
-                PixelKind::R32F,
-                MinificationFilter::Nearest,
-                MagnificationFilter::Nearest,
-                1,
-                None,
-            )?;
-            texture
-                .bind_mut(state, 0)
-                .set_minification_filter(MinificationFilter::Nearest)
-                .set_magnification_filter(MagnificationFilter::Nearest);
-            texture
-        };
+        let occlusion = server.create_2d_render_target(PixelKind::R32F, width, height)?;
 
         let mut rng = crate::rand::thread_rng();
 
         Ok(Self {
-            blur: Blur::new(state, width, height)?,
-            shader: Shader::new(state)?,
-            framebuffer: FrameBuffer::new(
-                state,
+            blur: Blur::new(server, width, height)?,
+            shader: Shader::new(server)?,
+            framebuffer: server.create_frame_buffer(
                 None,
                 vec![Attachment {
                     kind: AttachmentKind::Color,
-                    texture: Rc::new(RefCell::new(occlusion)),
+                    texture: occlusion,
                 }],
             )?,
-            quad: GeometryBuffer::from_surface_data(
+            quad: <dyn GeometryBuffer>::from_surface_data(
                 &SurfaceData::make_unit_xy_quad(),
-                GeometryBufferKind::StaticDraw,
-                state,
+                BufferUsage::StaticDraw,
+                server,
             )?,
             width: width as i32,
             height: height as i32,
@@ -176,7 +148,7 @@ impl ScreenSpaceAmbientOcclusionRenderer {
                 }
                 kernel
             },
-            noise: Rc::new(RefCell::new({
+            noise: {
                 const RGB_PIXEL_SIZE: usize = 3;
                 let mut pixels = [0u8; RGB_PIXEL_SIZE * NOISE_SIZE * NOISE_SIZE];
                 for pixel in pixels.chunks_exact_mut(RGB_PIXEL_SIZE) {
@@ -184,25 +156,22 @@ impl ScreenSpaceAmbientOcclusionRenderer {
                     pixel[1] = rng.gen_range(0u8..255u8); // G
                     pixel[2] = 0u8; // B
                 }
-                let kind = GpuTextureKind::Rectangle {
-                    width: NOISE_SIZE,
-                    height: NOISE_SIZE,
-                };
-                let mut texture = GpuTexture::new(
-                    state,
-                    kind,
-                    PixelKind::RGB8,
-                    MinificationFilter::Nearest,
-                    MagnificationFilter::Nearest,
-                    1,
-                    Some(&pixels),
-                )?;
-                texture
-                    .bind_mut(state, 0)
-                    .set_wrap(Coordinate::S, WrapMode::Repeat)
-                    .set_wrap(Coordinate::T, WrapMode::Repeat);
-                texture
-            })),
+                server.create_texture(GpuTextureDescriptor {
+                    kind: GpuTextureKind::Rectangle {
+                        width: NOISE_SIZE,
+                        height: NOISE_SIZE,
+                    },
+                    pixel_kind: PixelKind::RGB8,
+                    min_filter: MinificationFilter::Nearest,
+                    mag_filter: MagnificationFilter::Nearest,
+                    mip_count: 1,
+                    s_wrap_mode: WrapMode::Repeat,
+                    t_wrap_mode: WrapMode::Repeat,
+                    r_wrap_mode: WrapMode::Repeat,
+                    anisotropy: 1.0,
+                    data: Some(&pixels),
+                })?
+            },
             radius: 0.5,
         })
     }
@@ -211,90 +180,85 @@ impl ScreenSpaceAmbientOcclusionRenderer {
         self.radius = radius.abs();
     }
 
-    fn raw_ao_map(&self) -> Rc<RefCell<GpuTexture>> {
+    fn raw_ao_map(&self) -> Rc<RefCell<dyn GpuTexture>> {
         self.framebuffer.color_attachments()[0].texture.clone()
     }
 
-    pub fn ao_map(&self) -> Rc<RefCell<GpuTexture>> {
+    pub fn ao_map(&self) -> Rc<RefCell<dyn GpuTexture>> {
         self.blur.result()
     }
 
     pub(crate) fn render(
         &mut self,
-        state: &PipelineState,
         gbuffer: &GBuffer,
         projection_matrix: Matrix4<f32>,
         view_matrix: Matrix3<f32>,
+        uniform_buffer_cache: &mut UniformBufferCache,
     ) -> Result<RenderPassStatistics, FrameworkError> {
-        scope_profile!();
-
         let mut stats = RenderPassStatistics::default();
 
         let viewport = Rect::new(0, 0, self.width, self.height);
 
-        let frame_matrix = Matrix4::new_orthographic(
-            0.0,
-            viewport.w() as f32,
-            viewport.h() as f32,
-            0.0,
-            -1.0,
-            1.0,
-        ) * Matrix4::new_nonuniform_scaling(&Vector3::new(
-            viewport.w() as f32,
-            viewport.h() as f32,
-            0.0,
-        ));
+        let frame_matrix = make_viewport_matrix(viewport);
 
         self.framebuffer.clear(
-            state,
             viewport,
             Some(Color::from_rgba(0, 0, 0, 0)),
             Some(1.0),
             None,
         );
 
-        let shader = &self.shader;
-        let noise = &self.noise;
-        let kernel = &self.kernel;
         let noise_scale = Vector2::new(
             self.width as f32 / NOISE_SIZE as f32,
             self.height as f32 / NOISE_SIZE as f32,
         );
-        let radius = self.radius;
+
+        let uniform_buffer = uniform_buffer_cache.write(
+            StaticUniformBuffer::<1024>::new()
+                .with(&frame_matrix)
+                .with(&projection_matrix.try_inverse().unwrap_or_default())
+                .with(&projection_matrix)
+                .with_slice(&self.kernel)
+                .with(&noise_scale)
+                .with(&view_matrix)
+                .with(&self.radius),
+        )?;
+
         stats += self.framebuffer.draw(
-            &self.quad,
-            state,
+            &*self.quad,
             viewport,
-            &shader.program,
+            &*self.shader.program,
             &DrawParameters {
                 cull_face: None,
                 color_write: Default::default(),
                 depth_write: false,
                 stencil_test: None,
-                depth_test: false,
+                depth_test: None,
                 blend: None,
                 stencil_op: Default::default(),
+                scissor_box: None,
             },
+            &[ResourceBindGroup {
+                bindings: &[
+                    ResourceBinding::texture(&gbuffer.depth(), &self.shader.depth_sampler),
+                    ResourceBinding::texture(
+                        &gbuffer.normal_texture(),
+                        &self.shader.normal_sampler,
+                    ),
+                    ResourceBinding::texture(&self.noise, &self.shader.noise_sampler),
+                    ResourceBinding::Buffer {
+                        buffer: uniform_buffer,
+                        binding: BufferLocation::Auto {
+                            shader_location: self.shader.uniform_block_index,
+                        },
+                        data_usage: Default::default(),
+                    },
+                ],
+            }],
             ElementRange::Full,
-            |mut program_binding| {
-                program_binding
-                    .set_texture(&shader.depth_sampler, &gbuffer.depth())
-                    .set_texture(&shader.normal_sampler, &gbuffer.normal_texture())
-                    .set_texture(&shader.noise_sampler, noise)
-                    .set_vector3_slice(&shader.kernel, kernel)
-                    .set_vector2(&shader.noise_scale, &noise_scale)
-                    .set_f32(&shader.radius, radius)
-                    .set_matrix4(&shader.world_view_proj_matrix, &frame_matrix)
-                    .set_matrix4(&shader.projection_matrix, &projection_matrix)
-                    .set_matrix4(
-                        &shader.inv_proj_matrix,
-                        &projection_matrix.try_inverse().unwrap_or_default(),
-                    )
-                    .set_matrix3(&shader.view_matrix, &view_matrix);
-            },
         )?;
 
-        self.blur.render(state, self.raw_ao_map())?;
+        self.blur.render(self.raw_ao_map(), uniform_buffer_cache)?;
 
         Ok(stats)
     }

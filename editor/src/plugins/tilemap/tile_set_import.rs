@@ -210,6 +210,8 @@ impl TileSetImporter {
                         ),
                         collider: Default::default(),
                         color: Default::default(),
+                        position: Vector2::new(x as i32, y as i32),
+                        properties: Default::default(),
                     });
                 }
             }
@@ -239,7 +241,7 @@ impl TileSetImporter {
                     if let Some(texture) = item.resource::<Texture>() {
                         let mut material = Material::standard_2d();
 
-                        material.set_property("diffuseTexture", texture).unwrap();
+                        material.bind("diffuseTexture", texture);
 
                         self.set_material(
                             Some(MaterialResource::new_ok(ResourceKind::Embedded, material)),

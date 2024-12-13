@@ -22,24 +22,26 @@ use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector3},
         color::Color,
-        math::{Matrix4Ext, Rect},
-        scope_profile,
+        math::Rect,
     },
     renderer::{
-        bundle::{BundleRenderContext, ObserverInfo, RenderDataBundleStorage},
-        cache::{shader::ShaderCache, texture::TextureCache},
+        bundle::{
+            BundleRenderContext, ObserverInfo, RenderDataBundleStorage,
+            RenderDataBundleStorageOptions,
+        },
+        cache::{shader::ShaderCache, texture::TextureCache, uniform::UniformMemoryAllocator},
         framework::{
             error::FrameworkError,
             framebuffer::{Attachment, AttachmentKind, FrameBuffer},
             gpu_texture::{
-                Coordinate, CubeMapFace, GpuTexture, GpuTextureKind, MagnificationFilter,
+                CubeMapFace, GpuTexture, GpuTextureDescriptor, GpuTextureKind, MagnificationFilter,
                 MinificationFilter, PixelKind, WrapMode,
             },
-            state::PipelineState,
+            server::GraphicsServer,
         },
         shadow::cascade_size,
-        storage::MatrixStorageCache,
-        GeometryCache, RenderPassStatistics, ShadowMapPrecision, POINT_SHADOW_PASS_NAME,
+        FallbackResources, GeometryCache, RenderPassStatistics, ShadowMapPrecision,
+        POINT_SHADOW_PASS_NAME,
     },
     scene::graph::Graph,
 };
@@ -47,7 +49,7 @@ use std::{cell::RefCell, rc::Rc};
 
 pub struct PointShadowMapRenderer {
     precision: ShadowMapPrecision,
-    cascades: [FrameBuffer; 3],
+    cascades: [Box<dyn FrameBuffer>; 3],
     size: usize,
     faces: [PointShadowCubeMapFace; 6],
 }
@@ -59,7 +61,7 @@ struct PointShadowCubeMapFace {
 }
 
 pub(crate) struct PointShadowMapRenderContext<'a> {
-    pub state: &'a PipelineState,
+    pub state: &'a dyn GraphicsServer,
     pub graph: &'a Graph,
     pub light_pos: Vector3<f32>,
     pub light_radius: f32,
@@ -67,81 +69,54 @@ pub(crate) struct PointShadowMapRenderContext<'a> {
     pub cascade: usize,
     pub shader_cache: &'a mut ShaderCache,
     pub texture_cache: &'a mut TextureCache,
-    pub normal_dummy: Rc<RefCell<GpuTexture>>,
-    pub white_dummy: Rc<RefCell<GpuTexture>>,
-    pub black_dummy: Rc<RefCell<GpuTexture>>,
-    pub volume_dummy: Rc<RefCell<GpuTexture>>,
-    pub matrix_storage: &'a mut MatrixStorageCache,
+    pub fallback_resources: &'a FallbackResources,
+    pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
 }
 
 impl PointShadowMapRenderer {
     pub fn new(
-        state: &PipelineState,
+        server: &dyn GraphicsServer,
         size: usize,
         precision: ShadowMapPrecision,
     ) -> Result<Self, FrameworkError> {
         fn make_cascade(
-            state: &PipelineState,
+            server: &dyn GraphicsServer,
             size: usize,
             precision: ShadowMapPrecision,
-        ) -> Result<FrameBuffer, FrameworkError> {
-            let depth = {
-                let kind = GpuTextureKind::Rectangle {
+        ) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
+            let depth = server.create_2d_render_target(
+                match precision {
+                    ShadowMapPrecision::Full => PixelKind::D32F,
+                    ShadowMapPrecision::Half => PixelKind::D16,
+                },
+                size,
+                size,
+            )?;
+
+            let cube_map = server.create_texture(GpuTextureDescriptor {
+                kind: GpuTextureKind::Cube {
                     width: size,
                     height: size,
-                };
-                let mut texture = GpuTexture::new(
-                    state,
-                    kind,
-                    match precision {
-                        ShadowMapPrecision::Full => PixelKind::D32F,
-                        ShadowMapPrecision::Half => PixelKind::D16,
-                    },
-                    MinificationFilter::Nearest,
-                    MagnificationFilter::Nearest,
-                    1,
-                    None,
-                )?;
-                texture
-                    .bind_mut(state, 0)
-                    .set_minification_filter(MinificationFilter::Nearest)
-                    .set_magnification_filter(MagnificationFilter::Nearest)
-                    .set_wrap(Coordinate::S, WrapMode::ClampToEdge)
-                    .set_wrap(Coordinate::T, WrapMode::ClampToEdge);
-                texture
-            };
+                },
+                pixel_kind: PixelKind::R16F,
+                min_filter: MinificationFilter::Nearest,
+                mag_filter: MagnificationFilter::Nearest,
+                mip_count: 1,
+                s_wrap_mode: WrapMode::ClampToEdge,
+                t_wrap_mode: WrapMode::ClampToEdge,
+                r_wrap_mode: WrapMode::ClampToEdge,
+                anisotropy: 1.0,
+                data: None,
+            })?;
 
-            let cube_map = {
-                let kind = GpuTextureKind::Cube {
-                    width: size,
-                    height: size,
-                };
-                let mut texture = GpuTexture::new(
-                    state,
-                    kind,
-                    PixelKind::R16F,
-                    MinificationFilter::Nearest,
-                    MagnificationFilter::Nearest,
-                    1,
-                    None,
-                )?;
-                texture
-                    .bind_mut(state, 0)
-                    .set_wrap(Coordinate::S, WrapMode::ClampToEdge)
-                    .set_wrap(Coordinate::T, WrapMode::ClampToEdge)
-                    .set_wrap(Coordinate::R, WrapMode::ClampToEdge);
-                texture
-            };
-
-            FrameBuffer::new(
-                state,
+            server.create_frame_buffer(
                 Some(Attachment {
                     kind: AttachmentKind::Depth,
-                    texture: Rc::new(RefCell::new(depth)),
+                    texture: depth,
                 }),
                 vec![Attachment {
                     kind: AttachmentKind::Color,
-                    texture: Rc::new(RefCell::new(cube_map)),
+                    texture: cube_map,
                 }],
             )
         }
@@ -149,9 +124,9 @@ impl PointShadowMapRenderer {
         Ok(Self {
             precision,
             cascades: [
-                make_cascade(state, cascade_size(size, 0), precision)?,
-                make_cascade(state, cascade_size(size, 1), precision)?,
-                make_cascade(state, cascade_size(size, 2), precision)?,
+                make_cascade(server, cascade_size(size, 0), precision)?,
+                make_cascade(server, cascade_size(size, 1), precision)?,
+                make_cascade(server, cascade_size(size, 2), precision)?,
             ],
             size,
             faces: [
@@ -197,7 +172,7 @@ impl PointShadowMapRenderer {
         self.precision
     }
 
-    pub fn cascade_texture(&self, cascade: usize) -> Rc<RefCell<GpuTexture>> {
+    pub fn cascade_texture(&self, cascade: usize) -> Rc<RefCell<dyn GpuTexture>> {
         self.cascades[cascade].color_attachments()[0]
             .texture
             .clone()
@@ -207,8 +182,6 @@ impl PointShadowMapRenderer {
         &mut self,
         args: PointShadowMapRenderContext,
     ) -> Result<RenderPassStatistics, FrameworkError> {
-        scope_profile!();
-
         let mut statistics = RenderPassStatistics::default();
 
         let PointShadowMapRenderContext {
@@ -220,14 +193,11 @@ impl PointShadowMapRenderer {
             cascade,
             shader_cache,
             texture_cache,
-            normal_dummy,
-            white_dummy,
-            black_dummy,
-            volume_dummy,
-            matrix_storage,
+            fallback_resources,
+            uniform_memory_allocator,
         } = args;
 
-        let framebuffer = &mut self.cascades[cascade];
+        let framebuffer = &mut *self.cascades[cascade];
         let cascade_size = cascade_size(self.size, cascade);
 
         let viewport = Rect::new(0, 0, cascade_size as i32, cascade_size as i32);
@@ -238,13 +208,8 @@ impl PointShadowMapRenderer {
             Matrix4::new_perspective(1.0, std::f32::consts::FRAC_PI_2, z_near, z_far);
 
         for face in self.faces.iter() {
-            framebuffer.set_cubemap_face(state, 0, face.face).clear(
-                state,
-                viewport,
-                Some(Color::WHITE),
-                Some(1.0),
-                None,
-            );
+            framebuffer.set_cubemap_face(0, face.face);
+            framebuffer.clear(viewport, Some(Color::WHITE), Some(1.0), None);
 
             let light_look_at = light_pos + face.look;
             let light_view_matrix = Matrix4::look_at_rh(
@@ -252,11 +217,6 @@ impl PointShadowMapRenderer {
                 &Point3::from(light_look_at),
                 &face.up,
             );
-            let light_view_projection_matrix = light_projection_matrix * light_view_matrix;
-
-            let inv_view = light_view_matrix.try_inverse().unwrap();
-            let camera_up = inv_view.up();
-            let camera_side = inv_view.side();
 
             let bundle_storage = RenderDataBundleStorage::from_graph(
                 graph,
@@ -268,38 +228,30 @@ impl PointShadowMapRenderer {
                     projection_matrix: light_projection_matrix,
                 },
                 POINT_SHADOW_PASS_NAME.clone(),
+                RenderDataBundleStorageOptions {
+                    collect_lights: false,
+                },
             );
 
-            for bundle in bundle_storage.bundles.iter() {
-                statistics += bundle.render_to_frame_buffer(
-                    state,
-                    geom_cache,
-                    shader_cache,
-                    |_| true,
-                    BundleRenderContext {
-                        texture_cache,
-                        render_pass_name: &POINT_SHADOW_PASS_NAME,
-                        frame_buffer: framebuffer,
-                        viewport,
-                        matrix_storage,
-                        view_projection_matrix: &light_view_projection_matrix,
-                        camera_position: &Default::default(),
-                        camera_up_vector: &camera_up,
-                        camera_side_vector: &camera_side,
-                        z_near,
-                        use_pom: false,
-                        light_position: &light_pos,
-                        normal_dummy: &normal_dummy,
-                        white_dummy: &white_dummy,
-                        black_dummy: &black_dummy,
-                        volume_dummy: &volume_dummy,
-                        light_data: None,            // TODO
-                        ambient_light: Color::WHITE, // TODO
-                        scene_depth: None,
-                        z_far,
-                    },
-                )?;
-            }
+            statistics += bundle_storage.render_to_frame_buffer(
+                state,
+                geom_cache,
+                shader_cache,
+                |_| true,
+                |_| true,
+                BundleRenderContext {
+                    texture_cache,
+                    render_pass_name: &POINT_SHADOW_PASS_NAME,
+                    frame_buffer: framebuffer,
+                    viewport,
+                    uniform_memory_allocator,
+                    use_pom: false,
+                    light_position: &light_pos,
+                    fallback_resources,
+                    ambient_light: Color::WHITE, // TODO
+                    scene_depth: None,
+                },
+            )?;
         }
 
         Ok(statistics)

@@ -48,15 +48,11 @@ use crate::{
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowMessage, WindowTitle},
             BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
-            VerticalAlignment, BRUSH_BRIGHT_BLUE, BRUSH_DARKEST,
+            VerticalAlignment,
         },
-        renderer::framework::state::PolygonFillMode,
+        renderer::framework::PolygonFillMode,
         resource::texture::TextureResource,
         scene::camera::Projection,
-    },
-    gui::{
-        make_dropdown_list_option, make_dropdown_list_option_universal,
-        make_dropdown_list_option_with_height, make_image_button_with_tooltip,
     },
     load_image,
     message::MessageSender,
@@ -68,8 +64,13 @@ use crate::{
     DropdownListBuilder, GameScene, Message, Mode, SaveSceneConfirmationDialogAction,
     SceneContainer, Settings,
 };
+use fyrox::gui::style::resource::StyleResourceExt;
+use fyrox::gui::style::Style;
+use fyrox::gui::utils::{
+    make_dropdown_list_option, make_dropdown_list_option_universal,
+    make_dropdown_list_option_with_height, make_image_button_with_tooltip,
+};
 use std::{
-    cmp::Ordering,
     ops::Deref,
     sync::mpsc::{self, Receiver},
 };
@@ -112,7 +113,7 @@ impl GridSnappingMenu {
                     ctx,
                     22.0,
                     22.0,
-                    load_image(include_bytes!("../../resources/grid_snapping.png")),
+                    load_image!("../../resources/grid_snapping.png"),
                     "Snapping Options",
                     None,
                 );
@@ -216,7 +217,7 @@ impl GridSnappingMenu {
                         ui.send_message(DecoratorMessage::selected_brush(
                             *button.decorator,
                             MessageDirection::ToWidget,
-                            BRUSH_BRIGHT_BLUE,
+                            ui.style.property(Style::BRUSH_BRIGHT_BLUE),
                         ));
 
                         ui.send_message(DecoratorMessage::select(
@@ -417,13 +418,11 @@ impl SceneViewer {
                                             .with_width(16.0)
                                             .with_height(16.0)
                                             .with_margin(Thickness::uniform(4.0))
-                                            .with_background(Brush::Solid(Color::opaque(
-                                                0, 200, 0,
-                                            ))),
+                                            .with_background(
+                                                Brush::Solid(Color::opaque(0, 200, 0)).into(),
+                                            ),
                                     )
-                                    .with_opt_texture(load_image(include_bytes!(
-                                        "../../resources/play.png"
-                                    )))
+                                    .with_opt_texture(load_image!("../../resources/play.png"))
                                     .build(ctx),
                                 )
                                 .build(ctx);
@@ -442,13 +441,11 @@ impl SceneViewer {
                                             .with_width(16.0)
                                             .with_height(16.0)
                                             .with_margin(Thickness::uniform(4.0))
-                                            .with_background(Brush::Solid(Color::opaque(
-                                                200, 0, 0,
-                                            ))),
+                                            .with_background(
+                                                Brush::Solid(Color::opaque(200, 0, 0)).into(),
+                                            ),
                                     )
-                                    .with_opt_texture(load_image(include_bytes!(
-                                        "../../resources/stop.png"
-                                    )))
+                                    .with_opt_texture(load_image!("../../resources/stop.png"))
                                     .build(ctx),
                                 )
                                 .build(ctx);
@@ -469,7 +466,7 @@ impl SceneViewer {
         let no_scene_reminder = TextBuilder::new(
             WidgetBuilder::new()
                 .with_hit_test_visibility(false)
-                .with_foreground(BRUSH_DARKEST),
+                .with_foreground(ctx.style.property(Style::BRUSH_DARKEST)),
         )
         .with_text("No scene loaded. Create a new scene (File -> New Scene) or load existing (File -> Load Scene)")
         .with_vertical_text_alignment(VerticalAlignment::Center)
@@ -523,14 +520,18 @@ impl SceneViewer {
                                             selection_frame = BorderBuilder::new(
                                                 WidgetBuilder::new()
                                                     .with_visibility(false)
-                                                    .with_background(Brush::Solid(
-                                                        Color::from_rgba(255, 255, 255, 40),
-                                                    ))
-                                                    .with_foreground(Brush::Solid(Color::opaque(
-                                                        0, 255, 0,
-                                                    ))),
+                                                    .with_background(
+                                                        Brush::Solid(Color::from_rgba(
+                                                            255, 255, 255, 40,
+                                                        ))
+                                                        .into(),
+                                                    )
+                                                    .with_foreground(
+                                                        Brush::Solid(Color::opaque(0, 255, 0))
+                                                            .into(),
+                                                    ),
                                             )
-                                            .with_stroke_thickness(Thickness::uniform(1.0))
+                                            .with_stroke_thickness(Thickness::uniform(1.0).into())
                                             .build(ctx);
                                             selection_frame
                                         }))
@@ -571,6 +572,16 @@ impl SceneViewer {
             grid_snap_menu,
         }
     }
+}
+
+fn fetch_tab_id(tab: &Tab) -> Uuid {
+    tab.user_data
+        .as_ref()
+        .unwrap()
+        .0
+        .downcast_ref::<Uuid>()
+        .cloned()
+        .unwrap()
 }
 
 impl SceneViewer {
@@ -709,16 +720,6 @@ impl SceneViewer {
             } else if message.destination() == self.stop {
                 self.sender.send(Message::SwitchToEditMode);
             }
-        } else if let Some(WidgetMessage::MouseDown { button, .. }) =
-            message.data::<WidgetMessage>()
-        {
-            for &mode_button in self.interaction_modes.values() {
-                if ui.is_node_child_of(message.destination(), mode_button)
-                    && *button == MouseButton::Right
-                {
-                    self.sender.send(Message::OpenSettings);
-                }
-            }
         } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
             if message.direction == MessageDirection::FromWidget {
                 if message.destination() == self.camera_projection {
@@ -770,21 +771,39 @@ impl SceneViewer {
                 && message.direction() == MessageDirection::FromWidget
             {
                 match msg {
-                    TabControlMessage::CloseTab(tab_index) => {
-                        if let Some(entry) = scenes.try_get(*tab_index) {
-                            if entry.need_save() {
-                                self.sender.send(Message::OpenSaveSceneConfirmationDialog {
-                                    id: entry.id,
-                                    action: SaveSceneConfirmationDialogAction::CloseScene(entry.id),
-                                });
-                            } else {
-                                self.sender.send(Message::CloseScene(entry.id));
+                    TabControlMessage::CloseTabByUuid(uuid) => {
+                        if let Some(tab_id) = ui
+                            .node(self.tab_control)
+                            .component_ref::<TabControl>()
+                            .expect("Must be TabControl!")
+                            .get_tab_by_uuid(*uuid)
+                            .map(fetch_tab_id)
+                        {
+                            if let Some(entry) = scenes.entry_by_scene_id(tab_id) {
+                                if entry.need_save() {
+                                    self.sender.send(Message::OpenSaveSceneConfirmationDialog {
+                                        id: entry.id,
+                                        action: SaveSceneConfirmationDialogAction::CloseScene(
+                                            entry.id,
+                                        ),
+                                    });
+                                } else {
+                                    self.sender.send(Message::CloseScene(entry.id));
+                                }
                             }
                         }
                     }
-                    TabControlMessage::ActiveTab(Some(active_tab)) => {
-                        if let Some(entry) = scenes.try_get(*active_tab) {
-                            self.sender.send(Message::SetCurrentScene(entry.id));
+                    TabControlMessage::ActiveTabUuid(Some(uuid)) => {
+                        let tab_id = ui
+                            .node(self.tab_control)
+                            .component_ref::<TabControl>()
+                            .expect("Must be TabControl!")
+                            .get_tab_by_uuid(*uuid)
+                            .map(fetch_tab_id);
+                        if let Some(tab_id) = tab_id {
+                            if let Some(entry) = scenes.entry_by_scene_id(tab_id) {
+                                self.sender.send(Message::SetCurrentScene(entry.id));
+                            }
                         }
                     }
                     _ => (),
@@ -920,15 +939,6 @@ impl SceneViewer {
 
     pub fn sync_to_model(&self, scenes: &SceneContainer, engine: &mut Engine) {
         // Sync tabs first.
-        fn fetch_tab_id(tab: &Tab) -> Uuid {
-            tab.user_data
-                .as_ref()
-                .unwrap()
-                .0
-                .downcast_ref::<Uuid>()
-                .cloned()
-                .unwrap()
-        }
 
         let tabs = engine
             .user_interfaces
@@ -938,58 +948,47 @@ impl SceneViewer {
             .expect("Must be TabControl!")
             .tabs
             .clone();
-        match tabs.len().cmp(&scenes.len()) {
-            Ordering::Less => {
-                // Some scenes were added.
-                for entry in scenes.iter() {
-                    if tabs.iter().all(|tab| fetch_tab_id(tab) != entry.id) {
-                        let header =
-                            TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-                                left: 4.0,
-                                top: 2.0,
-                                right: 4.0,
-                                bottom: 2.0,
-                            }))
-                            .with_text(entry.name())
-                            .build(&mut engine.user_interfaces.first_mut().build_ctx());
-
-                        send_sync_message(
-                            engine.user_interfaces.first(),
-                            TabControlMessage::add_tab(
-                                self.tab_control,
-                                MessageDirection::ToWidget,
-                                TabDefinition {
-                                    header,
-                                    content: Default::default(),
-                                    can_be_closed: true,
-                                    user_data: Some(TabUserData::new(entry.id)),
-                                },
-                            ),
-                        );
-                    }
-                }
-            }
-            Ordering::Equal => {
-                // Nothing to do.
-            }
-            Ordering::Greater => {
-                // Some scenes were removed.
-                for (tab_index, tab) in tabs.iter().enumerate() {
-                    let tab_scene = fetch_tab_id(tab);
-                    if scenes.iter().all(|s| tab_scene != s.id) {
-                        send_sync_message(
-                            engine.user_interfaces.first(),
-                            TabControlMessage::remove_tab(
-                                self.tab_control,
-                                MessageDirection::ToWidget,
-                                tab_index,
-                            ),
-                        );
-                    }
-                }
+        // Remove any excess tabs.
+        for tab in tabs.iter() {
+            let tab_scene = fetch_tab_id(tab);
+            if scenes.iter().all(|s| tab_scene != s.id) {
+                send_sync_message(
+                    engine.user_interfaces.first(),
+                    TabControlMessage::remove_tab_by_uuid(
+                        self.tab_control,
+                        MessageDirection::ToWidget,
+                        tab.uuid,
+                    ),
+                );
             }
         }
+        // Add any missing tabs.
+        for entry in scenes.iter() {
+            if tabs.iter().all(|tab| fetch_tab_id(tab) != entry.id) {
+                let header = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+                    left: 4.0,
+                    top: 2.0,
+                    right: 4.0,
+                    bottom: 2.0,
+                }))
+                .with_text(entry.name())
+                .build(&mut engine.user_interfaces.first_mut().build_ctx());
 
+                send_sync_message(
+                    engine.user_interfaces.first(),
+                    TabControlMessage::add_tab(
+                        self.tab_control,
+                        MessageDirection::ToWidget,
+                        TabDefinition {
+                            header,
+                            content: Default::default(),
+                            can_be_closed: true,
+                            user_data: Some(TabUserData::new(entry.id)),
+                        },
+                    ),
+                );
+            }
+        }
         for tab in tabs.iter() {
             if let Some(scene) = scenes.entry_by_scene_id(fetch_tab_id(tab)) {
                 engine
@@ -1007,14 +1006,34 @@ impl SceneViewer {
             }
         }
 
-        send_sync_message(
-            engine.user_interfaces.first(),
-            TabControlMessage::active_tab(
-                self.tab_control,
-                MessageDirection::ToWidget,
-                scenes.current_scene_index(),
+        match scenes.current_scene_entry_ref().map(|e| e.id) {
+            Some(scene_uuid) => {
+                // Try to find the tab for the current scene.
+                // If we cannot find it, do nothing because the correct tab will be activated elsewhere.
+                if let Some(tab_uuid) = tabs
+                    .iter()
+                    .find(|t| fetch_tab_id(t) == scene_uuid)
+                    .map(|t| t.uuid)
+                {
+                    send_sync_message(
+                        engine.user_interfaces.first(),
+                        TabControlMessage::active_tab_uuid(
+                            self.tab_control,
+                            MessageDirection::ToWidget,
+                            Some(tab_uuid),
+                        ),
+                    )
+                }
+            }
+            None => send_sync_message(
+                engine.user_interfaces.first(),
+                TabControlMessage::active_tab_uuid(
+                    self.tab_control,
+                    MessageDirection::ToWidget,
+                    None,
+                ),
             ),
-        );
+        }
 
         // Then sync to the current scene.
         if let Some(entry) = scenes.current_scene_entry_ref() {

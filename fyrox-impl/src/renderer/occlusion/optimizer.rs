@@ -21,16 +21,20 @@
 use crate::{
     core::{color::Color, math::Rect, ImmutableString},
     renderer::{
+        cache::uniform::UniformBufferCache,
         framework::{
             error::FrameworkError,
-            framebuffer::{Attachment, AttachmentKind, DrawParameters, FrameBuffer},
-            geometry_buffer::{ElementRange, GeometryBuffer},
-            gpu_program::{GpuProgram, UniformLocation},
-            gpu_texture::{
-                GpuTexture, GpuTextureKind, MagnificationFilter, MinificationFilter, PixelKind,
+            framebuffer::{
+                Attachment, AttachmentKind, BufferLocation, FrameBuffer, ResourceBindGroup,
+                ResourceBinding,
             },
-            pixel_buffer::PixelBuffer,
-            state::{ColorMask, PipelineState},
+            geometry_buffer::GeometryBuffer,
+            gpu_program::{GpuProgram, UniformLocation},
+            gpu_texture::{GpuTexture, PixelKind},
+            read_buffer::AsyncReadBuffer,
+            server::GraphicsServer,
+            uniform::StaticUniformBuffer,
+            ColorMask, DrawParameters, ElementRange,
         },
         make_viewport_matrix,
     },
@@ -38,36 +42,30 @@ use crate::{
 use std::{cell::RefCell, rc::Rc};
 
 struct VisibilityOptimizerShader {
-    program: GpuProgram,
-    view_projection: UniformLocation,
-    tile_size: UniformLocation,
+    program: Box<dyn GpuProgram>,
+    uniform_buffer_binding: usize,
     visibility_buffer: UniformLocation,
 }
 
 impl VisibilityOptimizerShader {
-    fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("../shaders/visibility_optimizer_fs.glsl");
         let vertex_source = include_str!("../shaders/visibility_optimizer_vs.glsl");
-        let program = GpuProgram::from_source(
-            state,
-            "VisibilityOptimizerShader",
-            vertex_source,
-            fragment_source,
-        )?;
+        let program =
+            server.create_program("VisibilityOptimizerShader", vertex_source, fragment_source)?;
         Ok(Self {
-            view_projection: program
-                .uniform_location(state, &ImmutableString::new("viewProjection"))?,
-            tile_size: program.uniform_location(state, &ImmutableString::new("tileSize"))?,
+            uniform_buffer_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
             visibility_buffer: program
-                .uniform_location(state, &ImmutableString::new("visibilityBuffer"))?,
+                .uniform_location(&ImmutableString::new("visibilityBuffer"))?,
             program,
         })
     }
 }
 
 pub struct VisibilityBufferOptimizer {
-    framebuffer: FrameBuffer,
-    pixel_buffer: PixelBuffer<u32>,
+    framebuffer: Box<dyn FrameBuffer>,
+    pixel_buffer: Box<dyn AsyncReadBuffer>,
     shader: VisibilityOptimizerShader,
     w_tiles: usize,
     h_tiles: usize,
@@ -75,36 +73,23 @@ pub struct VisibilityBufferOptimizer {
 
 impl VisibilityBufferOptimizer {
     pub fn new(
-        state: &PipelineState,
+        server: &dyn GraphicsServer,
         w_tiles: usize,
         h_tiles: usize,
     ) -> Result<Self, FrameworkError> {
-        let optimized_visibility_buffer = GpuTexture::new(
-            state,
-            GpuTextureKind::Rectangle {
-                width: w_tiles,
-                height: h_tiles,
-            },
-            PixelKind::R32UI,
-            MinificationFilter::Nearest,
-            MagnificationFilter::Nearest,
-            1,
-            None,
-        )?;
-
-        let optimized_visibility_buffer = Rc::new(RefCell::new(optimized_visibility_buffer));
+        let optimized_visibility_buffer =
+            server.create_2d_render_target(PixelKind::R32UI, w_tiles, h_tiles)?;
 
         Ok(Self {
-            framebuffer: FrameBuffer::new(
-                state,
+            framebuffer: server.create_frame_buffer(
                 None,
                 vec![Attachment {
                     kind: AttachmentKind::Color,
                     texture: optimized_visibility_buffer,
                 }],
             )?,
-            pixel_buffer: PixelBuffer::new(state, w_tiles * h_tiles)?,
-            shader: VisibilityOptimizerShader::new(state)?,
+            pixel_buffer: server.create_async_read_buffer(size_of::<u32>(), w_tiles * h_tiles)?,
+            shader: VisibilityOptimizerShader::new(server)?,
             w_tiles,
             h_tiles,
         })
@@ -114,49 +99,62 @@ impl VisibilityBufferOptimizer {
         self.pixel_buffer.is_request_running()
     }
 
-    pub fn read_visibility_mask(&mut self, state: &PipelineState) -> Option<Vec<u32>> {
-        self.pixel_buffer.try_read(state)
+    pub fn read_visibility_mask(&mut self) -> Option<Vec<u32>> {
+        self.pixel_buffer.try_read_of_type()
     }
 
     pub fn optimize(
         &mut self,
-        state: &PipelineState,
-        visibility_buffer: &Rc<RefCell<GpuTexture>>,
-        unit_quad: &GeometryBuffer,
+        visibility_buffer: &Rc<RefCell<dyn GpuTexture>>,
+        unit_quad: &dyn GeometryBuffer,
         tile_size: i32,
+        uniform_buffer_cache: &mut UniformBufferCache,
     ) -> Result<(), FrameworkError> {
         let viewport = Rect::new(0, 0, self.w_tiles as i32, self.h_tiles as i32);
 
         self.framebuffer
-            .clear(state, viewport, Some(Color::TRANSPARENT), None, None);
+            .clear(viewport, Some(Color::TRANSPARENT), None, None);
 
         let matrix = make_viewport_matrix(viewport);
 
         self.framebuffer.draw(
             unit_quad,
-            state,
             viewport,
-            &self.shader.program,
+            &*self.shader.program,
             &DrawParameters {
                 cull_face: None,
                 color_write: ColorMask::all(true),
                 depth_write: false,
                 stencil_test: None,
-                depth_test: false,
+                depth_test: None,
                 blend: None,
                 stencil_op: Default::default(),
+                scissor_box: None,
             },
+            &[ResourceBindGroup {
+                bindings: &[
+                    ResourceBinding::texture(
+                        &visibility_buffer.clone(),
+                        &self.shader.visibility_buffer,
+                    ),
+                    ResourceBinding::Buffer {
+                        buffer: uniform_buffer_cache.write(
+                            StaticUniformBuffer::<256>::new()
+                                .with(&matrix)
+                                .with(&tile_size),
+                        )?,
+                        binding: BufferLocation::Auto {
+                            shader_location: self.shader.uniform_buffer_binding,
+                        },
+                        data_usage: Default::default(),
+                    },
+                ],
+            }],
             ElementRange::Full,
-            |mut program_binding| {
-                program_binding
-                    .set_matrix4(&self.shader.view_projection, &matrix)
-                    .set_texture(&self.shader.visibility_buffer, visibility_buffer)
-                    .set_i32(&self.shader.tile_size, tile_size);
-            },
         )?;
 
         self.pixel_buffer
-            .schedule_pixels_transfer(state, &self.framebuffer, 0, None)?;
+            .schedule_pixels_transfer(&*self.framebuffer, 0, None)?;
 
         Ok(())
     }

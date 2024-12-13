@@ -22,14 +22,12 @@ use crate::{
     fyrox::{
         core::{
             algebra::{Vector2, Vector3},
-            color::Color,
             pool::Handle,
             uuid::Uuid,
             TypeUuidProvider,
         },
         gui::{
             border::BorderBuilder,
-            brush::Brush,
             button::ButtonBuilder,
             decorator::DecoratorBuilder,
             image::ImageBuilder,
@@ -37,17 +35,18 @@ use crate::{
             message::{KeyCode, UiMessage},
             utils::make_simple_tooltip,
             widget::WidgetBuilder,
-            BuildContext, Thickness, UiNode, BRUSH_BRIGHT_BLUE, BRUSH_DARKER, BRUSH_LIGHT,
-            BRUSH_LIGHTER, BRUSH_LIGHTEST,
+            BuildContext, Thickness, UiNode,
         },
         scene::{camera::Projection, graph::Graph, node::Node},
     },
-    load_image,
+    load_image_internal,
     message::MessageSender,
     scene::{controller::SceneController, Selection},
     settings::Settings,
     Engine, Message,
 };
+use fyrox::gui::style::resource::StyleResourceExt;
+use fyrox::gui::style::Style;
 use std::any::Any;
 
 pub mod gizmo;
@@ -211,27 +210,29 @@ pub fn make_interaction_mode_button(
     )
     .with_back(
         DecoratorBuilder::new(
-            BorderBuilder::new(WidgetBuilder::new().with_foreground(BRUSH_DARKER))
-                .with_pad_by_corner_radius(false)
-                .with_corner_radius(4.0)
-                .with_stroke_thickness(Thickness::uniform(1.0)),
+            BorderBuilder::new(
+                WidgetBuilder::new().with_foreground(ctx.style.property(Style::BRUSH_DARKER)),
+            )
+            .with_pad_by_corner_radius(false)
+            .with_corner_radius(4.0f32.into())
+            .with_stroke_thickness(Thickness::uniform(1.0).into()),
         )
-        .with_normal_brush(BRUSH_LIGHT)
-        .with_hover_brush(BRUSH_LIGHTER)
-        .with_pressed_brush(BRUSH_LIGHTEST)
-        .with_selected_brush(BRUSH_BRIGHT_BLUE)
+        .with_normal_brush(ctx.style.property(Style::BRUSH_LIGHT))
+        .with_hover_brush(ctx.style.property(Style::BRUSH_LIGHTER))
+        .with_pressed_brush(ctx.style.property(Style::BRUSH_LIGHTEST))
+        .with_selected_brush(ctx.style.property(Style::BRUSH_BRIGHT_BLUE))
         .with_selected(selected)
         .build(ctx),
     )
     .with_content(
         ImageBuilder::new(
             WidgetBuilder::new()
-                .with_background(Brush::Solid(Color::opaque(220, 220, 220)))
+                .with_background(ctx.style.property(Style::BRUSH_TEXT))
                 .with_margin(Thickness::uniform(2.0))
                 .with_width(23.0)
                 .with_height(23.0),
         )
-        .with_opt_texture(load_image(image))
+        .with_opt_texture(load_image_internal(image))
         .build(ctx),
     )
     .build(ctx)

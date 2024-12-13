@@ -35,14 +35,13 @@ use crate::{
             untyped::{ResourceHeader, ResourceKind, UntypedResource},
         },
         core::{
-            color::Color, futures::executor::block_on, log::Log, make_relative_path,
-            parking_lot::lock_api::Mutex, pool::Handle, scope_profile, TypeUuidProvider, Uuid,
+            futures::executor::block_on, log::Log, make_relative_path,
+            parking_lot::lock_api::Mutex, pool::Handle, TypeUuidProvider, Uuid,
         },
         engine::Engine,
         graph::BaseSceneGraph,
         gui::{
             border::BorderBuilder,
-            brush::Brush,
             button::{ButtonBuilder, ButtonMessage},
             copypasta::ClipboardProvider,
             file_browser::{FileBrowserBuilder, FileBrowserMessage, Filter},
@@ -61,20 +60,24 @@ use crate::{
             window::{WindowBuilder, WindowMessage, WindowTitle},
             wrap_panel::WrapPanelBuilder,
             BuildContext, HorizontalAlignment, Orientation, RcUiNodeHandle, Thickness, UiNode,
-            UserInterface, VerticalAlignment, BRUSH_DARK,
+            UserInterface, VerticalAlignment,
         },
         resource::{model::Model, texture::Texture},
         scene::sound::SoundBuffer,
         walkdir,
     },
-    gui::{make_dropdown_list_option, make_image_button_with_tooltip},
     load_image,
     message::MessageSender,
     preview::PreviewPanel,
     utils::window_content,
     Message, Mode,
 };
+use fyrox::gui::style::resource::StyleResourceExt;
+use fyrox::gui::style::Style;
+use fyrox::gui::utils::{make_dropdown_list_option, make_image_button_with_tooltip};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::fs::File;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     ffi::OsStr,
@@ -94,6 +97,7 @@ pub mod preview;
 struct ContextMenu {
     menu: RcUiNodeHandle,
     open: Handle<UiNode>,
+    duplicate: Handle<UiNode>,
     copy_path: Handle<UiNode>,
     copy_file_name: Handle<UiNode>,
     show_in_explorer: Handle<UiNode>,
@@ -106,8 +110,7 @@ fn execute_command(command: &mut Command) {
     match command.spawn() {
         Ok(mut process) => Log::verify(process.wait()),
         Err(err) => Log::err(format!(
-            "Failed to show asset item in explorer. Reason: {:?}",
-            err
+            "Failed to show asset item in explorer. Reason: {err:?}"
         )),
     }
 }
@@ -130,11 +133,24 @@ fn put_path_to_clipboard(engine: &mut Engine, path: &OsStr) {
     }
 }
 
+fn make_unique_path(parent: &Path, stem: &str, ext: &str) -> PathBuf {
+    let mut suffix = "_Copy".to_string();
+    loop {
+        let trial_copy_path = parent.join(format!("{stem}{suffix}.{ext}"));
+        if trial_copy_path.exists() {
+            suffix += "_Copy";
+        } else {
+            return trial_copy_path;
+        }
+    }
+}
+
 impl ContextMenu {
     pub fn new(ctx: &mut BuildContext) -> Self {
         let delete;
         let show_in_explorer;
         let open;
+        let duplicate;
         let copy_path;
         let copy_file_name;
         let dependencies;
@@ -147,6 +163,12 @@ impl ContextMenu {
                                 .with_content(MenuItemContent::text("Open"))
                                 .build(ctx);
                             open
+                        })
+                        .with_child({
+                            duplicate = MenuItemBuilder::new(WidgetBuilder::new())
+                                .with_content(MenuItemContent::text("Duplicate"))
+                                .build(ctx);
+                            duplicate
                         })
                         .with_child({
                             copy_path = MenuItemBuilder::new(WidgetBuilder::new())
@@ -188,6 +210,7 @@ impl ContextMenu {
         Self {
             menu,
             open,
+            duplicate,
             copy_path,
             delete,
             show_in_explorer,
@@ -218,6 +241,53 @@ impl ContextMenu {
                     }
                 } else if message.destination() == self.open {
                     item.open();
+                } else if message.destination() == self.duplicate {
+                    if let Some(resource) = item.untyped_resource() {
+                        match resource.kind() {
+                            ResourceKind::External(path) => {
+                                if let Some(built_in) = engine
+                                    .resource_manager
+                                    .state()
+                                    .built_in_resources
+                                    .get(&path)
+                                {
+                                    if let Some(data_source) = built_in.data_source.as_ref() {
+                                        let final_copy_path = make_unique_path(
+                                            Path::new("."),
+                                            path.to_str().unwrap(),
+                                            &data_source.extension,
+                                        );
+
+                                        match File::create(&final_copy_path) {
+                                            Ok(mut file) => {
+                                                Log::verify(file.write_all(&data_source.bytes));
+                                            }
+                                            Err(err) => {
+                                                Log::err(format!(
+                                                "Failed to create a file for resource at path {}. \
+                                                Reason: {:?}", final_copy_path.display(), err
+                                            ))
+                                            }
+                                        }
+                                    }
+                                } else if let Ok(canonical_path) = path.canonicalize() {
+                                    if let (Some(parent), Some(stem), Some(ext)) = (
+                                        canonical_path.parent(),
+                                        canonical_path.file_stem(),
+                                        canonical_path.extension(),
+                                    ) {
+                                        let stem = stem.to_string_lossy().to_string();
+                                        let ext = ext.to_string_lossy().to_string();
+                                        let final_copy_path = make_unique_path(parent, &stem, &ext);
+                                        Log::verify(std::fs::copy(canonical_path, final_copy_path));
+                                    }
+                                }
+                            }
+                            ResourceKind::Embedded => {
+                                // TODO: Support duplicating embedded resources.
+                            }
+                        }
+                    }
                 } else if message.destination() == self.copy_path {
                     if let Ok(canonical_path) = item.path.canonicalize() {
                         put_path_to_clipboard(engine, canonical_path.as_os_str())
@@ -438,7 +508,7 @@ impl ResourceCreator {
 
                             asset_added = true;
                         }
-                        Err(e) => Log::err(format!("Unable to create a resource. Reason: {:?}", e)),
+                        Err(e) => Log::err(format!("Unable to create a resource. Reason: {e:?}")),
                     }
                 }
             }
@@ -551,7 +621,7 @@ impl AssetBrowser {
             ctx,
             18.0,
             18.0,
-            load_image(include_bytes!("../../resources/reimport.png")),
+            load_image!("../../resources/reimport.png"),
             "Refresh",
             Some(1),
         );
@@ -590,7 +660,7 @@ impl AssetBrowser {
                         .with_child(
                             BorderBuilder::new(
                                 WidgetBuilder::new()
-                                    .with_background(BRUSH_DARK)
+                                    .with_background(ctx.style.property(Style::BRUSH_DARK))
                                     .with_child({
                                         folder_browser = FileBrowserBuilder::new(
                                             WidgetBuilder::new()
@@ -641,7 +711,7 @@ impl AssetBrowser {
                             BorderBuilder::new(
                                 WidgetBuilder::new()
                                     .on_column(2)
-                                    .with_foreground(Brush::Solid(Color::opaque(80, 80, 80)))
+                                    .with_foreground(ctx.style.property(Style::BRUSH_LIGHTER))
                                     .with_child(
                                         GridBuilder::new(
                                             WidgetBuilder::new()
@@ -750,7 +820,7 @@ impl AssetBrowser {
             WidgetBuilder::new().with_context_menu(self.context_menu.menu.clone()),
         )
         .with_icon(if is_dir {
-            load_image(include_bytes!("../../resources/folder.png"))
+            load_image!("../../resources/folder.png")
         } else {
             None
         })
@@ -816,8 +886,15 @@ impl AssetBrowser {
         message_sender: &MessageSender,
     ) {
         if let Some(watcher) = self.watcher.as_mut() {
-            Log::verify(watcher.unwatch(&self.selected_path));
-            Log::verify(watcher.watch(path, RecursiveMode::NonRecursive));
+            // notify 6.1.1 crashes otherwise
+            if self.selected_path.exists() {
+                Log::verify(watcher.unwatch(&self.selected_path));
+            }
+            if path.exists() {
+                Log::verify(watcher.watch(path, RecursiveMode::NonRecursive));
+            } else {
+                Log::err(format!("cannot watch non-existing path {:?}", path));
+            }
         }
 
         self.selected_path = path.to_path_buf();
@@ -848,9 +925,7 @@ impl AssetBrowser {
             let asset_item = AssetItemBuilder::new(
                 WidgetBuilder::new().with_context_menu(self.context_menu.menu.clone()),
             )
-            .with_icon(load_image(include_bytes!(
-                "../../resources/folder_return.png"
-            )))
+            .with_icon(load_image!("../../resources/folder_return.png"))
             .with_path(parent_path)
             .build(
                 resource_manager.clone(),
@@ -937,8 +1012,6 @@ impl AssetBrowser {
         engine: &mut Engine,
         sender: MessageSender,
     ) {
-        scope_profile!();
-
         self.inspector.handle_ui_message(message, engine);
         self.preview.handle_message(message, engine);
         if self.context_menu.handle_ui_message(message, engine) {
@@ -1198,9 +1271,8 @@ impl AssetBrowser {
                 }) {
                     if ext == "fbx" {
                         Log::warn(format!(
-                            "Resource {} cannot be scanned for \
-                        references, because FBX cannot be exported.",
-                            kind
+                            "Resource {kind} cannot be scanned for \
+                        references, because FBX cannot be exported."
                         ));
                         return false;
                     }

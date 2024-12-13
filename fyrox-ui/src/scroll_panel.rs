@@ -28,7 +28,7 @@ use crate::{
     brush::Brush,
     core::{
         algebra::Vector2, color::Color, math::Rect, pool::Handle, reflect::prelude::*,
-        scope_profile, type_traits::prelude::*, visitor::prelude::*,
+        type_traits::prelude::*, visitor::prelude::*,
     },
     define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
@@ -37,6 +37,7 @@ use crate::{
     BuildContext, Control, UiNode, UserInterface,
 };
 use fyrox_core::uuid_provider;
+use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
@@ -177,6 +178,18 @@ pub struct ScrollPanel {
     pub horizontal_scroll_allowed: bool,
 }
 
+impl ConstructorProvider<UiNode, UserInterface> for ScrollPanel {
+    fn constructor() -> GraphNodeConstructor<UiNode, UserInterface> {
+        GraphNodeConstructor::new::<Self>()
+            .with_variant("Scroll Panel", |ui| {
+                ScrollPanelBuilder::new(WidgetBuilder::new().with_name("Scroll Panel"))
+                    .build(&mut ui.build_ctx())
+                    .into()
+            })
+            .with_group("Layout")
+    }
+}
+
 crate::define_widget_deref!(ScrollPanel);
 
 uuid_provider!(ScrollPanel = "1ab4936d-58c8-4cf7-b33c-4b56092f4826");
@@ -241,8 +254,6 @@ impl ScrollPanel {
 
 impl Control for ScrollPanel {
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
-
         let size_for_child = Vector2::new(
             if self.horizontal_scroll_allowed {
                 f32::INFINITY
@@ -275,8 +286,6 @@ impl Control for ScrollPanel {
     }
 
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
-
         let children_size = self.children_size(ui);
 
         let child_rect = Rect::new(
@@ -390,12 +399,23 @@ impl ScrollPanelBuilder {
     }
 
     /// Finishes scroll panel building and adds it to the user interface.
-    pub fn build(self, ui: &mut BuildContext) -> Handle<UiNode> {
-        ui.add_node(UiNode::new(ScrollPanel {
-            widget: self.widget_builder.build(),
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+        ctx.add_node(UiNode::new(ScrollPanel {
+            widget: self.widget_builder.build(ctx),
             scroll: self.scroll_value,
             vertical_scroll_allowed: self.vertical_scroll_allowed.unwrap_or(true),
             horizontal_scroll_allowed: self.horizontal_scroll_allowed.unwrap_or(false),
         }))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::scroll_panel::ScrollPanelBuilder;
+    use crate::{test::test_widget_deletion, widget::WidgetBuilder};
+
+    #[test]
+    fn test_deletion() {
+        test_widget_deletion(|ctx| ScrollPanelBuilder::new(WidgetBuilder::new()).build(ctx));
     }
 }

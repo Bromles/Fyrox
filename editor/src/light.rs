@@ -19,7 +19,7 @@
 // SOFTWARE.
 
 use crate::fyrox::{
-    core::{log::Log, pool::Handle, reflect::prelude::*, scope_profile},
+    core::{log::Log, pool::Handle, reflect::prelude::*},
     gui::{
         button::{ButtonBuilder, ButtonMessage},
         formatted_text::WrapMode,
@@ -38,10 +38,8 @@ use crate::fyrox::{
         CancellationToken, Lightmap, LightmapGenerationError, LightmapInputData, ProgressIndicator,
     },
 };
-use crate::{
-    inspector::editors::make_property_editors_container, message::MessageSender, scene::GameScene,
-    Engine, MSG_SYNC_FLAG,
-};
+use crate::plugins::inspector::editors::make_property_editors_container;
+use crate::{message::MessageSender, scene::GameScene, Engine, MSG_SYNC_FLAG};
 use std::{
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
@@ -297,8 +295,6 @@ impl LightPanel {
         game_scene: &GameScene,
         engine: &mut Engine,
     ) {
-        scope_profile!();
-
         if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
             if message.destination() == self.generate {
                 let scene = &mut engine.scenes[game_scene.scene];
@@ -352,8 +348,7 @@ impl LightPanel {
                         })
                     {
                         Log::err(format!(
-                            "Failed to create a new lightmap generation thread. Reason: {}",
-                            e
+                            "Failed to create a new lightmap generation thread. Reason: {e}"
                         ))
                     }
                 }
@@ -389,11 +384,11 @@ impl LightPanel {
             match result {
                 Ok(lightmap) => {
                     if let Err(err) = scene.graph.set_lightmap(lightmap) {
-                        Log::err(format!("Failed to set generated lightmap. Reason: {}", err));
+                        Log::err(format!("Failed to set generated lightmap. Reason: {err}"));
                     }
                 }
                 Err(err) => {
-                    Log::err(format!("Failed to generated a lightmap. Reason: {}", err));
+                    Log::err(format!("Failed to generated a lightmap. Reason: {err}"));
                 }
             }
 

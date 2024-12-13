@@ -21,15 +21,16 @@
 //! Animation blending state machine is a node that takes multiple animations from an animation player and
 //! mixes them in arbitrary way into one animation. See [`AnimationBlendingStateMachine`] docs for more info.
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     scene::{
         animation::prelude::*,
@@ -39,7 +40,8 @@ use crate::{
         Scene,
     },
 };
-use fyrox_graph::{BaseSceneGraph, SceneGraph};
+use fyrox_graph::constructor::ConstructorProvider;
+use fyrox_graph::{BaseSceneGraph, SceneGraph, SceneGraphNode};
 use std::ops::{Deref, DerefMut};
 
 /// Scene specific root motion settings.
@@ -125,7 +127,12 @@ pub trait LayerMaskExt {
 
 impl LayerMaskExt for LayerMask {
     fn from_hierarchy(graph: &Graph, root: Handle<Node>) -> Self {
-        Self::from(graph.traverse_handle_iter(root).collect::<Vec<_>>())
+        Self::from(
+            graph
+                .traverse_iter(root)
+                .map(|(handle, _)| handle)
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -210,10 +217,12 @@ impl LayerMaskExt for LayerMask {
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Visit, Reflect, Clone, Debug, Default)]
+#[derive(Visit, Reflect, Clone, Debug, Default, ComponentProvider)]
 pub struct AnimationBlendingStateMachine {
     base: Base,
+    #[component(include)]
     machine: InheritableVariable<Machine>,
+    #[component(include)]
     animation_player: InheritableVariable<Handle<Node>>,
 }
 
@@ -266,12 +275,29 @@ impl DerefMut for AnimationBlendingStateMachine {
     }
 }
 
-impl NodeTrait for AnimationBlendingStateMachine {
-    crate::impl_query_component!(
-        machine: InheritableVariable<Machine>,
-        animation_player: InheritableVariable<Handle<Node>>
-    );
+impl ConstructorProvider<Node, Graph> for AnimationBlendingStateMachine {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Animation Blending State Machine", |_| {
+                let mut machine = Machine::default();
 
+                let mut layer = MachineLayer::new();
+                layer.set_name("Base Layer");
+
+                machine.add_layer(layer);
+
+                AnimationBlendingStateMachineBuilder::new(
+                    BaseBuilder::new().with_name("Animation Blending State Machine"),
+                )
+                .with_machine(machine)
+                .build_node()
+                .into()
+            })
+            .with_group("Animation")
+    }
+}
+
+impl NodeTrait for AnimationBlendingStateMachine {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         self.base.local_bounding_box()
     }
@@ -288,7 +314,7 @@ impl NodeTrait for AnimationBlendingStateMachine {
         if let Some(animation_player) = context
             .nodes
             .try_borrow_mut(*self.animation_player)
-            .and_then(|n| n.query_component_mut::<AnimationPlayer>())
+            .and_then(|n| n.component_mut::<AnimationPlayer>())
         {
             // Prevent animation player to apply animation to scene nodes. The animation will
             // do than instead.
@@ -307,7 +333,7 @@ impl NodeTrait for AnimationBlendingStateMachine {
         if scene
             .graph
             .try_get(*self.animation_player)
-            .and_then(|n| n.query_component_ref::<AnimationPlayer>())
+            .and_then(|n| n.component_ref::<AnimationPlayer>())
             .is_none()
         {
             Err(

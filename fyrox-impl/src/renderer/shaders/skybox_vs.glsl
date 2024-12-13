@@ -1,6 +1,8 @@
-layout(location = 0) in vec3 vertexPosition;
+layout (location = 0) in vec3 vertexPosition;
 
-uniform mat4 worldViewProjection;
+layout (std140) uniform Uniforms {
+    mat4 worldViewProjection;
+};
 
 out vec3 texCoord;
 

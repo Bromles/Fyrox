@@ -19,9 +19,8 @@
 // SOFTWARE.
 
 use crate::fyrox::{
-    core::{color::Color, pool::Handle, scope_profile},
+    core::pool::Handle,
     gui::{
-        brush::Brush,
         button::ButtonMessage,
         grid::{Column, GridBuilder, Row},
         list_view::{ListViewBuilder, ListViewMessage},
@@ -35,9 +34,11 @@ use crate::fyrox::{
     },
 };
 use crate::{
-    gui::make_image_button_with_tooltip, load_image, message::MessageSender, send_sync_message,
-    utils::window_content, Message, Mode,
+    load_image, message::MessageSender, send_sync_message, utils::window_content, Message, Mode,
 };
+use fyrox::gui::style::resource::StyleResourceExt;
+use fyrox::gui::style::Style;
+use fyrox::gui::utils::make_image_button_with_tooltip;
 
 pub struct CommandStackViewer {
     pub window: Handle<UiNode>,
@@ -67,7 +68,7 @@ impl CommandStackViewer {
                                             ctx,
                                             20.0,
                                             20.0,
-                                            load_image(include_bytes!("../../resources/undo.png")),
+                                            load_image!("../../resources/undo.png"),
                                             "Undo The Command",
                                             Some(0),
                                         );
@@ -78,7 +79,7 @@ impl CommandStackViewer {
                                             ctx,
                                             20.0,
                                             20.0,
-                                            load_image(include_bytes!("../../resources/redo.png")),
+                                            load_image!("../../resources/redo.png"),
                                             "Redo The Command",
                                             Some(1),
                                         );
@@ -89,7 +90,7 @@ impl CommandStackViewer {
                                             ctx,
                                             20.0,
                                             20.0,
-                                            load_image(include_bytes!("../../resources/clear.png")),
+                                            load_image!("../../resources/clear.png"),
                                             "Clear Command Stack\nChanges history will be erased.",
                                             Some(2),
                                         );
@@ -130,8 +131,6 @@ impl CommandStackViewer {
     }
 
     pub fn handle_ui_message(&self, message: &UiMessage) {
-        scope_profile!();
-
         if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
             if message.destination() == self.undo {
                 self.sender.send(Message::UndoCurrentSceneCommand);
@@ -149,8 +148,6 @@ impl CommandStackViewer {
         command_names: Vec<String>,
         ui: &mut UserInterface,
     ) {
-        scope_profile!();
-
         let items = command_names
             .into_iter()
             .enumerate()
@@ -158,12 +155,12 @@ impl CommandStackViewer {
             .map(|(i, name)| {
                 let brush = if let Some(top) = top {
                     if (0..=top).contains(&i) {
-                        Brush::Solid(Color::opaque(255, 255, 255))
+                        ui.style.property(Style::BRUSH_TEXT)
                     } else {
-                        Brush::Solid(Color::opaque(100, 100, 100))
+                        ui.style.property(Style::BRUSH_LIGHTEST)
                     }
                 } else {
-                    Brush::Solid(Color::opaque(100, 100, 100))
+                    ui.style.property(Style::BRUSH_LIGHTEST)
                 };
 
                 TextBuilder::new(

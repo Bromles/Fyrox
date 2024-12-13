@@ -18,42 +18,39 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::core::sstorage::ImmutableString;
-use crate::renderer::{
-    framework::{
-        error::FrameworkError,
-        gpu_program::{GpuProgram, UniformLocation},
-        gpu_texture::GpuTexture,
-        state::PipelineState,
+use crate::{
+    core::sstorage::ImmutableString,
+    renderer::{
+        framework::{
+            error::FrameworkError,
+            gpu_program::{GpuProgram, UniformLocation},
+            gpu_texture::GpuTexture,
+            server::GraphicsServer,
+        },
+        hdr::LumBuffer,
     },
-    hdr::LumBuffer,
 };
 use std::{cell::RefCell, rc::Rc};
 
 pub struct AdaptationShader {
-    pub program: GpuProgram,
+    pub program: Box<dyn GpuProgram>,
     pub old_lum_sampler: UniformLocation,
     pub new_lum_sampler: UniformLocation,
-    pub wvp_matrix: UniformLocation,
-    pub speed: UniformLocation,
+    pub uniform_buffer_binding: usize,
 }
 
 impl AdaptationShader {
-    pub fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("../shaders/hdr_adaptation_fs.glsl");
-        let vertex_source = include_str!("../shaders/flat_vs.glsl");
+        let vertex_source = include_str!("../shaders/hdr_adaptation_vs.glsl");
 
-        let program =
-            GpuProgram::from_source(state, "AdaptationShader", vertex_source, fragment_source)?;
+        let program = server.create_program("AdaptationShader", vertex_source, fragment_source)?;
 
         Ok(Self {
-            wvp_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
-            old_lum_sampler: program
-                .uniform_location(state, &ImmutableString::new("oldLumSampler"))?,
-            new_lum_sampler: program
-                .uniform_location(state, &ImmutableString::new("newLumSampler"))?,
-            speed: program.uniform_location(state, &ImmutableString::new("speed"))?,
+            uniform_buffer_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
+            old_lum_sampler: program.uniform_location(&ImmutableString::new("oldLumSampler"))?,
+            new_lum_sampler: program.uniform_location(&ImmutableString::new("newLumSampler"))?,
             program,
         })
     }
@@ -65,14 +62,14 @@ pub struct AdaptationChain {
 }
 
 pub struct AdaptationContext<'a> {
-    pub prev_lum: Rc<RefCell<GpuTexture>>,
+    pub prev_lum: Rc<RefCell<dyn GpuTexture>>,
     pub lum_buffer: &'a mut LumBuffer,
 }
 
 impl AdaptationChain {
-    pub fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         Ok(Self {
-            lum_framebuffers: [LumBuffer::new(state, 1)?, LumBuffer::new(state, 1)?],
+            lum_framebuffers: [LumBuffer::new(server, 1)?, LumBuffer::new(server, 1)?],
             swap: false,
         })
     }
@@ -99,7 +96,7 @@ impl AdaptationChain {
         out
     }
 
-    pub fn avg_lum_texture(&self) -> Rc<RefCell<GpuTexture>> {
+    pub fn avg_lum_texture(&self) -> Rc<RefCell<dyn GpuTexture>> {
         if self.swap {
             self.lum_framebuffers[0].framebuffer.color_attachments()[0]
                 .texture

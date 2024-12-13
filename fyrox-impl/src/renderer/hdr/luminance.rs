@@ -18,34 +18,32 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::core::sstorage::ImmutableString;
-use crate::renderer::framework::{
-    error::FrameworkError,
-    gpu_program::{GpuProgram, UniformLocation},
-    state::PipelineState,
+use crate::{
+    core::sstorage::ImmutableString,
+    renderer::framework::{
+        error::FrameworkError,
+        gpu_program::{GpuProgram, UniformLocation},
+        server::GraphicsServer,
+    },
 };
 
 pub struct LuminanceShader {
-    pub program: GpuProgram,
+    pub program: Box<dyn GpuProgram>,
     pub frame_sampler: UniformLocation,
-    pub inv_size: UniformLocation,
-    pub wvp_matrix: UniformLocation,
+    pub uniform_buffer_binding: usize,
 }
 
 impl LuminanceShader {
-    pub fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("../shaders/hdr_luminance_fs.glsl");
-        let vertex_source = include_str!("../shaders/flat_vs.glsl");
+        let vertex_source = include_str!("../shaders/hdr_luminance_vs.glsl");
 
-        let program =
-            GpuProgram::from_source(state, "LuminanceShader", vertex_source, fragment_source)?;
+        let program = server.create_program("LuminanceShader", vertex_source, fragment_source)?;
 
         Ok(Self {
-            wvp_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
-            frame_sampler: program
-                .uniform_location(state, &ImmutableString::new("frameSampler"))?,
-            inv_size: program.uniform_location(state, &ImmutableString::new("invSize"))?,
+            uniform_buffer_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
+            frame_sampler: program.uniform_location(&ImmutableString::new("frameSampler"))?,
             program,
         })
     }

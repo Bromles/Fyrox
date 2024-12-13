@@ -18,31 +18,31 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::core::sstorage::ImmutableString;
-use crate::renderer::framework::{
-    error::FrameworkError,
-    gpu_program::{GpuProgram, UniformLocation},
-    state::PipelineState,
+use crate::{
+    core::sstorage::ImmutableString,
+    renderer::framework::{
+        error::FrameworkError,
+        gpu_program::{GpuProgram, UniformLocation},
+        server::GraphicsServer,
+    },
 };
 
 pub struct SkyboxShader {
-    pub program: GpuProgram,
-    pub wvp_matrix: UniformLocation,
+    pub program: Box<dyn GpuProgram>,
+    pub uniform_buffer_binding: usize,
     pub cubemap_texture: UniformLocation,
 }
 
 impl SkyboxShader {
-    pub fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("shaders/skybox_fs.glsl");
         let vertex_source = include_str!("shaders/skybox_vs.glsl");
 
-        let program =
-            GpuProgram::from_source(state, "SkyboxShader", vertex_source, fragment_source)?;
+        let program = server.create_program("SkyboxShader", vertex_source, fragment_source)?;
         Ok(Self {
-            wvp_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
-            cubemap_texture: program
-                .uniform_location(state, &ImmutableString::new("cubemapTexture"))?,
+            uniform_buffer_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
+            cubemap_texture: program.uniform_location(&ImmutableString::new("cubemapTexture"))?,
             program,
         })
     }

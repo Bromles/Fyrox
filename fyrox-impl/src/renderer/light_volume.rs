@@ -18,112 +18,72 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::renderer::bundle::{LightSource, LightSourceKind};
+use crate::renderer::make_viewport_matrix;
 use crate::{
     core::{
         algebra::{Isometry3, Matrix4, Point3, Translation, Vector3},
         math::Rect,
-        pool::Handle,
-        scope_profile,
         sstorage::ImmutableString,
     },
     renderer::{
+        cache::uniform::UniformBufferCache,
         flat_shader::FlatShader,
         framework::{
+            buffer::BufferUsage,
             error::FrameworkError,
-            framebuffer::{BlendParameters, DrawParameters, FrameBuffer},
-            geometry_buffer::{ElementRange, GeometryBuffer, GeometryBufferKind},
+            framebuffer::{FrameBuffer, ResourceBindGroup, ResourceBinding},
+            geometry_buffer::GeometryBuffer,
             gpu_program::{GpuProgram, UniformLocation},
-            state::{
-                BlendFactor, BlendFunc, ColorMask, CompareFunc, PipelineState, StencilAction,
-                StencilFunc, StencilOp,
-            },
+            server::GraphicsServer,
+            uniform::StaticUniformBuffer,
+            BlendFactor, BlendFunc, BlendParameters, ColorMask, CompareFunc, DrawParameters,
+            ElementRange, GeometryBufferExt, StencilAction, StencilFunc, StencilOp,
         },
         gbuffer::GBuffer,
         RenderPassStatistics,
     },
-    scene::{
-        graph::Graph,
-        light::{point::PointLight, spot::SpotLight},
-        mesh::surface::SurfaceData,
-        node::Node,
-    },
+    scene::{graph::Graph, mesh::surface::SurfaceData},
 };
+use fyrox_graphics::framebuffer::BufferLocation;
 
 struct SpotLightShader {
-    program: GpuProgram,
+    program: Box<dyn GpuProgram>,
     depth_sampler: UniformLocation,
-    world_view_proj_matrix: UniformLocation,
-    light_position: UniformLocation,
-    light_direction: UniformLocation,
-    cone_angle_cos: UniformLocation,
-    light_color: UniformLocation,
-    scatter_factor: UniformLocation,
-    inv_proj: UniformLocation,
-    intensity: UniformLocation,
+    uniform_block_binding: usize,
 }
 
 impl SpotLightShader {
-    fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("shaders/spot_volumetric_fs.glsl");
-        let vertex_source = include_str!("shaders/flat_vs.glsl");
+        let vertex_source = include_str!("shaders/spot_volumetric_vs.glsl");
         let program =
-            GpuProgram::from_source(state, "SpotVolumetricLight", vertex_source, fragment_source)?;
+            server.create_program("SpotVolumetricLight", vertex_source, fragment_source)?;
         Ok(Self {
-            world_view_proj_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
-            depth_sampler: program
-                .uniform_location(state, &ImmutableString::new("depthSampler"))?,
-            light_position: program
-                .uniform_location(state, &ImmutableString::new("lightPosition"))?,
-            light_direction: program
-                .uniform_location(state, &ImmutableString::new("lightDirection"))?,
-            cone_angle_cos: program
-                .uniform_location(state, &ImmutableString::new("coneAngleCos"))?,
-            light_color: program.uniform_location(state, &ImmutableString::new("lightColor"))?,
-            scatter_factor: program
-                .uniform_location(state, &ImmutableString::new("scatterFactor"))?,
-            inv_proj: program.uniform_location(state, &ImmutableString::new("invProj"))?,
-            intensity: program.uniform_location(state, &ImmutableString::new("intensity"))?,
+            depth_sampler: program.uniform_location(&ImmutableString::new("depthSampler"))?,
+            uniform_block_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
             program,
         })
     }
 }
 
 struct PointLightShader {
-    program: GpuProgram,
+    program: Box<dyn GpuProgram>,
     depth_sampler: UniformLocation,
-    world_view_proj_matrix: UniformLocation,
-    light_position: UniformLocation,
-    light_radius: UniformLocation,
-    light_color: UniformLocation,
-    scatter_factor: UniformLocation,
-    inv_proj: UniformLocation,
-    intensity: UniformLocation,
+    uniform_block_binding: usize,
 }
 
 impl PointLightShader {
-    fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("shaders/point_volumetric_fs.glsl");
-        let vertex_source = include_str!("shaders/flat_vs.glsl");
-        let program = GpuProgram::from_source(
-            state,
-            "PointVolumetricLight",
-            vertex_source,
-            fragment_source,
-        )?;
+        let vertex_source = include_str!("shaders/point_volumetric_vs.glsl");
+        let program =
+            server.create_program("PointVolumetricLight", vertex_source, fragment_source)?;
         Ok(Self {
-            world_view_proj_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
-            depth_sampler: program
-                .uniform_location(state, &ImmutableString::new("depthSampler"))?,
-            light_position: program
-                .uniform_location(state, &ImmutableString::new("lightPosition"))?,
-            inv_proj: program.uniform_location(state, &ImmutableString::new("invProj"))?,
-            light_radius: program.uniform_location(state, &ImmutableString::new("lightRadius"))?,
-            light_color: program.uniform_location(state, &ImmutableString::new("lightColor"))?,
-            scatter_factor: program
-                .uniform_location(state, &ImmutableString::new("scatterFactor"))?,
-            intensity: program.uniform_location(state, &ImmutableString::new("intensity"))?,
+            depth_sampler: program.uniform_location(&ImmutableString::new("depthSampler"))?,
+            uniform_block_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
             program,
         })
     }
@@ -133,30 +93,30 @@ pub struct LightVolumeRenderer {
     spot_light_shader: SpotLightShader,
     point_light_shader: PointLightShader,
     flat_shader: FlatShader,
-    cone: GeometryBuffer,
-    sphere: GeometryBuffer,
+    cone: Box<dyn GeometryBuffer>,
+    sphere: Box<dyn GeometryBuffer>,
 }
 
 impl LightVolumeRenderer {
-    pub fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         Ok(Self {
-            spot_light_shader: SpotLightShader::new(state)?,
-            point_light_shader: PointLightShader::new(state)?,
-            flat_shader: FlatShader::new(state)?,
-            cone: GeometryBuffer::from_surface_data(
+            spot_light_shader: SpotLightShader::new(server)?,
+            point_light_shader: PointLightShader::new(server)?,
+            flat_shader: FlatShader::new(server)?,
+            cone: <dyn GeometryBuffer>::from_surface_data(
                 &SurfaceData::make_cone(
                     16,
                     1.0,
                     1.0,
                     &Matrix4::new_translation(&Vector3::new(0.0, -1.0, 0.0)),
                 ),
-                GeometryBufferKind::StaticDraw,
-                state,
+                BufferUsage::StaticDraw,
+                server,
             )?,
-            sphere: GeometryBuffer::from_surface_data(
+            sphere: <dyn GeometryBuffer>::from_surface_data(
                 &SurfaceData::make_sphere(8, 8, 1.0, &Matrix4::identity()),
-                GeometryBufferKind::StaticDraw,
-                state,
+                BufferUsage::StaticDraw,
+                server,
             )?,
         })
     }
@@ -164,235 +124,246 @@ impl LightVolumeRenderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_volume(
         &mut self,
-        state: &PipelineState,
-        light: &Node,
-        light_handle: Handle<Node>,
+        light: &LightSource,
         gbuffer: &mut GBuffer,
-        quad: &GeometryBuffer,
+        quad: &dyn GeometryBuffer,
         view: Matrix4<f32>,
         inv_proj: Matrix4<f32>,
         view_proj: Matrix4<f32>,
         viewport: Rect<i32>,
         graph: &Graph,
-        frame_buffer: &mut FrameBuffer,
+        frame_buffer: &mut dyn FrameBuffer,
+        uniform_buffer_cache: &mut UniformBufferCache,
     ) -> Result<RenderPassStatistics, FrameworkError> {
-        scope_profile!();
-
         let mut stats = RenderPassStatistics::default();
 
-        let frame_matrix = Matrix4::new_orthographic(
-            0.0,
-            viewport.w() as f32,
-            viewport.h() as f32,
-            0.0,
-            -1.0,
-            1.0,
-        ) * Matrix4::new_nonuniform_scaling(&Vector3::new(
-            viewport.w() as f32,
-            viewport.h() as f32,
-            0.0,
-        ));
+        let frame_matrix = make_viewport_matrix(viewport);
+        let position = view.transform_point(&Point3::from(light.position)).coords;
 
-        let position = view
-            .transform_point(&Point3::from(light.global_position()))
-            .coords;
+        match light.kind {
+            LightSourceKind::Spot {
+                distance,
+                full_cone_angle,
+                ..
+            } => {
+                let direction = view.transform_vector(
+                    &(-light
+                        .up_vector
+                        .try_normalize(f32::EPSILON)
+                        .unwrap_or_else(Vector3::z)),
+                );
 
-        if let Some(spot) = light.cast::<SpotLight>() {
-            if !spot.base_light_ref().is_scatter_enabled() {
-                return Ok(stats);
+                // Draw cone into stencil buffer - it will mark pixels for further volumetric light
+                // calculations, it will significantly reduce amount of pixels for far lights thus
+                // significantly improve performance.
+
+                let k = (full_cone_angle * 0.5 + 1.0f32.to_radians()).tan() * distance;
+                let light_shape_matrix = Isometry3 {
+                    rotation: graph.global_rotation(light.handle),
+                    translation: Translation {
+                        vector: light.position,
+                    },
+                }
+                .to_homogeneous()
+                    * Matrix4::new_nonuniform_scaling(&Vector3::new(k, distance, k));
+                let mvp = view_proj * light_shape_matrix;
+
+                // Clear stencil only.
+                frame_buffer.clear(viewport, None, None, Some(0));
+
+                stats += frame_buffer.draw(
+                    &*self.cone,
+                    viewport,
+                    &*self.flat_shader.program,
+                    &DrawParameters {
+                        cull_face: None,
+                        color_write: ColorMask::all(false),
+                        depth_write: false,
+                        stencil_test: Some(StencilFunc {
+                            func: CompareFunc::Equal,
+                            ref_value: 0xFF,
+                            mask: 0xFFFF_FFFF,
+                        }),
+                        depth_test: Some(CompareFunc::Less),
+                        blend: None,
+                        stencil_op: StencilOp {
+                            fail: StencilAction::Replace,
+                            zfail: StencilAction::Keep,
+                            zpass: StencilAction::Replace,
+                            write_mask: 0xFFFF_FFFF,
+                        },
+                        scissor_box: None,
+                    },
+                    &[ResourceBindGroup {
+                        bindings: &[ResourceBinding::Buffer {
+                            buffer: uniform_buffer_cache
+                                .write(StaticUniformBuffer::<256>::new().with(&mvp))?,
+                            binding: BufferLocation::Auto {
+                                shader_location: self.flat_shader.uniform_buffer_binding,
+                            },
+                            data_usage: Default::default(),
+                        }],
+                    }],
+                    ElementRange::Full,
+                )?;
+
+                // Finally draw fullscreen quad, GPU will calculate scattering only on pixels that were
+                // marked in stencil buffer. For distant lights it will be very low amount of pixels and
+                // so distant lights won't impact performance.
+                let shader = &self.spot_light_shader;
+                stats += frame_buffer.draw(
+                    quad,
+                    viewport,
+                    &*shader.program,
+                    &DrawParameters {
+                        cull_face: None,
+                        color_write: Default::default(),
+                        depth_write: false,
+                        stencil_test: Some(StencilFunc {
+                            func: CompareFunc::Equal,
+                            ref_value: 0xFF,
+                            mask: 0xFFFF_FFFF,
+                        }),
+                        depth_test: None,
+                        blend: Some(BlendParameters {
+                            func: BlendFunc::new(BlendFactor::One, BlendFactor::One),
+                            ..Default::default()
+                        }),
+                        // Make sure to clean stencil buffer after drawing full screen quad.
+                        stencil_op: StencilOp {
+                            zpass: StencilAction::Zero,
+                            ..Default::default()
+                        },
+                        scissor_box: None,
+                    },
+                    &[ResourceBindGroup {
+                        bindings: &[
+                            ResourceBinding::texture(&gbuffer.depth(), &shader.depth_sampler),
+                            ResourceBinding::Buffer {
+                                buffer: uniform_buffer_cache.write(
+                                    StaticUniformBuffer::<256>::new()
+                                        .with(&frame_matrix)
+                                        .with(&inv_proj)
+                                        .with(&position)
+                                        .with(&direction)
+                                        .with(&light.color.srgb_to_linear_f32().xyz())
+                                        .with(&light.scatter)
+                                        .with(&light.intensity)
+                                        .with(&((full_cone_angle * 0.5).cos())),
+                                )?,
+                                binding: BufferLocation::Auto {
+                                    shader_location: shader.uniform_block_binding,
+                                },
+                                data_usage: Default::default(),
+                            },
+                        ],
+                    }],
+                    ElementRange::Full,
+                )?
             }
+            LightSourceKind::Point { radius, .. } => {
+                frame_buffer.clear(viewport, None, None, Some(0));
 
-            let direction = view.transform_vector(
-                &(-light
-                    .up_vector()
-                    .try_normalize(f32::EPSILON)
-                    .unwrap_or_else(Vector3::z)),
-            );
+                // Radius bias is used to slightly increase sphere radius to add small margin
+                // for fadeout effect. It is set to 5%.
+                let bias = 1.05;
+                let k = bias * radius;
+                let light_shape_matrix = Matrix4::new_translation(&light.position)
+                    * Matrix4::new_nonuniform_scaling(&Vector3::new(k, k, k));
+                let mvp = view_proj * light_shape_matrix;
 
-            // Draw cone into stencil buffer - it will mark pixels for further volumetric light
-            // calculations, it will significantly reduce amount of pixels for far lights thus
-            // significantly improve performance.
+                let uniform_buffer =
+                    uniform_buffer_cache.write(StaticUniformBuffer::<256>::new().with(&mvp))?;
 
-            let k = (spot.full_cone_angle() * 0.5 + 1.0f32.to_radians()).tan() * spot.distance();
-            let light_shape_matrix = Isometry3 {
-                rotation: graph.global_rotation(light_handle),
-                translation: Translation {
-                    vector: spot.global_position(),
-                },
+                stats += frame_buffer.draw(
+                    &*self.sphere,
+                    viewport,
+                    &*self.flat_shader.program,
+                    &DrawParameters {
+                        cull_face: None,
+                        color_write: ColorMask::all(false),
+                        depth_write: false,
+                        stencil_test: Some(StencilFunc {
+                            func: CompareFunc::Equal,
+                            ref_value: 0xFF,
+                            mask: 0xFFFF_FFFF,
+                        }),
+                        depth_test: Some(CompareFunc::Less),
+                        blend: None,
+                        stencil_op: StencilOp {
+                            fail: StencilAction::Replace,
+                            zfail: StencilAction::Keep,
+                            zpass: StencilAction::Replace,
+                            write_mask: 0xFFFF_FFFF,
+                        },
+                        scissor_box: None,
+                    },
+                    &[ResourceBindGroup {
+                        bindings: &[ResourceBinding::Buffer {
+                            buffer: uniform_buffer,
+                            binding: BufferLocation::Auto {
+                                shader_location: self.flat_shader.uniform_buffer_binding,
+                            },
+                            data_usage: Default::default(),
+                        }],
+                    }],
+                    ElementRange::Full,
+                )?;
+
+                // Finally draw fullscreen quad, GPU will calculate scattering only on pixels that were
+                // marked in stencil buffer. For distant lights it will be very low amount of pixels and
+                // so distant lights won't impact performance.
+                let shader = &self.point_light_shader;
+                stats += frame_buffer.draw(
+                    quad,
+                    viewport,
+                    &*shader.program,
+                    &DrawParameters {
+                        cull_face: None,
+                        color_write: Default::default(),
+                        depth_write: false,
+                        stencil_test: Some(StencilFunc {
+                            func: CompareFunc::Equal,
+                            ref_value: 0xFF,
+                            mask: 0xFFFF_FFFF,
+                        }),
+                        depth_test: None,
+                        blend: Some(BlendParameters {
+                            func: BlendFunc::new(BlendFactor::One, BlendFactor::One),
+                            ..Default::default()
+                        }),
+                        // Make sure to clean stencil buffer after drawing full screen quad.
+                        stencil_op: StencilOp {
+                            zpass: StencilAction::Zero,
+                            ..Default::default()
+                        },
+                        scissor_box: None,
+                    },
+                    &[ResourceBindGroup {
+                        bindings: &[
+                            ResourceBinding::texture(&gbuffer.depth(), &shader.depth_sampler),
+                            ResourceBinding::Buffer {
+                                buffer: uniform_buffer_cache.write(
+                                    StaticUniformBuffer::<256>::new()
+                                        .with(&frame_matrix)
+                                        .with(&inv_proj)
+                                        .with(&position)
+                                        .with(&light.color.srgb_to_linear_f32().xyz())
+                                        .with(&light.scatter)
+                                        .with(&light.intensity)
+                                        .with(&radius),
+                                )?,
+                                binding: BufferLocation::Auto {
+                                    shader_location: shader.uniform_block_binding,
+                                },
+                                data_usage: Default::default(),
+                            },
+                        ],
+                    }],
+                    ElementRange::Full,
+                )?
             }
-            .to_homogeneous()
-                * Matrix4::new_nonuniform_scaling(&Vector3::new(k, spot.distance(), k));
-            let mvp = view_proj * light_shape_matrix;
-
-            // Clear stencil only.
-            frame_buffer.clear(state, viewport, None, None, Some(0));
-
-            stats += frame_buffer.draw(
-                &self.cone,
-                state,
-                viewport,
-                &self.flat_shader.program,
-                &DrawParameters {
-                    cull_face: None,
-                    color_write: ColorMask::all(false),
-                    depth_write: false,
-                    stencil_test: Some(StencilFunc {
-                        func: CompareFunc::Equal,
-                        ref_value: 0xFF,
-                        mask: 0xFFFF_FFFF,
-                    }),
-                    depth_test: true,
-                    blend: None,
-                    stencil_op: StencilOp {
-                        fail: StencilAction::Replace,
-                        zfail: StencilAction::Keep,
-                        zpass: StencilAction::Replace,
-                        write_mask: 0xFFFF_FFFF,
-                    },
-                },
-                ElementRange::Full,
-                |mut program_binding| {
-                    program_binding.set_matrix4(&self.flat_shader.wvp_matrix, &mvp);
-                },
-            )?;
-
-            // Finally draw fullscreen quad, GPU will calculate scattering only on pixels that were
-            // marked in stencil buffer. For distant lights it will be very low amount of pixels and
-            // so distant lights won't impact performance.
-            let shader = &self.spot_light_shader;
-            let depth_map = gbuffer.depth();
-            stats += frame_buffer.draw(
-                quad,
-                state,
-                viewport,
-                &shader.program,
-                &DrawParameters {
-                    cull_face: None,
-                    color_write: Default::default(),
-                    depth_write: false,
-                    stencil_test: Some(StencilFunc {
-                        func: CompareFunc::Equal,
-                        ref_value: 0xFF,
-                        mask: 0xFFFF_FFFF,
-                    }),
-                    depth_test: false,
-                    blend: Some(BlendParameters {
-                        func: BlendFunc::new(BlendFactor::One, BlendFactor::One),
-                        ..Default::default()
-                    }),
-                    // Make sure to clean stencil buffer after drawing full screen quad.
-                    stencil_op: StencilOp {
-                        zpass: StencilAction::Zero,
-                        ..Default::default()
-                    },
-                },
-                ElementRange::Full,
-                |mut program_binding| {
-                    program_binding
-                        .set_matrix4(&shader.world_view_proj_matrix, &frame_matrix)
-                        .set_matrix4(&shader.inv_proj, &inv_proj)
-                        .set_f32(&shader.cone_angle_cos, (spot.full_cone_angle() * 0.5).cos())
-                        .set_vector3(&shader.light_position, &position)
-                        .set_vector3(&shader.light_direction, &direction)
-                        .set_texture(&shader.depth_sampler, &depth_map)
-                        .set_vector3(
-                            &shader.light_color,
-                            &spot.base_light_ref().color().srgb_to_linear_f32().xyz(),
-                        )
-                        .set_vector3(&shader.scatter_factor, &spot.base_light_ref().scatter())
-                        .set_f32(&shader.intensity, spot.base_light_ref().intensity());
-                },
-            )?
-        } else if let Some(point) = light.cast::<PointLight>() {
-            if !point.base_light_ref().is_scatter_enabled() {
-                return Ok(stats);
-            }
-
-            frame_buffer.clear(state, viewport, None, None, Some(0));
-
-            // Radius bias is used to to slightly increase sphere radius to add small margin
-            // for fadeout effect. It is set to 5%.
-            let bias = 1.05;
-            let k = bias * point.radius();
-            let light_shape_matrix = Matrix4::new_translation(&light.global_position())
-                * Matrix4::new_nonuniform_scaling(&Vector3::new(k, k, k));
-            let mvp = view_proj * light_shape_matrix;
-
-            stats += frame_buffer.draw(
-                &self.sphere,
-                state,
-                viewport,
-                &self.flat_shader.program,
-                &DrawParameters {
-                    cull_face: None,
-                    color_write: ColorMask::all(false),
-                    depth_write: false,
-                    stencil_test: Some(StencilFunc {
-                        func: CompareFunc::Equal,
-                        ref_value: 0xFF,
-                        mask: 0xFFFF_FFFF,
-                    }),
-                    depth_test: true,
-                    blend: None,
-                    stencil_op: StencilOp {
-                        fail: StencilAction::Replace,
-                        zfail: StencilAction::Keep,
-                        zpass: StencilAction::Replace,
-                        write_mask: 0xFFFF_FFFF,
-                    },
-                },
-                ElementRange::Full,
-                |mut program_binding| {
-                    program_binding.set_matrix4(&self.flat_shader.wvp_matrix, &mvp);
-                },
-            )?;
-
-            // Finally draw fullscreen quad, GPU will calculate scattering only on pixels that were
-            // marked in stencil buffer. For distant lights it will be very low amount of pixels and
-            // so distant lights won't impact performance.
-            let shader = &self.point_light_shader;
-            let depth_map = gbuffer.depth();
-            stats += frame_buffer.draw(
-                quad,
-                state,
-                viewport,
-                &shader.program,
-                &DrawParameters {
-                    cull_face: None,
-                    color_write: Default::default(),
-                    depth_write: false,
-                    stencil_test: Some(StencilFunc {
-                        func: CompareFunc::Equal,
-                        ref_value: 0xFF,
-                        mask: 0xFFFF_FFFF,
-                    }),
-                    depth_test: false,
-                    blend: Some(BlendParameters {
-                        func: BlendFunc::new(BlendFactor::One, BlendFactor::One),
-                        ..Default::default()
-                    }),
-                    // Make sure to clean stencil buffer after drawing full screen quad.
-                    stencil_op: StencilOp {
-                        zpass: StencilAction::Zero,
-                        ..Default::default()
-                    },
-                },
-                ElementRange::Full,
-                |mut program_binding| {
-                    program_binding
-                        .set_matrix4(&shader.world_view_proj_matrix, &frame_matrix)
-                        .set_matrix4(&shader.inv_proj, &inv_proj)
-                        .set_vector3(&shader.light_position, &position)
-                        .set_texture(&shader.depth_sampler, &depth_map)
-                        .set_f32(&shader.light_radius, point.radius())
-                        .set_vector3(
-                            &shader.light_color,
-                            &point.base_light_ref().color().srgb_to_linear_f32().xyz(),
-                        )
-                        .set_vector3(&shader.scatter_factor, &point.base_light_ref().scatter())
-                        .set_f32(&shader.intensity, point.base_light_ref().intensity());
-                },
-            )?
+            _ => (),
         }
 
         Ok(stats)

@@ -124,7 +124,7 @@ where
     phantom: PhantomData<T>,
 }
 
-impl<'a, T> ResourceHeaderGuard<'a, T>
+impl<T> ResourceHeaderGuard<'_, T>
 where
     T: TypedResourceData,
 {
@@ -135,6 +135,14 @@ where
     pub fn data(&mut self) -> Option<&mut T> {
         if let ResourceState::Ok(ref mut data) = self.guard.state {
             ResourceData::as_any_mut(&mut **data).downcast_mut::<T>()
+        } else {
+            None
+        }
+    }
+
+    pub fn data_ref(&self) -> Option<&T> {
+        if let ResourceState::Ok(ref data) = self.guard.state {
+            ResourceData::as_any(&**data).downcast_ref::<T>()
         } else {
             None
         }
@@ -419,7 +427,7 @@ where
     phantom: PhantomData<T>,
 }
 
-impl<'a, T> ResourceDataRef<'a, T>
+impl<T> ResourceDataRef<'_, T>
 where
     T: TypedResourceData,
 {
@@ -440,7 +448,7 @@ where
     }
 }
 
-impl<'a, T> Debug for ResourceDataRef<'a, T>
+impl<T> Debug for ResourceDataRef<'_, T>
 where
     T: TypedResourceData,
 {
@@ -465,7 +473,7 @@ where
     }
 }
 
-impl<'a, T> Deref for ResourceDataRef<'a, T>
+impl<T> Deref for ResourceDataRef<'_, T>
 where
     T: TypedResourceData,
 {
@@ -492,7 +500,7 @@ where
     }
 }
 
-impl<'a, T> DerefMut for ResourceDataRef<'a, T>
+impl<T> DerefMut for ResourceDataRef<'_, T>
 where
     T: TypedResourceData,
 {

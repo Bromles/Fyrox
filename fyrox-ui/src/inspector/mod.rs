@@ -51,6 +51,7 @@ use crate::{
     BuildContext, Control, RcUiNodeHandle, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 use copypasta::ClipboardProvider;
+use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::{BaseSceneGraph, SceneGraph};
 use std::{
     any::{Any, TypeId},
@@ -338,7 +339,7 @@ impl PropertyChanged {
                         FieldKind::Inspectable(inspectable) => {
                             path += format!("[{}].{}", index, inspectable.path()).as_ref();
                         }
-                        _ => path += format!("[{}]", index).as_ref(),
+                        _ => path += format!("[{index}]").as_ref(),
                     }
                 }
             }
@@ -481,6 +482,16 @@ pub struct Inspector {
     pub context: InspectorContext,
 }
 
+impl ConstructorProvider<UiNode, UserInterface> for Inspector {
+    fn constructor() -> GraphNodeConstructor<UiNode, UserInterface> {
+        GraphNodeConstructor::new::<Self>().with_variant("Inspector", |ui| {
+            InspectorBuilder::new(WidgetBuilder::new().with_name("Inspector"))
+                .build(&mut ui.build_ctx())
+                .into()
+        })
+    }
+}
+
 crate::define_widget_deref!(Inspector);
 
 impl Inspector {
@@ -602,6 +613,12 @@ impl PartialEq for InspectorContext {
     }
 }
 
+fn object_type_id(object: &dyn Reflect) -> TypeId {
+    let mut object_type_id = None;
+    object.as_any(&mut |any| object_type_id = Some(any.type_id()));
+    object_type_id.unwrap()
+}
+
 impl Default for InspectorContext {
     fn default() -> Self {
         Self {
@@ -651,7 +668,7 @@ fn make_expander_check_box(
     let description = if property_description.is_empty() {
         property_name.to_string()
     } else {
-        format!("{}\n\n{}", property_name, property_description)
+        format!("{property_name}\n\n{property_description}")
     };
 
     let handle = CheckBoxBuilder::new(
@@ -665,7 +682,7 @@ fn make_expander_check_box(
                 .with_vertical_alignment(VerticalAlignment::Center)
                 .with_min_size(Vector2::new(4.0, 4.0)),
         )
-        .with_stroke_thickness(Thickness::zero())
+        .with_stroke_thickness(Thickness::zero().into())
         .build(ctx),
     )
     .with_content(
@@ -777,10 +794,9 @@ impl PropertyFilter {
 fn assign_tab_indices(container: Handle<UiNode>, ui: &mut UserInterface) {
     let mut counter = 0;
     let mut widgets_list = Vec::new();
-    for descendant in ui.traverse_handle_iter(container) {
-        let descendant_ref = ui.node(descendant);
+    for (descendant_handle, descendant_ref) in ui.traverse_iter(container) {
         if descendant_ref.accepts_input {
-            widgets_list.push((descendant, counter));
+            widgets_list.push((descendant_handle, counter));
             counter += 1;
         }
     }
@@ -826,7 +842,7 @@ impl InspectorContext {
         object.fields(&mut |fields| {
             for field in fields {
                 fields_text.push(if generate_property_string_values {
-                    format!("{:?}", field)
+                    format!("{field:?}")
                 } else {
                     Default::default()
                 })
@@ -903,8 +919,7 @@ impl InspectorContext {
                                 .with_vertical_text_alignment(VerticalAlignment::Center)
                                 .with_text(format!(
                                     "Unable to create property \
-                                                    editor instance: Reason {:?}",
-                                    e
+                                                    editor instance: Reason {e:?}"
                                 ))
                                 .build(ctx),
                             &description,
@@ -970,7 +985,7 @@ impl InspectorContext {
             property_definitions: definition_container,
             sync_flag,
             environment,
-            object_type_id: object.type_id(),
+            object_type_id: object_type_id(object),
             name_column_width,
         }
     }
@@ -994,7 +1009,7 @@ impl InspectorContext {
         generate_property_string_values: bool,
         filter: PropertyFilter,
     ) -> Result<(), Vec<InspectorError>> {
-        if object.type_id() != self.object_type_id {
+        if object_type_id(object) != self.object_type_id {
             return Err(vec![InspectorError::OutOfSync]);
         }
 
@@ -1192,9 +1207,20 @@ impl InspectorBuilder {
             widget: self
                 .widget_builder
                 .with_child(self.context.stack_panel)
-                .build(),
+                .build(ctx),
             context: self.context,
         };
         ctx.add_node(UiNode::new(canvas))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::inspector::InspectorBuilder;
+    use crate::{test::test_widget_deletion, widget::WidgetBuilder};
+
+    #[test]
+    fn test_deletion() {
+        test_widget_deletion(|ctx| InspectorBuilder::new(WidgetBuilder::new()).build(ctx));
     }
 }

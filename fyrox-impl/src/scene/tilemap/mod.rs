@@ -24,6 +24,7 @@
 pub mod brush;
 pub mod tileset;
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Vector2, Vector3},
@@ -51,6 +52,7 @@ use crate::{
     },
 };
 use fxhash::{FxHashMap, FxHashSet};
+use fyrox_graph::constructor::ConstructorProvider;
 use std::ops::{Deref, DerefMut};
 
 struct BresenhamLineIter {
@@ -461,12 +463,16 @@ impl Tiles {
 ///         uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
 ///         collider: TileCollider::Rectangle,
 ///         color: Color::BROWN,
+///         position: Default::default(),
+///         properties: vec![],
 ///     });
 ///     let grass_tile = tile_set.add_tile(TileDefinition {
 ///         material,
 ///         uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
 ///         collider: TileCollider::Rectangle,
 ///         color: Color::GREEN,
+///         position: Default::default(),
+///         properties: vec![],
 ///     });
 ///     let tile_set = TileSetResource::new_ok(ResourceKind::Embedded, tile_set);
 ///
@@ -593,6 +599,26 @@ impl TileMap {
     pub fn bounding_rect(&self) -> Rect<i32> {
         self.tiles.bounding_rect()
     }
+
+    /// Calculates grid-space position (tile coordinates) from world-space. Could be used to find
+    /// tile coordinates from arbitrary point in world space. It is especially useful, if the tile
+    /// map is rotated or shifted.
+    #[inline]
+    pub fn world_to_grid(&self, world_position: Vector3<f32>) -> Vector2<i32> {
+        let inv_global_transform = self.global_transform().try_inverse().unwrap_or_default();
+        let local_space_position = inv_global_transform.transform_point(&world_position.into());
+        Vector2::new(
+            local_space_position.x.round() as i32,
+            local_space_position.y.round() as i32,
+        )
+    }
+
+    /// Calculates world-space position from grid-space position (tile coordinates).
+    #[inline]
+    pub fn grid_to_world(&self, grid_position: Vector2<i32>) -> Vector3<f32> {
+        let v3 = grid_position.cast::<f32>().to_homogeneous();
+        self.global_transform().transform_point(&v3.into()).coords
+    }
 }
 
 impl Default for TileMap {
@@ -623,9 +649,19 @@ impl DerefMut for TileMap {
     }
 }
 
-impl NodeTrait for TileMap {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for TileMap {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Tile Map", |_| {
+                TileMapBuilder::new(BaseBuilder::new().with_name("Tile Map"))
+                    .build_node()
+                    .into()
+            })
+            .with_group("2D")
+    }
+}
 
+impl NodeTrait for TileMap {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         let rect = self.bounding_rect();
 
@@ -714,7 +750,7 @@ impl NodeTrait for TileMap {
                     &tile_definition.material,
                     RenderPath::Forward,
                     sort_index,
-                    self.self_handle,
+                    self.handle(),
                     &mut move |mut vertex_buffer, mut triangle_buffer| {
                         let start_vertex_index = vertex_buffer.vertex_count();
 

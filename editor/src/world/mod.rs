@@ -22,15 +22,10 @@ use crate::{
     asset::item::AssetItem,
     fyrox::{
         asset::untyped::UntypedResource,
-        core::{
-            color::Color,
-            pool::{ErasedHandle, Handle},
-            scope_profile,
-        },
+        core::pool::{ErasedHandle, Handle},
         graph::{BaseSceneGraph, SceneGraph},
         gui::{
             border::BorderBuilder,
-            brush::Brush,
             button::{ButtonBuilder, ButtonMessage},
             check_box::{CheckBoxBuilder, CheckBoxMessage},
             decorator::{Decorator, DecoratorBuilder, DecoratorMessage},
@@ -48,10 +43,9 @@ use crate::{
             window::{WindowBuilder, WindowTitle},
             wrap_panel::WrapPanelBuilder,
             BuildContext, Orientation, RcUiNodeHandle, Thickness, UiNode, UserInterface,
-            VerticalAlignment, BRUSH_BRIGHT_BLUE, BRUSH_PRIMARY,
+            VerticalAlignment,
         },
     },
-    gui::make_image_button_with_tooltip,
     load_image,
     message::MessageSender,
     send_sync_message,
@@ -59,6 +53,9 @@ use crate::{
     world::graph::item::{DropAnchor, SceneItem, SceneItemBuilder, SceneItemMessage},
     Mode, Settings,
 };
+use fyrox::gui::style::resource::StyleResourceExt;
+use fyrox::gui::style::Style;
+use fyrox::gui::utils::make_image_button_with_tooltip;
 use rust_fuzzy_search::fuzzy_compare;
 use std::{
     borrow::Cow,
@@ -155,9 +152,9 @@ fn make_graph_node_item(
         .with_expanded(is_expanded),
     )
     .with_text_brush(if is_instance {
-        Brush::Solid(Color::opaque(160, 160, 200))
+        ctx.style.property(WorldViewer::INSTANCE_BRUSH)
     } else {
-        Brush::Solid(fyrox::gui::COLOR_FOREGROUND)
+        ctx.style.property(Style::BRUSH_TEXT)
     })
     .with_name(name.deref().to_owned())
     .with_entity_handle(handle)
@@ -177,11 +174,11 @@ fn colorize(handle: Handle<UiNode>, ui: &UserInterface, index: &mut usize) {
 
     if let Some(decorator) = node.cast::<Decorator>() {
         if node.parent().is_some() {
-            let new_brush = Brush::Solid(if *index % 2 == 0 {
-                Color::opaque(50, 50, 50)
+            let new_brush = if *index % 2 == 0 {
+                ui.style.property(Style::BRUSH_PRIMARY)
             } else {
-                Color::opaque(60, 60, 60)
-            });
+                ui.style.property(Style::BRUSH_LIGHTER_PRIMARY)
+            };
 
             if *decorator.normal_brush != new_brush {
                 ui.send_message(DecoratorMessage::normal_brush(
@@ -214,6 +211,8 @@ fn fetch_expanded_state(
 }
 
 impl WorldViewer {
+    pub const INSTANCE_BRUSH: &'static str = "WorldViewer.InstanceBrush";
+
     pub fn new(ctx: &mut BuildContext, sender: MessageSender, settings: &Settings) -> Self {
         let tree_root;
         let node_path;
@@ -246,9 +245,7 @@ impl WorldViewer {
                                             ctx,
                                             size,
                                             size,
-                                            load_image(include_bytes!(
-                                                "../../resources/collapse.png"
-                                            )),
+                                            load_image!("../../resources/collapse.png"),
                                             "Collapse Everything",
                                             Some(0),
                                         );
@@ -259,9 +256,7 @@ impl WorldViewer {
                                             ctx,
                                             size,
                                             size,
-                                            load_image(include_bytes!(
-                                                "../../resources/expand.png"
-                                            )),
+                                            load_image!("../../resources/expand.png"),
                                             "Expand Everything",
                                             Some(1),
                                         );
@@ -272,9 +267,7 @@ impl WorldViewer {
                                             ctx,
                                             size,
                                             size,
-                                            load_image(include_bytes!(
-                                                "../../resources/locate.png"
-                                            )),
+                                            load_image!("../../resources/locate.png"),
                                             "Locate Selection",
                                             Some(2),
                                         );
@@ -377,10 +370,10 @@ impl WorldViewer {
         let element = ButtonBuilder::new(WidgetBuilder::new().with_height(16.0))
             .with_back(
                 DecoratorBuilder::new(BorderBuilder::new(
-                    WidgetBuilder::new().with_foreground(BRUSH_PRIMARY),
+                    WidgetBuilder::new().with_foreground(ctx.style.property(Style::BRUSH_PRIMARY)),
                 ))
-                .with_normal_brush(BRUSH_PRIMARY)
-                .with_hover_brush(BRUSH_BRIGHT_BLUE)
+                .with_normal_brush(ctx.style.property(Style::BRUSH_PRIMARY))
+                .with_hover_brush(ctx.style.property(Style::BRUSH_BRIGHT_BLUE))
                 .build(ctx),
             )
             .with_content(
@@ -389,9 +382,9 @@ impl WorldViewer {
                     .with_text(if self.breadcrumbs.is_empty() {
                         name.to_owned()
                     } else {
-                        format!("{} >", name)
+                        format!("{name} >")
                     })
-                    .with_font_size(11.0)
+                    .with_font_size(11.0.into())
                     .build(ctx),
             )
             .build(ctx);
@@ -672,8 +665,6 @@ impl WorldViewer {
         ui: &UserInterface,
         settings: &mut Settings,
     ) {
-        scope_profile!();
-
         if let Some(TreeRootMessage::Selected(selection)) = message.data::<TreeRootMessage>() {
             if message.destination() == self.tree_root
                 && message.direction() == MessageDirection::FromWidget

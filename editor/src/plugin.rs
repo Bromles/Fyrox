@@ -20,6 +20,21 @@
 
 use crate::fyrox::gui::message::UiMessage;
 use crate::{Editor, Message};
+use std::any::Any;
+
+pub trait BaseEditorPlugin: Any {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: EditorPlugin> BaseEditorPlugin for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
 
 /// Editor plugin allows you to extend editor functionality with custom tools. It provides a standard way of interaction
 /// between your plugin and built-in editor's functionality.
@@ -40,7 +55,7 @@ use crate::{Editor, Message};
 /// The editor usually operates on scenes (there could be multiple opened scenes, but only one active) and any modification of
 /// their content **must** be done via _commands_. [Command](https://en.wikipedia.org/wiki/Command_pattern) is a standard
 /// pattern that encapsulates an action. Command pattern is used for undo/redo functionality.
-pub trait EditorPlugin {
+pub trait EditorPlugin: BaseEditorPlugin {
     /// This method is called right after the editor was fully initialized. It is guaranteed to be called only once.
     fn on_start(&mut self, #[allow(unused_variables)] editor: &mut Editor) {}
 
@@ -56,6 +71,11 @@ pub trait EditorPlugin {
     /// it will then be changed to [`crate::Mode::Play`]. When the game was closed, the mode will be changed back to
     /// [`crate::Mode::Edit`].
     fn on_mode_changed(&mut self, #[allow(unused_variables)] editor: &mut Editor) {}
+
+    /// This method is called when active scene was changed. It could happen if a user opens or loads
+    /// a new scene, closes existing scene so the active scene changes to previous in the list of
+    /// scenes (if any).
+    fn on_scene_changed(&mut self, #[allow(unused_variables)] editor: &mut Editor) {}
 
     /// This method is called when a UI message was extracted from the message queue. It should be used to react to user
     /// changes, for example a user could click a button, then a [`fyrox::gui::button::ButtonMessage::Click`] will be
@@ -81,6 +101,12 @@ pub trait EditorPlugin {
     /// This method is called when the editor continues its execution. See [`Self::on_suspended`] method for more info
     /// about suspension.
     fn on_resumed(&mut self, #[allow(unused_variables)] editor: &mut Editor) {}
+
+    /// This method is called when the editor leaves preview mode. Usually this method is used to
+    /// rollback scene changes to the state in which scene objects were before entering the preview
+    /// mode. This method is typically called by the editor before execution of any command and before
+    /// saving (to prevent "leakage" of preview mode changes into the saved scene).
+    fn on_leave_preview_mode(&mut self, #[allow(unused_variables)] editor: &mut Editor) {}
 
     /// This method is used to tell the editor, whether your plugin is in preview mode or not. Preview mode is a special
     /// state of the editor, when it modifies a content of some scene every frame and discards these changes when the
@@ -111,11 +137,11 @@ pub trait EditorPlugin {
 macro_rules! for_each_plugin {
     ($container:expr => $func:ident($($param:expr),*)) => {{
         let mut i = 0;
-        while i < $container.len() {
-            if let Some(mut plugin) = $container.get_mut(i).and_then(|p| p.take()) {
+        while i < $container.0.len() {
+            if let Some(mut plugin) = $container.0.get_mut(i).and_then(|p| p.take()) {
                 plugin.$func($($param),*);
 
-                if let Some(entry) = $container.get_mut(i) {
+                if let Some(entry) = $container.0.get_mut(i) {
                     *entry = Some(plugin);
                 }
             }
@@ -123,4 +149,61 @@ macro_rules! for_each_plugin {
             i += 1;
         }
     }};
+}
+
+#[derive(Default)]
+pub struct EditorPluginsContainer(pub Vec<Option<Box<dyn EditorPlugin>>>);
+
+impl EditorPluginsContainer {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn with<T: EditorPlugin>(mut self, plugin: T) -> Self {
+        self.0.push(Some(Box::new(plugin)));
+        self
+    }
+
+    pub fn add<T: EditorPlugin>(&mut self, plugin: T) -> &mut Self {
+        self.0.push(Some(Box::new(plugin)));
+        self
+    }
+
+    pub fn try_get<T>(&self) -> Option<&T>
+    where
+        T: EditorPlugin,
+    {
+        self.0.iter().find_map(|container| {
+            container
+                .as_ref()
+                .and_then(|plugin| plugin.as_any().downcast_ref::<T>())
+        })
+    }
+
+    pub fn get<T>(&self) -> &T
+    where
+        T: EditorPlugin,
+    {
+        self.try_get()
+            .unwrap_or_else(|| panic!("There's no plugin with {} name", std::any::type_name::<T>()))
+    }
+
+    pub fn try_get_mut<T>(&mut self) -> Option<&mut T>
+    where
+        T: EditorPlugin,
+    {
+        self.0.iter_mut().find_map(|container| {
+            container
+                .as_mut()
+                .and_then(|plugin| plugin.as_any_mut().downcast_mut::<T>())
+        })
+    }
+
+    pub fn get_mut<T>(&mut self) -> &mut T
+    where
+        T: EditorPlugin,
+    {
+        self.try_get_mut()
+            .unwrap_or_else(|| panic!("There's no plugin with {} name", std::any::type_name::<T>()))
+    }
 }

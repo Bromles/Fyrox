@@ -21,6 +21,7 @@
 //! Collider is a geometric entity that can be attached to a rigid body to allow participate it
 //! participate in contact generation, collision response and proximity queries.
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::Vector2,
@@ -28,10 +29,10 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     scene::{
         base::{Base, BaseBuilder},
@@ -45,8 +46,10 @@ use crate::{
         Scene,
     },
 };
+use fyrox_core::algebra::{Isometry2, Translation2, UnitComplex};
 use fyrox_core::uuid_provider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::constructor::ConstructorProvider;
+use fyrox_graph::{BaseSceneGraph, SceneGraphNode};
 use rapier2d::geometry::ColliderHandle;
 use std::{
     cell::Cell,
@@ -262,7 +265,7 @@ impl ColliderShape {
 
 /// Collider is a geometric entity that can be attached to a rigid body to allow participate it
 /// participate in contact generation, collision response and proximity queries.
-#[derive(Reflect, Visit, Debug)]
+#[derive(Reflect, Visit, Debug, ComponentProvider)]
 pub struct Collider {
     base: Base,
 
@@ -566,9 +569,20 @@ impl Collider {
     }
 }
 
-impl NodeTrait for Collider {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Collider {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Collider", |_| {
+                ColliderBuilder::new(BaseBuilder::new().with_name("Collider 2D"))
+                    .with_shape(ColliderShape::Cuboid(Default::default()))
+                    .build_node()
+                    .into()
+            })
+            .with_group("Physics 2D")
+    }
+}
 
+impl NodeTrait for Collider {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         self.base.local_bounding_box()
     }
@@ -598,6 +612,21 @@ impl NodeTrait for Collider {
         }
     }
 
+    fn on_local_transform_changed(&self, context: &mut SyncContext) {
+        if self.native.get() != ColliderHandle::invalid() {
+            if let Some(native) = context.physics2d.colliders.get_mut(self.native.get()) {
+                native.set_position_wrt_parent(Isometry2 {
+                    rotation: UnitComplex::from_angle(
+                        self.local_transform().rotation().euler_angles().2,
+                    ),
+                    translation: Translation2 {
+                        vector: self.local_transform().position().xy(),
+                    },
+                });
+            }
+        }
+    }
+
     fn sync_native(&self, self_handle: Handle<Node>, context: &mut SyncContext) {
         context
             .physics2d
@@ -610,7 +639,7 @@ impl NodeTrait for Collider {
         if scene
             .graph
             .try_get(self.parent())
-            .and_then(|p| p.query_component_ref::<RigidBody>())
+            .and_then(|p| p.component_ref::<RigidBody>())
             .is_none()
         {
             message += "2D Collider must be a direct child of a 3D Rigid Body node, \

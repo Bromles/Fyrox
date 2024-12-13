@@ -59,7 +59,9 @@ use fxhash::FxHasher;
 use fyrox_core::num_traits::Bounded;
 use fyrox_core::sparse::AtomicIndex;
 use fyrox_core::uuid_provider;
+use fyrox_resource::embedded_data_source;
 use fyrox_resource::io::ResourceIo;
+use fyrox_resource::manager::BuiltInResource;
 use fyrox_resource::untyped::ResourceKind;
 use image::{ColorType, DynamicImage, ImageError, ImageFormat, Pixel};
 use lazy_static::lazy_static;
@@ -195,8 +197,7 @@ impl Visit for TextureKind {
                 },
                 _ => {
                     return VisitResult::Err(VisitError::User(format!(
-                        "Invalid texture kind {}!",
-                        id
+                        "Invalid texture kind {id}!"
                     )))
                 }
             };
@@ -274,6 +275,7 @@ pub struct Texture {
     magnification_filter: TextureMagnificationFilter,
     s_wrap_mode: TextureWrapMode,
     t_wrap_mode: TextureWrapMode,
+    r_wrap_mode: TextureWrapMode,
     mip_count: u32,
     anisotropy: f32,
     modifications_counter: u64,
@@ -365,6 +367,7 @@ impl Visit for Texture {
         self.anisotropy.visit("Anisotropy", &mut region)?;
         self.s_wrap_mode.visit("SWrapMode", &mut region)?;
         self.t_wrap_mode.visit("TWrapMode", &mut region)?;
+        let _ = self.t_wrap_mode.visit("RWrapMode", &mut region);
         self.mip_count.visit("MipCount", &mut region)?;
         self.kind.visit("Kind", &mut region)?;
         let mut bytes_view = PodVecView::from_pod_vec(&mut self.bytes);
@@ -390,6 +393,7 @@ impl Default for Texture {
             magnification_filter: TextureMagnificationFilter::Linear,
             s_wrap_mode: TextureWrapMode::Repeat,
             t_wrap_mode: TextureWrapMode::Repeat,
+            r_wrap_mode: TextureWrapMode::Repeat,
             mip_count: 1,
             anisotropy: 16.0,
             modifications_counter: 0,
@@ -463,6 +467,8 @@ pub struct TextureImportOptions {
     #[serde(default)]
     pub(crate) t_wrap_mode: TextureWrapMode,
     #[serde(default)]
+    pub(crate) r_wrap_mode: TextureWrapMode,
+    #[serde(default)]
     pub(crate) anisotropy: f32,
     #[serde(default)]
     pub(crate) compression: CompressionOptions,
@@ -479,6 +485,7 @@ impl Default for TextureImportOptions {
             magnification_filter: TextureMagnificationFilter::Linear,
             s_wrap_mode: TextureWrapMode::Repeat,
             t_wrap_mode: TextureWrapMode::Repeat,
+            r_wrap_mode: TextureWrapMode::Repeat,
             anisotropy: 16.0,
             compression: CompressionOptions::default(),
             mip_filter: Default::default(),
@@ -575,12 +582,15 @@ impl TextureImportOptions {
 
 lazy_static! {
     /// Placeholder texture.
-    pub static ref PLACEHOLDER: TextureResource = TextureResource::load_from_memory(
-        ResourceKind::External("__PlaceholderTexture".into()),
-        include_bytes!("default.png"),
-        Default::default()
-    )
-    .unwrap();
+    pub static ref PLACEHOLDER: BuiltInResource<Texture> = BuiltInResource::new(embedded_data_source!("default.png"),
+        |data| {
+            TextureResource::load_from_memory(
+                ResourceKind::External("__PlaceholderTexture".into()),
+                data,
+                Default::default()
+            )
+            .unwrap()
+        });
 }
 
 /// Type alias for texture resources.
@@ -643,6 +653,7 @@ impl TextureResourceExtension for TextureResource {
                 magnification_filter: TextureMagnificationFilter::Linear,
                 s_wrap_mode: TextureWrapMode::Repeat,
                 t_wrap_mode: TextureWrapMode::Repeat,
+                r_wrap_mode: TextureWrapMode::Repeat,
                 mip_count: 1,
                 anisotropy: 1.0,
                 modifications_counter: 0,
@@ -969,7 +980,7 @@ impl TexturePixelKind {
             22 => Ok(Self::RGB16F),
             23 => Ok(Self::R32F),
             24 => Ok(Self::R16F),
-            _ => Err(format!("Invalid texture kind {}!", id)),
+            _ => Err(format!("Invalid texture kind {id}!")),
         }
     }
 
@@ -1389,6 +1400,7 @@ impl Texture {
                 magnification_filter: import_options.magnification_filter,
                 s_wrap_mode: import_options.s_wrap_mode,
                 t_wrap_mode: import_options.t_wrap_mode,
+                r_wrap_mode: import_options.r_wrap_mode,
                 anisotropy: import_options.anisotropy,
                 mip_count,
                 bytes: bytes.into(),
@@ -1540,6 +1552,7 @@ impl Texture {
                 magnification_filter: import_options.magnification_filter,
                 s_wrap_mode: import_options.s_wrap_mode,
                 t_wrap_mode: import_options.t_wrap_mode,
+                r_wrap_mode: import_options.r_wrap_mode,
                 anisotropy: import_options.anisotropy,
                 is_render_target: false,
                 cache_index: Default::default(),
@@ -1623,6 +1636,16 @@ impl Texture {
     /// Returns current T coordinate wrap mode.
     pub fn t_wrap_mode(&self) -> TextureWrapMode {
         self.t_wrap_mode
+    }
+
+    /// Sets new R coordinate wrap mode.
+    pub fn set_r_wrap_mode(&mut self, r_wrap_mode: TextureWrapMode) {
+        self.r_wrap_mode = r_wrap_mode;
+    }
+
+    /// Returns current T coordinate wrap mode.
+    pub fn r_wrap_mode(&self) -> TextureWrapMode {
+        self.r_wrap_mode
     }
 
     /// Returns total mip count.
@@ -1737,13 +1760,13 @@ pub struct TextureDataRefMut<'a> {
     texture: &'a mut Texture,
 }
 
-impl<'a> Drop for TextureDataRefMut<'a> {
+impl Drop for TextureDataRefMut<'_> {
     fn drop(&mut self) {
         self.texture.modifications_counter += 1;
     }
 }
 
-impl<'a> Deref for TextureDataRefMut<'a> {
+impl Deref for TextureDataRefMut<'_> {
     type Target = Texture;
 
     fn deref(&self) -> &Self::Target {
@@ -1751,13 +1774,13 @@ impl<'a> Deref for TextureDataRefMut<'a> {
     }
 }
 
-impl<'a> DerefMut for TextureDataRefMut<'a> {
+impl DerefMut for TextureDataRefMut<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.texture
     }
 }
 
-impl<'a> TextureDataRefMut<'a> {
+impl TextureDataRefMut<'_> {
     /// Returns mutable reference to the data of the texture.
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.texture.bytes
@@ -1780,6 +1803,7 @@ impl<'a> TextureDataRefMut<'a> {
 }
 
 #[cfg(test)]
+#[allow(missing_docs)]
 pub mod test {
     use crate::resource::texture::{
         TextureKind, TexturePixelKind, TextureResource, TextureResourceExtension,

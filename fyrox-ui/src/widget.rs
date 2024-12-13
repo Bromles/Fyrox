@@ -23,6 +23,8 @@
 
 #![warn(missing_docs)]
 
+use crate::style::resource::StyleResource;
+use crate::style::StyledProperty;
 use crate::{
     brush::Brush,
     core::{
@@ -34,19 +36,51 @@ use crate::{
         visitor::prelude::*,
         ImmutableString,
     },
+    core::{parking_lot::Mutex, variable::InheritableVariable},
     define_constructor,
     message::{CursorIcon, Force, KeyCode, MessageDirection, UiMessage},
-    HorizontalAlignment, LayoutEvent, MouseButton, MouseState, RcUiNodeHandle, Thickness, UiNode,
-    UserInterface, VerticalAlignment, BRUSH_FOREGROUND, BRUSH_PRIMARY,
+    style::resource::StyleResourceExt,
+    style::Style,
+    BuildContext, HorizontalAlignment, LayoutEvent, MouseButton, MouseState, RcUiNodeHandle,
+    Thickness, UiNode, UserInterface, VerticalAlignment,
 };
-use fyrox_core::{parking_lot::Mutex, variable::InheritableVariable};
 use fyrox_graph::BaseSceneGraph;
 use fyrox_resource::Resource;
 use std::{
     any::Any,
     cell::{Cell, RefCell},
+    cmp::Ordering,
+    fmt::{Debug, Formatter},
     sync::{mpsc::Sender, Arc},
 };
+
+/// Sorting predicate that is used to sort widgets by some criteria.
+#[derive(Clone)]
+pub struct SortingPredicate(
+    pub Arc<dyn Fn(Handle<UiNode>, Handle<UiNode>, &UserInterface) -> Ordering + Send + Sync>,
+);
+
+impl SortingPredicate {
+    /// Creates new sorting predicate.
+    pub fn new<F>(func: F) -> Self
+    where
+        F: Fn(Handle<UiNode>, Handle<UiNode>, &UserInterface) -> Ordering + Send + Sync + 'static,
+    {
+        Self(Arc::new(func))
+    }
+}
+
+impl Debug for SortingPredicate {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SortingPredicate")
+    }
+}
+
+impl PartialEq for SortingPredicate {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0.as_ref(), other.0.as_ref())
+    }
+}
 
 /// A set of messages for any kind of widgets (including user controls). These messages provides basic
 /// communication elements of the UI library.
@@ -180,12 +214,12 @@ pub enum WidgetMessage {
     /// A request to change background brush of a widget. Background brushes are used to fill volume of widgets.
     ///
     /// Direction: **From/To UI**
-    Background(Brush),
+    Background(StyledProperty<Brush>),
 
     /// A request to change foreground brush of a widget. Foreground brushes are used for text, borders and so on.
     ///
     /// Direction: **From/To UI**
-    Foreground(Brush),
+    Foreground(StyledProperty<Brush>),
 
     /// A request to change name of a widget. Name is given to widget mostly for debugging purposes.
     ///
@@ -394,6 +428,14 @@ pub enum WidgetMessage {
         /// unique identifier for touch event
         id: u64,
     },
+
+    /// Sorts children widgets of a widget.
+    ///
+    /// Direction: **To UI**.
+    SortChildren(SortingPredicate),
+
+    /// Applies a style to the widget.
+    Style(StyleResource),
 }
 
 impl WidgetMessage {
@@ -419,12 +461,12 @@ impl WidgetMessage {
 
     define_constructor!(
         /// Creates [`WidgetMessage::Background`] message.
-        WidgetMessage:Background => fn background(Brush), layout: false
+        WidgetMessage:Background => fn background(StyledProperty<Brush>), layout: false
     );
 
     define_constructor!(
         /// Creates [`WidgetMessage::Foreground`] message.
-        WidgetMessage:Foreground => fn foreground(Brush), layout: false
+        WidgetMessage:Foreground => fn foreground(StyledProperty<Brush>), layout: false
     );
 
     define_constructor!(
@@ -680,6 +722,16 @@ impl WidgetMessage {
         /// be used anywhere else.
         WidgetMessage:DoubleTap => fn double_tap(pos: Vector2<f32>, force: Option<Force>, id: u64), layout: false
     );
+
+    define_constructor!(
+        /// Creates [`WidgetMessage::SortChildren`] message.
+        WidgetMessage:SortChildren => fn sort_children(SortingPredicate), layout: false
+    );
+
+    define_constructor!(
+        /// Creates [`WidgetMessage::Style`] message.
+        WidgetMessage:Style => fn style(StyleResource), layout: false
+    );
 }
 
 /// Widget is a base UI element, that is always used to build derived, more complex, widgets. In general, it is a container
@@ -711,9 +763,9 @@ pub struct Widget {
     #[reflect(setter = "set_max_size_notify")]
     pub max_size: InheritableVariable<Vector2<f32>>,
     /// Background brush of the widget.
-    pub background: InheritableVariable<Brush>,
+    pub background: InheritableVariable<StyledProperty<Brush>>,
     /// Foreground brush of the widget.
-    pub foreground: InheritableVariable<Brush>,
+    pub foreground: InheritableVariable<StyledProperty<Brush>>,
     /// Index of the row to which this widget belongs to. It is valid only in when used in [`crate::grid::Grid`] widget.
     #[reflect(setter = "set_row_notify")]
     pub row: InheritableVariable<usize>,
@@ -789,7 +841,10 @@ pub struct Widget {
     /// Current render transform of the node. It only modifies the widget at drawing stage, layout information remains unmodified.
     #[reflect(hidden)]
     pub render_transform: Matrix3<f32>,
-    /// Current visual transform of the node. It always contains a result of mixing the layout and render transformation matrices.
+    /// Current visual transform of the node. It always contains a result of mixing the layout and
+    /// render transformation matrices. Visual transform could be used to transform a point to
+    /// screen space. To transform a screen space point to local coordinates use [`Widget::screen_to_local`]
+    /// method.
     #[reflect(hidden)]
     pub visual_transform: Matrix3<f32>,
     /// A flag, that defines whether the widget will preview UI messages or not. Basically, it defines whether [crate::Control::preview_message]
@@ -980,7 +1035,8 @@ impl Widget {
         *self.allow_drop
     }
 
-    /// Maps the given point from screen to local widget's coordinates.
+    /// Maps the given point from screen to local widget's coordinates. Could be used to transform
+    /// mouse cursor position (which is in screen space) to local widget coordinates.
     #[inline]
     pub fn screen_to_local(&self, point: Vector2<f32>) -> Vector2<f32> {
         self.visual_transform
@@ -997,6 +1053,14 @@ impl Widget {
     pub fn invalidate_layout(&self) {
         self.invalidate_measure();
         self.invalidate_arrange();
+    }
+
+    pub(crate) fn notify_z_index_changed(&self) {
+        if let Some(sender) = self.layout_events_sender.as_ref() {
+            sender
+                .send(LayoutEvent::ZIndexChanged(self.handle))
+                .unwrap()
+        }
     }
 
     /// Invalidates measurement results of the widget. **WARNING**: Do not use this method, unless you understand what you're
@@ -1064,6 +1128,7 @@ impl Widget {
     #[inline]
     pub fn set_z_index(&mut self, z_index: usize) -> &mut Self {
         self.z_index.set_value_and_mark_modified(z_index);
+        self.notify_z_index_changed();
         self
     }
 
@@ -1076,27 +1141,27 @@ impl Widget {
     /// Sets the new background of the widget.
     #[inline]
     pub fn set_background(&mut self, brush: Brush) -> &mut Self {
-        self.background.set_value_and_mark_modified(brush);
+        self.background.property = brush;
         self
     }
 
     /// Returns current background of the widget.
     #[inline]
     pub fn background(&self) -> Brush {
-        (*self.background).clone()
+        self.background.property.clone()
     }
 
     /// Sets new foreground of the widget.
     #[inline]
     pub fn set_foreground(&mut self, brush: Brush) -> &mut Self {
-        self.foreground.set_value_and_mark_modified(brush);
+        self.foreground.property = brush;
         self
     }
 
     /// Returns current foreground of the widget.
     #[inline]
     pub fn foreground(&self) -> Brush {
-        (*self.foreground).clone()
+        self.foreground.property.clone()
     }
 
     /// Sets new width of the widget.
@@ -1326,7 +1391,7 @@ impl Widget {
 
     /// Handles incoming [`WidgetMessage`]s. This method **must** be called in [`crate::control::Control::handle_routed_message`]
     /// of any derived widgets!
-    pub fn handle_routed_message(&mut self, _ui: &mut UserInterface, msg: &mut UiMessage) {
+    pub fn handle_routed_message(&mut self, ui: &mut UserInterface, msg: &mut UiMessage) {
         if msg.destination() == self.handle() && msg.direction() == MessageDirection::ToWidget {
             if let Some(msg) = msg.data::<WidgetMessage>() {
                 match msg {
@@ -1334,12 +1399,10 @@ impl Widget {
                         self.opacity.set_value_and_mark_modified(opacity);
                     }
                     WidgetMessage::Background(background) => {
-                        self.background
-                            .set_value_and_mark_modified(background.clone());
+                        *self.background = background.clone();
                     }
                     WidgetMessage::Foreground(foreground) => {
-                        self.foreground
-                            .set_value_and_mark_modified(foreground.clone());
+                        *self.foreground = foreground.clone();
                     }
                     WidgetMessage::Name(name) => self.name = ImmutableString::new(name),
                     &WidgetMessage::Width(width) => {
@@ -1416,9 +1479,18 @@ impl Widget {
                     }
                     WidgetMessage::ZIndex(index) => {
                         if *self.z_index != *index {
-                            self.z_index.set_value_and_mark_modified(*index);
+                            self.set_z_index(*index);
                             self.invalidate_layout();
                         }
+                    }
+                    WidgetMessage::SortChildren(predicate) => {
+                        self.children
+                            .sort_unstable_by(|a, b| predicate.0(*a, *b, ui));
+                        self.invalidate_layout();
+                    }
+                    WidgetMessage::Style(style) => {
+                        self.background.update(style);
+                        self.foreground.update(style);
                     }
                     _ => (),
                 }
@@ -1747,9 +1819,9 @@ pub struct WidgetBuilder {
     /// Min size of the widget.
     pub min_size: Option<Vector2<f32>>,
     /// Background brush of the widget.
-    pub background: Option<Brush>,
+    pub background: Option<StyledProperty<Brush>>,
     /// Foreground brush of the widget.
-    pub foreground: Option<Brush>,
+    pub foreground: Option<StyledProperty<Brush>>,
     /// Row index of the widget.
     pub row: usize,
     /// Column index of the widget.
@@ -1927,13 +1999,13 @@ impl WidgetBuilder {
     }
 
     /// Sets the desired background brush of the widget.
-    pub fn with_background(mut self, brush: Brush) -> Self {
+    pub fn with_background(mut self, brush: StyledProperty<Brush>) -> Self {
         self.background = Some(brush);
         self
     }
 
     /// Sets the desired foreground brush of the widget.
-    pub fn with_foreground(mut self, brush: Brush) -> Self {
+    pub fn with_foreground(mut self, brush: StyledProperty<Brush>) -> Self {
         self.foreground = Some(brush);
         self
     }
@@ -2111,7 +2183,7 @@ impl WidgetBuilder {
     }
 
     /// Finishes building of the base widget.
-    pub fn build(self) -> Widget {
+    pub fn build(self, ctx: &BuildContext) -> Widget {
         Widget {
             handle: Default::default(),
             name: self.name.into(),
@@ -2128,11 +2200,11 @@ impl WidgetBuilder {
                 .into(),
             background: self
                 .background
-                .unwrap_or_else(|| BRUSH_PRIMARY.clone())
+                .unwrap_or_else(|| ctx.style.property(Style::BRUSH_PRIMARY))
                 .into(),
             foreground: self
                 .foreground
-                .unwrap_or_else(|| BRUSH_FOREGROUND.clone())
+                .unwrap_or_else(|| ctx.style.property(Style::BRUSH_FOREGROUND))
                 .into(),
             row: self.row.into(),
             column: self.column.into(),

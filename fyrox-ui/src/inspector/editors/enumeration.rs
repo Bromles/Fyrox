@@ -319,7 +319,7 @@ impl EnumPropertyEditorBuilder {
                 .widget_builder
                 .with_preview_messages(true)
                 .with_child(inspector)
-                .build(),
+                .build(ctx),
             variant_selector: self.variant_selector,
             inspector,
             definition: definition.clone(),
@@ -431,7 +431,7 @@ where
                                     .build(ctx.build_context),
                             ),
                         )
-                        .with_corner_radius(4.0)
+                        .with_corner_radius(4.0f32.into())
                         .with_pad_by_corner_radius(false),
                     )
                     .build(ctx.build_context)

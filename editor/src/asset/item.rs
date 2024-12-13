@@ -23,23 +23,22 @@ use crate::{
     fyrox::{
         asset::{manager::ResourceManager, untyped::UntypedResource, Resource, TypedResourceData},
         core::{
-            algebra::Vector2, color::Color, futures::executor::block_on, make_relative_path,
-            pool::Handle, reflect::prelude::*, type_traits::prelude::*, uuid_provider,
-            visitor::prelude::*,
+            algebra::Vector2, futures::executor::block_on, make_relative_path, pool::Handle,
+            reflect::prelude::*, type_traits::prelude::*, uuid_provider, visitor::prelude::*,
         },
         gui::{
             border::BorderBuilder,
-            brush::Brush,
             define_constructor,
             draw::{CommandTexture, Draw, DrawingContext},
             formatted_text::WrapMode,
             grid::{Column, GridBuilder, Row},
             image::{ImageBuilder, ImageMessage},
             message::{MessageDirection, UiMessage},
+            style::{resource::StyleResourceExt, Style},
             text::TextBuilder,
             widget::{Widget, WidgetBuilder, WidgetMessage},
             BuildContext, Control, HorizontalAlignment, RcUiNodeHandle, Thickness, UiNode,
-            UserInterface, BRUSH_DARKER, BRUSH_DARKEST,
+            UserInterface,
         },
         material::Material,
         scene::tilemap::tileset::TileSet,
@@ -82,6 +81,10 @@ pub struct AssetItem {
 }
 
 impl AssetItem {
+    pub const SELECTED_FOREGROUND: &'static str = "AssetItem.SelectedForeground";
+    pub const SELECTED_BACKGROUND: &'static str = "AssetItem.SelectedBackground";
+    pub const DESELECTED_BRUSH: &'static str = "AssetItem.DeselectedBrush";
+
     pub fn relative_path(&self) -> Result<PathBuf, std::io::Error> {
         let Some(resource_manager) = self.resource_manager.as_ref() else {
             return Err(std::io::Error::new(
@@ -99,6 +102,14 @@ impl AssetItem {
         } else {
             make_relative_path(&self.path)
         }
+    }
+
+    pub fn untyped_resource(&self) -> Option<UntypedResource> {
+        let resource_manager = self.resource_manager.as_ref()?;
+
+        self.relative_path()
+            .ok()
+            .and_then(|path| block_on(resource_manager.request_untyped(path)).ok())
     }
 
     pub fn resource<T: TypedResourceData>(&self) -> Option<Resource<T>> {
@@ -201,18 +212,18 @@ impl Control for AssetItem {
                             self.handle(),
                             MessageDirection::ToWidget,
                             if *select {
-                                Brush::Solid(Color::opaque(200, 220, 240))
+                                ui.style.property(Self::SELECTED_FOREGROUND)
                             } else {
-                                Brush::Solid(Color::TRANSPARENT)
+                                ui.style.property(Self::DESELECTED_BRUSH)
                             },
                         ));
                         ui.send_message(WidgetMessage::background(
                             self.handle(),
                             MessageDirection::ToWidget,
                             if *select {
-                                Brush::Solid(Color::opaque(100, 100, 100))
+                                ui.style.property(Self::SELECTED_BACKGROUND)
                             } else {
-                                Brush::Solid(Color::TRANSPARENT)
+                                ui.style.property(Self::DESELECTED_BRUSH)
                             },
                         ));
                     }
@@ -246,14 +257,14 @@ fn make_tooltip(ctx: &mut BuildContext, text: &str) -> RcUiNodeHandle {
     let handle = BorderBuilder::new(
         WidgetBuilder::new()
             .with_visibility(false)
-            .with_foreground(BRUSH_DARKEST)
-            .with_background(Brush::Solid(Color::opaque(230, 230, 230)))
+            .with_foreground(ctx.style.property(Style::BRUSH_DARKEST))
+            .with_background(ctx.style.property(Style::BRUSH_TEXT))
             .with_max_size(Vector2::new(300.0, f32::INFINITY))
             .with_child(
                 TextBuilder::new(
                     WidgetBuilder::new()
                         .with_margin(Thickness::uniform(2.0))
-                        .with_foreground(BRUSH_DARKER),
+                        .with_foreground(ctx.style.property(Style::BRUSH_DARKER)),
                 )
                 .with_wrap(WrapMode::Letter)
                 .with_text(text)
@@ -305,8 +316,8 @@ impl AssetItemBuilder {
                 .widget_builder
                 .with_margin(Thickness::uniform(1.0))
                 .with_allow_drag(true)
-                .with_foreground(Brush::Solid(Color::opaque(50, 50, 50)))
-                .with_tooltip(make_tooltip(ctx, &format!("{:?}", path)))
+                .with_foreground(ctx.style.property(Style::BRUSH_PRIMARY))
+                .with_tooltip(make_tooltip(ctx, &format!("{path:?}")))
                 .with_child(
                     GridBuilder::new(
                         WidgetBuilder::new()
@@ -318,17 +329,18 @@ impl AssetItemBuilder {
                                         .with_margin(Thickness::uniform(1.0))
                                         .on_row(1),
                                 )
+                                .with_wrap(WrapMode::Letter)
                                 .with_horizontal_text_alignment(HorizontalAlignment::Center)
                                 .with_text(path.file_name().unwrap_or_default().to_string_lossy())
                                 .build(ctx),
                             ),
                     )
-                    .add_column(Column::auto())
-                    .add_row(Row::stretch())
+                    .add_column(Column::strict(64.0))
+                    .add_row(Row::strict(64.0))
                     .add_row(Row::auto())
                     .build(ctx),
                 )
-                .build(),
+                .build(ctx),
             path,
             preview,
             selected: false,
@@ -336,5 +348,20 @@ impl AssetItemBuilder {
             resource_manager: Some(resource_manager),
         };
         ctx.add_node(UiNode::new(item))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::asset::item::AssetItemBuilder;
+    use fyrox::asset::manager::ResourceManager;
+    use fyrox::{gui::test::test_widget_deletion, gui::widget::WidgetBuilder};
+
+    #[test]
+    fn test_deletion() {
+        let rm = ResourceManager::new(Default::default());
+        test_widget_deletion(|ctx| {
+            AssetItemBuilder::new(WidgetBuilder::new()).build(rm, Default::default(), ctx)
+        });
     }
 }

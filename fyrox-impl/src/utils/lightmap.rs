@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::material::MaterialResourceBinding;
 use crate::{
     asset::manager::{ResourceManager, ResourceRegistrationError},
     core::{
@@ -33,11 +34,9 @@ use crate::{
         math::{Matrix4Ext, TriangleDefinition},
         pool::Handle,
         reflect::prelude::*,
-        sstorage::ImmutableString,
         visitor::{prelude::*, BinaryBlob},
     },
     graph::SceneGraph,
-    material::PropertyValue,
     resource::texture::{Texture, TextureKind, TexturePixelKind, TextureResource},
     scene::{
         light::{directional::DirectionalLight, point::PointLight, spot::SpotLight},
@@ -452,9 +451,8 @@ impl LightmapInputData {
                     let mut material_state = surface.material().state();
                     if let Some(material) = material_state.data() {
                         if !material
-                            .properties()
-                            .get(&ImmutableString::new("lightmapTexture"))
-                            .map(|v| matches!(v, PropertyValue::Sampler { .. }))
+                            .binding_ref("lightmapTexture")
+                            .map(|v| matches!(v, MaterialResourceBinding::Texture { .. }))
                             .unwrap_or_default()
                         {
                             continue 'surface_loop;
@@ -546,7 +544,7 @@ impl Lightmap {
                         data.geometry_buffer.iter().map(|t| t.0),
                         uv_spacing,
                     )
-                    .ok_or_else(|| LightmapGenerationError::InvalidIndex)?;
+                    .ok_or(LightmapGenerationError::InvalidIndex)?;
                     patch.data_id = data.content_hash();
 
                     apply_surface_data_patch(data, &patch);
@@ -760,7 +758,7 @@ mod test {
         for entry_set in lightmap.map.values() {
             for entry in entry_set {
                 let mut data = entry.texture.as_ref().unwrap().data_ref();
-                data.save(Path::new(&format!("{}.png", counter))).unwrap();
+                data.save(Path::new(&format!("{counter}.png"))).unwrap();
                 counter += 1;
             }
         }

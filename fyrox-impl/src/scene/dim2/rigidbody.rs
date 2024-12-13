@@ -28,6 +28,7 @@
 //! using [`RigidBody::wake_up`]. By default any external action does **not** wakes up rigid body.
 //! You can also explicitly tell to rigid body that it cannot sleep, by calling
 //! [`RigidBody::set_can_sleep`] with `false` value.
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Matrix4, Vector2},
@@ -36,10 +37,10 @@ use crate::{
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     scene::{
         base::{Base, BaseBuilder},
@@ -50,6 +51,7 @@ use crate::{
         Scene,
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::{BaseSceneGraph, SceneGraph};
 use rapier2d::prelude::RigidBodyHandle;
 use std::{
@@ -83,7 +85,7 @@ pub(crate) enum ApplyAction {
 ///
 /// Rigid body that does not move for some time will go asleep. This means that the body will not
 /// move unless it is woken up by some other moving body. This feature allows to save CPU resources.
-#[derive(Visit, Reflect)]
+#[derive(Visit, Reflect, ComponentProvider)]
 pub struct RigidBody {
     base: Base,
 
@@ -422,9 +424,19 @@ impl RigidBody {
     }
 }
 
-impl NodeTrait for RigidBody {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for RigidBody {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Rigid Body", |_| {
+                RigidBodyBuilder::new(BaseBuilder::new().with_name("Rigid Body 2D"))
+                    .build_node()
+                    .into()
+            })
+            .with_group("Physics 2D")
+    }
+}
 
+impl NodeTrait for RigidBody {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         self.base.local_bounding_box()
     }
@@ -451,7 +463,11 @@ impl NodeTrait for RigidBody {
         context.physics2d.sync_to_rigid_body_node(self_handle, self);
     }
 
-    fn sync_transform(&self, new_global_transform: &Matrix4<f32>, context: &mut SyncContext) {
+    fn on_global_transform_changed(
+        &self,
+        new_global_transform: &Matrix4<f32>,
+        context: &mut SyncContext,
+    ) {
         if !m4x4_approx_eq(new_global_transform, &self.global_transform()) {
             context
                 .physics2d

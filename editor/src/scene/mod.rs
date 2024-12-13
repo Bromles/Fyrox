@@ -18,12 +18,17 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::plugins::absm::{
+    command::fetch_machine,
+    selection::{AbsmSelection, SelectedEntity},
+};
+use crate::plugins::animation::{
+    self, command::fetch_animations_container, selection::AnimationSelection,
+};
+use crate::plugins::inspector::{
+    editors::handle::HandlePropertyEditorMessage, handlers::node::SceneNodePropertyChangedHandler,
+};
 use crate::{
-    absm::{
-        command::fetch_machine,
-        selection::{AbsmSelection, SelectedEntity},
-    },
-    animation::{self, command::fetch_animations_container, selection::AnimationSelection},
     asset::item::AssetItem,
     audio::AudioBusSelection,
     camera::{CameraController, PickingOptions},
@@ -77,10 +82,6 @@ use crate::{
         },
     },
     highlight::HighlightRenderPass,
-    inspector::{
-        editors::handle::HandlePropertyEditorMessage,
-        handlers::node::SceneNodePropertyChangedHandler,
-    },
     interaction::navmesh::selection::NavmeshSelection,
     message::MessageSender,
     scene::{
@@ -98,6 +99,7 @@ use crate::{
     Message, Settings,
 };
 use fyrox::asset::untyped::ResourceKind;
+use fyrox::graph::SceneGraphNode;
 use std::{
     any::Any,
     cell::RefCell,
@@ -159,7 +161,7 @@ lazy_static! {
 }
 
 fn make_grid_material() -> MaterialResource {
-    let material = Material::from_shader(GRID_SHADER.clone(), None);
+    let material = Material::from_shader(GRID_SHADER.clone());
     MaterialResource::new_ok(Default::default(), material)
 }
 
@@ -269,7 +271,7 @@ impl GameScene {
         pure_scene.save("Scene", &mut visitor).unwrap();
 
         if let Err(e) = visitor.save_binary(path) {
-            Err(format!("Failed to save scene! Reason: {}", e))
+            Err(format!("Failed to save scene! Reason: {e}"))
         } else {
             if settings.debugging.save_scene_in_text_form {
                 let text = visitor.save_text();
@@ -339,23 +341,23 @@ impl GameScene {
                 if settings.debugging.show_tbn {
                     node.debug_draw(ctx);
                 }
-            } else if node.query_component_ref::<Camera>().is_some() {
+            } else if node.component_ref::<Camera>().is_some() {
                 if settings.debugging.show_camera_bounds
                     && game_scene.preview_camera == Handle::NONE
                 {
                     node.debug_draw(ctx);
                 }
-            } else if node.query_component_ref::<PointLight>().is_some()
-                || node.query_component_ref::<SpotLight>().is_some()
+            } else if node.component_ref::<PointLight>().is_some()
+                || node.component_ref::<SpotLight>().is_some()
             {
                 if settings.debugging.show_light_bounds {
                     node.debug_draw(ctx);
                 }
-            } else if node.query_component_ref::<Terrain>().is_some() {
+            } else if node.component_ref::<Terrain>().is_some() {
                 if settings.debugging.show_terrains {
                     node.debug_draw(ctx);
                 }
-            } else if let Some(navmesh) = node.query_component_ref::<NavigationalMesh>() {
+            } else if let Some(navmesh) = node.component_ref::<NavigationalMesh>() {
                 if settings.navmesh.draw_all {
                     let selection = editor_selection.as_navmesh();
 
@@ -419,8 +421,8 @@ impl GameScene {
     ) -> bool {
         if let Some(selection) = editor_selection.as_graph() {
             for node in selection.nodes() {
-                for descendant in graph.traverse_handle_iter(*node) {
-                    for reference in graph.find_references_to(descendant) {
+                for (descendant_handle, _) in graph.traverse_iter(*node) {
+                    for reference in graph.find_references_to(descendant_handle) {
                         if !selection.contains(reference) {
                             return true;
                         }
@@ -447,20 +449,13 @@ impl GameScene {
 
             let mut visitor = Visitor::new();
             match dest_scene.save("Scene", &mut visitor) {
-                Err(e) => Log::err(format!(
-                    "Failed to save selection as prefab! Reason: {:?}",
-                    e
-                )),
+                Err(e) => Log::err(format!("Failed to save selection as prefab! Reason: {e:?}")),
                 Ok(_) => {
                     if let Err(e) = visitor.save_binary(path) {
-                        Log::err(format!(
-                            "Failed to save selection as prefab! Reason: {:?}",
-                            e
-                        ));
+                        Log::err(format!("Failed to save selection as prefab! Reason: {e:?}"));
                     } else {
                         Log::info(format!(
-                            "Selection was successfully saved as prefab to {:?}!",
-                            path
+                            "Selection was successfully saved as prefab to {path:?}!"
                         ))
                     }
                 }
@@ -617,7 +612,8 @@ impl SceneController for GameScene {
 
                             let nodes = scene
                                 .graph
-                                .traverse_handle_iter(instance)
+                                .traverse_iter(instance)
+                                .map(|(handle, _)| handle)
                                 .collect::<FxHashSet<Handle<Node>>>();
 
                             self.preview_instance = Some(PreviewInstance { instance, nodes });
@@ -647,7 +643,7 @@ impl SceneController for GameScene {
                 } else {
                     // In case of empty space, check intersection with oXZ plane (3D) or oXY (2D).
                     let camera = graph[self.camera_controller.camera]
-                        .query_component_ref::<Camera>()
+                        .component_ref::<Camera>()
                         .unwrap();
 
                     let normal = match camera.projection() {
@@ -909,7 +905,7 @@ impl SceneController for GameScene {
 
                 if let Some(highlighter) = self.highlighter.as_ref() {
                     highlighter.borrow_mut().resize(
-                        &gc.renderer.state,
+                        &*gc.renderer.server,
                         frame_size.x as usize,
                         frame_size.y as usize,
                     );
@@ -918,7 +914,7 @@ impl SceneController for GameScene {
         }
 
         let node_overrides = self.graph_switches.node_overrides.as_mut().unwrap();
-        for handle in scene.graph.traverse_handle_iter(self.editor_objects_root) {
+        for (handle, _) in scene.graph.traverse_iter(self.editor_objects_root) {
             node_overrides.insert(handle);
         }
 
@@ -1213,7 +1209,7 @@ impl SceneController for GameScene {
             if scene
                 .graph
                 .try_get(selection.absm_node_handle)
-                .and_then(|n| n.query_component_ref::<AnimationBlendingStateMachine>())
+                .and_then(|n| n.component_ref::<AnimationBlendingStateMachine>())
                 .is_some()
             {
                 if let Some(layer_index) = selection.layer {

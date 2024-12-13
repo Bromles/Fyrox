@@ -19,9 +19,7 @@
 // SOFTWARE.
 
 use crate::{
-    core::{
-        algebra::Vector2, pool::Handle, reflect::Reflect, scope_profile, uuid::Uuid, visitor::Visit,
-    },
+    core::{algebra::Vector2, pool::Handle, reflect::Reflect, uuid::Uuid, visitor::Visit},
     draw::DrawingContext,
     message::{OsEvent, UiMessage},
     widget::Widget,
@@ -51,6 +49,10 @@ pub trait BaseControl: Send + 'static {
     fn type_name(&self) -> &'static str;
 
     fn id(&self) -> Uuid;
+
+    /// Returns total amount of memory used by this widget (in bytes), in other words it returns
+    /// `size_of::<WidgetType>()`.
+    fn self_size(&self) -> usize;
 }
 
 impl<T> BaseControl for T
@@ -75,6 +77,10 @@ where
 
     fn id(&self) -> Uuid {
         Self::type_uuid()
+    }
+
+    fn self_size(&self) -> usize {
+        size_of::<T>()
     }
 }
 
@@ -149,8 +155,6 @@ pub trait Control:
     /// [`crate::stack_panel::StackPanel`], [`crate::wrap_panel::WrapPanel`], [`crate::grid::Grid`]). It should help you to
     /// understand measurement step better.
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
-
         self.deref().measure_override(ui, available_size)
     }
 
@@ -210,8 +214,6 @@ pub trait Control:
     /// [`crate::stack_panel::StackPanel`], [`crate::wrap_panel::WrapPanel`], [`crate::grid::Grid`]). It should help you to
     /// understand arrangement step better.
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
-
         self.deref().arrange_override(ui, final_size)
     }
 

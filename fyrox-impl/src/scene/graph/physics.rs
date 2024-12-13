@@ -995,7 +995,7 @@ pub struct PhysicsWorld {
     // A container of colliders.
     #[visit(skip)]
     #[reflect(hidden)]
-    colliders: ColliderSet,
+    pub(crate) colliders: ColliderSet,
     // A container of impulse joints.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -1014,6 +1014,17 @@ pub struct PhysicsWorld {
     #[visit(skip)]
     #[reflect(hidden)]
     debug_render_pipeline: Mutex<DebugRenderPipeline>,
+}
+
+impl Clone for PhysicsWorld {
+    fn clone(&self) -> Self {
+        PhysicsWorld {
+            enabled: self.enabled.clone(),
+            integration_parameters: self.integration_parameters.clone(),
+            gravity: self.gravity.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 fn isometry_from_global_transform(transform: &Matrix4<f32>) -> Isometry3<f32> {
@@ -1418,22 +1429,31 @@ impl PhysicsWorld {
                         .unwrap_or_else(Matrix4::identity)
                         * native.position().to_homogeneous();
 
-                    let local_rotation = UnitQuaternion::from_matrix_eps(
+                    let new_local_rotation = UnitQuaternion::from_matrix_eps(
                         &local_transform.basis(),
                         f32::EPSILON,
                         16,
                         UnitQuaternion::identity(),
                     );
-                    let local_position = Vector3::new(
+                    let new_local_position = Vector3::new(
                         local_transform[12],
                         local_transform[13],
                         local_transform[14],
                     );
 
-                    rigid_body
-                        .local_transform
-                        .set_position(local_position)
-                        .set_rotation(local_rotation);
+                    // Do not touch local transform if position/rotation is not changing. This will
+                    // prevent redundant update of its global transform, which in its turn save some
+                    // CPU cycles.
+                    let local_transform = rigid_body.local_transform();
+                    if **local_transform.position() != new_local_position
+                        || **local_transform.rotation() != new_local_rotation
+                    {
+                        rigid_body
+                            .local_transform_mut()
+                            .set_position(new_local_position)
+                            .set_rotation(new_local_rotation);
+                    }
+
                     rigid_body
                         .lin_vel
                         .set_value_with_flags(*native.linvel(), VariableFlags::MODIFIED);
@@ -1618,8 +1638,7 @@ impl PhysicsWorld {
             return;
         }
 
-        let anything_changed =
-            collider_node.transform_modified.get() || collider_node.needs_sync_model();
+        let anything_changed = collider_node.needs_sync_model();
 
         // Important notes!
         // 1) The collider node may lack backing native physics collider in case if it
@@ -1629,15 +1648,6 @@ impl PhysicsWorld {
         if collider_node.native.get() != ColliderHandle::invalid() {
             if anything_changed {
                 if let Some(native) = self.colliders.get_mut(collider_node.native.get()) {
-                    if collider_node.transform_modified.get() {
-                        native.set_position_wrt_parent(Isometry3 {
-                            rotation: **collider_node.local_transform().rotation(),
-                            translation: Translation3 {
-                                vector: **collider_node.local_transform().position(),
-                            },
-                        });
-                    }
-
                     collider_node
                         .restitution
                         .try_sync_model(|v| native.set_restitution(v));
@@ -1862,17 +1872,15 @@ impl PhysicsWorld {
         &self,
         collider: ColliderHandle,
     ) -> impl Iterator<Item = IntersectionPair> + '_ {
-        self.narrow_phase.intersection_pairs_with(collider).map(
-            |(collider1, collider2, intersecting)| IntersectionPair {
-                collider1: Handle::decode_from_u128(
-                    self.colliders.get(collider1).unwrap().user_data,
-                ),
-                collider2: Handle::decode_from_u128(
-                    self.colliders.get(collider2).unwrap().user_data,
-                ),
-                has_any_active_contact: intersecting,
-            },
-        )
+        self.narrow_phase
+            .intersection_pairs_with(collider)
+            .filter_map(|(collider1, collider2, intersecting)| {
+                Some(IntersectionPair {
+                    collider1: Handle::decode_from_u128(self.colliders.get(collider1)?.user_data),
+                    collider2: Handle::decode_from_u128(self.colliders.get(collider2)?.user_data),
+                    has_any_active_contact: intersecting,
+                })
+            })
     }
 
     /// Contacts checks between two regular colliders

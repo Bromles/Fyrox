@@ -29,23 +29,38 @@ pub mod task;
 
 mod hotreload;
 
+use crate::resource::texture::{
+    CompressionOptions, TextureImportOptions, TextureMinificationFilter, TextureResource,
+    TextureResourceExtension,
+};
 use crate::{
     asset::{
         event::ResourceEvent,
         manager::{ResourceManager, ResourceWaitContext},
+        state::ResourceState,
         untyped::{ResourceKind, UntypedResource},
         Resource,
     },
     core::{
-        algebra::Vector2, futures::executor::block_on, instant, log::Log, pool::Handle,
-        reflect::Reflect, task::TaskPool, variable::try_inherit_properties, visitor::VisitError,
+        algebra::Vector2,
+        futures::{executor::block_on, future::join_all},
+        instant,
+        log::Log,
+        pool::Handle,
+        reflect::Reflect,
+        task::TaskPool,
+        variable::try_inherit_properties,
+        visitor::VisitError,
     },
     engine::{error::EngineError, task::TaskPoolHandler},
     event::Event,
     graph::{BaseSceneGraph, NodeMapping, SceneGraph},
     gui::{
-        font::loader::FontLoader, font::Font, font::BUILT_IN_FONT, loader::UserInterfaceLoader,
-        UiUpdateSwitches, UserInterface,
+        constructor::WidgetConstructorContainer,
+        font::{loader::FontLoader, Font, BUILT_IN_FONT},
+        loader::UserInterfaceLoader,
+        style::{self, resource::StyleLoader, Style},
+        UiContainer, UiUpdateSwitches, UserInterface,
     },
     material::{
         self,
@@ -53,8 +68,11 @@ use crate::{
         shader::{loader::ShaderLoader, Shader, ShaderResource, ShaderResourceExtension},
         Material,
     },
-    plugin::{Plugin, PluginContext, PluginRegistrationContext},
-    renderer::{framework::error::FrameworkError, framework::state::GlKind, Renderer},
+    plugin::{
+        dylib::DyLibDynamicPlugin, DynamicPlugin, Plugin, PluginContainer, PluginContext,
+        PluginRegistrationContext,
+    },
+    renderer::{framework::error::FrameworkError, Renderer},
     resource::{
         curve::{loader::CurveLoader, CurveResourceState},
         model::{loader::ModelLoader, Model, ModelResource},
@@ -64,50 +82,37 @@ use crate::{
         base::NodeScriptMessage,
         camera::SkyBoxKind,
         graph::{GraphUpdateSwitches, NodePool},
+        mesh::surface::{self, SurfaceData, SurfaceDataLoader},
         navmesh,
-        node::{constructor::NodeConstructorContainer, Node},
+        node::{
+            constructor::{new_node_constructor_container, NodeConstructorContainer},
+            Node,
+        },
         sound::SoundEngine,
+        tilemap::{
+            brush::{TileMapBrush, TileMapBrushLoader},
+            tileset::{TileSet, TileSetLoader},
+        },
         Scene, SceneContainer, SceneLoader,
     },
     script::{
-        constructor::ScriptConstructorContainer, RoutingStrategy, Script, ScriptContext,
-        ScriptDeinitContext, ScriptMessage, ScriptMessageContext, ScriptMessageKind,
-        ScriptMessageSender,
+        constructor::ScriptConstructorContainer, PluginsRefMut, RoutingStrategy, Script,
+        ScriptContext, ScriptDeinitContext, ScriptMessage, ScriptMessageContext, ScriptMessageKind,
+        ScriptMessageSender, UniversalScriptContext,
     },
-    script::{PluginsRefMut, UniversalScriptContext},
     window::{Window, WindowBuilder},
 };
 use fxhash::{FxHashMap, FxHashSet};
+use fyrox_animation::AnimationTracksData;
 use fyrox_sound::{
     buffer::{loader::SoundBufferLoader, SoundBuffer},
     renderer::hrtf::{HrirSphereLoader, HrirSphereResourceData},
 };
-#[cfg(not(target_arch = "wasm32"))]
-use glutin::{
-    config::ConfigTemplateBuilder,
-    context::{
-        ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext,
-        PossiblyCurrentContext, Version,
-    },
-    display::{GetGlDisplay, GlDisplay},
-    surface::{GlSurface, Surface, SwapInterval, WindowSurface},
-};
-#[cfg(not(target_arch = "wasm32"))]
-use glutin_winit::{DisplayBuilder, GlWindow};
-#[cfg(not(target_arch = "wasm32"))]
-use raw_window_handle::HasRawWindowHandle;
-
-#[cfg(not(target_arch = "wasm32"))]
-use std::{ffi::CString, num::NonZeroU32};
-
-use std::fs::File;
-use std::io::{Cursor, Read};
-use std::sync::atomic;
-use std::sync::atomic::AtomicBool;
 use std::{
     any::TypeId,
     collections::{HashSet, VecDeque},
     fmt::{Display, Formatter},
+    io::Cursor,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{
@@ -116,19 +121,7 @@ use std::{
     },
     time::Duration,
 };
-
-use crate::plugin::dynamic::DynamicPlugin;
-use crate::plugin::{DynamicPluginState, PluginContainer};
-use crate::scene::mesh::surface;
-use crate::scene::mesh::surface::{SurfaceData, SurfaceDataLoader};
-use crate::scene::tilemap::brush::{TileMapBrush, TileMapBrushLoader};
-use crate::scene::tilemap::tileset::{TileSet, TileSetLoader};
-use fyrox_core::futures::future::join_all;
-use fyrox_core::notify;
-use fyrox_core::notify::{EventKind, RecursiveMode, Watcher};
-use fyrox_resource::state::ResourceState;
-use fyrox_ui::constructor::WidgetConstructorContainer;
-use fyrox_ui::UiContainer;
+use winit::window::Icon;
 use winit::{
     dpi::{Position, Size},
     event_loop::EventLoopWindowTarget,
@@ -154,7 +147,7 @@ impl SerializationContext {
     /// Creates default serialization context.
     pub fn new() -> Self {
         Self {
-            node_constructors: NodeConstructorContainer::new(),
+            node_constructors: new_node_constructor_container(),
             script_constructors: ScriptConstructorContainer::new(),
         }
     }
@@ -192,10 +185,33 @@ pub struct InitializedGraphicsContext {
     pub renderer: Renderer,
 
     params: GraphicsContextParams,
-    #[cfg(not(target_arch = "wasm32"))]
-    gl_context: PossiblyCurrentContext,
-    #[cfg(not(target_arch = "wasm32"))]
-    gl_surface: Surface<WindowSurface>,
+}
+
+impl InitializedGraphicsContext {
+    /// Tries to set a new icon for the window from the given data source. The data source must contain
+    /// some of the supported texture types data (png, bmp, jpg images). You can call this method
+    /// with [`include_bytes`] macro to pass file's data directly.
+    pub fn set_window_icon_from_memory(&mut self, data: &[u8]) {
+        if let Ok(texture) = TextureResource::load_from_memory(
+            ResourceKind::Embedded,
+            data,
+            TextureImportOptions::default()
+                .with_compression(CompressionOptions::NoCompression)
+                .with_minification_filter(TextureMinificationFilter::Linear),
+        ) {
+            self.set_window_icon_from_texture(&texture);
+        }
+    }
+
+    /// Tries to set a new icon for the window using the given texture.
+    pub fn set_window_icon_from_texture(&mut self, texture: &TextureResource) {
+        let data = texture.data_ref();
+        if let TextureKind::Rectangle { width, height } = data.kind() {
+            if let Ok(img) = Icon::from_rgba(data.data().to_vec(), width, height) {
+                self.window.set_window_icon(Some(img));
+            }
+        }
+    }
 }
 
 /// Graphics context of the engine, it could be in two main states:
@@ -382,7 +398,7 @@ impl AsyncSceneLoader {
                 .await
                 {
                     Ok((loader, data)) => {
-                        let scene = loader.finish(&resource_manager).await;
+                        let scene = loader.finish().await;
                         Log::verify(sender.send(SceneLoadingResult {
                             path,
                             result: Ok((scene, data)),
@@ -983,7 +999,7 @@ impl ResourceGraphVertex {
         }
     }
 
-    pub fn resolve(&self, resource_manager: &ResourceManager) {
+    pub fn resolve(&self) {
         Log::info(format!(
             "Resolving {} resource from dependency graph...",
             self.resource.kind()
@@ -991,13 +1007,10 @@ impl ResourceGraphVertex {
 
         // Wait until resource is fully loaded, then resolve.
         if block_on(self.resource.clone()).is_ok() {
-            self.resource
-                .data_ref()
-                .get_scene_mut()
-                .resolve(resource_manager);
+            self.resource.data_ref().get_scene_mut();
 
             for child in self.children.iter() {
-                child.resolve(resource_manager);
+                child.resolve();
             }
         }
     }
@@ -1014,8 +1027,8 @@ impl ResourceDependencyGraph {
         }
     }
 
-    pub fn resolve(&self, resource_manager: &ResourceManager) {
-        self.root.resolve(resource_manager)
+    pub fn resolve(&self) {
+        self.root.resolve()
     }
 }
 
@@ -1189,54 +1202,38 @@ pub(crate) fn initialize_resource_manager_loaders(
     }
 
     for shader in ShaderResource::standard_shaders() {
-        state
-            .built_in_resources
-            .insert(shader.kind().path_owned().unwrap(), shader.into_untyped());
+        state.built_in_resources.add((*shader).clone());
     }
 
     for texture in SkyBoxKind::built_in_skybox_textures() {
-        state.built_in_resources.insert(
-            texture.kind().path_owned().unwrap(),
-            texture.clone().into_untyped(),
-        );
+        state.built_in_resources.add(texture.clone());
     }
 
-    state.built_in_resources.insert(
-        BUILT_IN_FONT.kind().path_owned().unwrap(),
-        BUILT_IN_FONT.clone().into_untyped(),
-    );
+    state.built_in_resources.add(BUILT_IN_FONT.clone());
 
-    state.built_in_resources.insert(
-        texture::PLACEHOLDER.kind().path_owned().unwrap(),
-        texture::PLACEHOLDER.clone().into_untyped(),
-    );
+    state.built_in_resources.add(texture::PLACEHOLDER.clone());
+    state.built_in_resources.add(style::DEFAULT_STYLE.clone());
 
     for material in [
-        material::STANDARD.clone(),
-        material::STANDARD_2D.clone(),
-        material::STANDARD_SPRITE.clone(),
-        material::STANDARD_TERRAIN.clone(),
-        material::STANDARD_TWOSIDES.clone(),
-        material::STANDARD_PARTICLE_SYSTEM.clone(),
+        &*material::STANDARD,
+        &*material::STANDARD_2D,
+        &*material::STANDARD_SPRITE,
+        &*material::STANDARD_TERRAIN,
+        &*material::STANDARD_TWOSIDES,
+        &*material::STANDARD_PARTICLE_SYSTEM,
     ] {
-        state.built_in_resources.insert(
-            material.kind().path_owned().unwrap(),
-            material.clone().into_untyped(),
-        );
+        state.built_in_resources.add(material.clone());
     }
 
-    for material in [
-        surface::CUBE.clone(),
-        surface::QUAD.clone(),
-        surface::CYLINDER.clone(),
-        surface::SPHERE.clone(),
-        surface::CONE.clone(),
-        surface::TORUS.clone(),
+    for surface in [
+        &*surface::CUBE,
+        &*surface::QUAD,
+        &*surface::CYLINDER,
+        &*surface::SPHERE,
+        &*surface::CONE,
+        &*surface::TORUS,
     ] {
-        state.built_in_resources.insert(
-            material.kind().path_owned().unwrap(),
-            material.clone().into_untyped(),
-        );
+        state.built_in_resources.add(surface.clone());
     }
 
     state.constructors_container.add::<Texture>();
@@ -1251,6 +1248,8 @@ pub(crate) fn initialize_resource_manager_loaders(
     state.constructors_container.add::<SurfaceData>();
     state.constructors_container.add::<TileSet>();
     state.constructors_container.add::<TileMapBrush>();
+    state.constructors_container.add::<AnimationTracksData>();
+    state.constructors_container.add::<Style>();
 
     let loaders = &mut state.loaders;
     loaders.set(model_loader);
@@ -1275,38 +1274,7 @@ pub(crate) fn initialize_resource_manager_loaders(
         resource_manager: resource_manager.clone(),
     });
     state.loaders.set(TileMapBrushLoader {});
-}
-
-fn try_copy_library(source_lib_path: &Path, lib_path: &Path) -> Result<(), String> {
-    if let Err(err) = std::fs::copy(source_lib_path, lib_path) {
-        // The library could already be copied and loaded, thus cannot be replaced. For
-        // example - by the running editor, that also uses hot reloading. Check for matching
-        // content, and if does not match, pass the error further.
-        let mut src_lib_file = File::open(source_lib_path).map_err(|e| e.to_string())?;
-        let mut src_lib_file_content = Vec::new();
-        src_lib_file
-            .read_to_end(&mut src_lib_file_content)
-            .map_err(|e| e.to_string())?;
-        let mut lib_file = File::open(lib_path).map_err(|e| e.to_string())?;
-        let mut lib_file_content = Vec::new();
-        lib_file
-            .read_to_end(&mut lib_file_content)
-            .map_err(|e| e.to_string())?;
-        if src_lib_file_content != lib_file_content {
-            return Err(format!(
-                "Unable to clone the library {} to {}. It is required, because source \
-                        library has {} size, but loaded has {} size and the content does not match. \
-                        Exact reason: {:?}",
-                source_lib_path.display(),
-                lib_path.display(),
-                src_lib_file_content.len(),
-                lib_file_content.len(),
-                err
-            ));
-        }
-    }
-
-    Ok(())
+    state.loaders.set(StyleLoader);
 }
 
 impl Engine {
@@ -1330,6 +1298,7 @@ impl Engine {
     /// # };
     /// # use std::sync::Arc;
     /// # use fyrox_core::task::TaskPool;
+    /// use fyrox_ui::constructor::new_widget_constructor_container;
     ///
     /// let mut window_attributes = WindowAttributes::default();
     /// window_attributes.title = "Some title".to_string();
@@ -1345,7 +1314,7 @@ impl Engine {
     ///     resource_manager: ResourceManager::new(task_pool.clone()),
     ///     serialization_context: Arc::new(SerializationContext::new()),
     ///     task_pool,
-    ///     widget_constructors: Arc::new(Default::default()),
+    ///     widget_constructors: Arc::new(new_widget_constructor_container()),
     /// })
     /// .unwrap();
     /// ```
@@ -1439,164 +1408,12 @@ impl Engine {
                 .with_window_level(params.window_attributes.window_level)
                 .with_active(params.window_attributes.active);
 
-            #[cfg(not(target_arch = "wasm32"))]
-            let (window, gl_context, gl_surface, glow_context, gl_kind) = {
-                let mut template = ConfigTemplateBuilder::new()
-                    .prefer_hardware_accelerated(Some(true))
-                    .with_stencil_size(8)
-                    .with_depth_size(24);
-
-                if let Some(sample_count) = params.msaa_sample_count {
-                    template = template.with_multisampling(sample_count);
-                }
-
-                let (opt_window, gl_config) = DisplayBuilder::new()
-                    .with_window_builder(Some(window_builder))
-                    .build(window_target, template, |mut configs| {
-                        configs.next().unwrap()
-                    })?;
-
-                let window = opt_window.unwrap();
-
-                let raw_window_handle = window.raw_window_handle();
-
-                let gl_display = gl_config.display();
-
-                #[cfg(debug_assertions)]
-                let debug = true;
-
-                #[cfg(not(debug_assertions))]
-                let debug = true;
-
-                let gl3_3_core_context_attributes = ContextAttributesBuilder::new()
-                    .with_debug(debug)
-                    .with_profile(GlProfile::Core)
-                    .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3))))
-                    .build(Some(raw_window_handle));
-
-                let gles3_context_attributes = ContextAttributesBuilder::new()
-                    .with_debug(debug)
-                    .with_profile(GlProfile::Core)
-                    .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
-                    .build(Some(raw_window_handle));
-
-                unsafe {
-                    let attrs = window.build_surface_attributes(Default::default());
-
-                    let gl_surface = gl_config
-                        .display()
-                        .create_window_surface(&gl_config, &attrs)?;
-
-                    let (non_current_gl_context, gl_kind) = if let Ok(gl3_3_core_context) =
-                        gl_display.create_context(&gl_config, &gl3_3_core_context_attributes)
-                    {
-                        (gl3_3_core_context, GlKind::OpenGL)
-                    } else {
-                        (
-                            gl_display.create_context(&gl_config, &gles3_context_attributes)?,
-                            GlKind::OpenGLES,
-                        )
-                    };
-
-                    let gl_context = non_current_gl_context.make_current(&gl_surface)?;
-
-                    if params.vsync {
-                        Log::verify(gl_surface.set_swap_interval(
-                            &gl_context,
-                            SwapInterval::Wait(NonZeroU32::new(1).unwrap()),
-                        ));
-                    }
-
-                    (
-                        window,
-                        gl_context,
-                        gl_surface,
-                        glow::Context::from_loader_function(|s| {
-                            gl_display.get_proc_address(&CString::new(s).unwrap())
-                        }),
-                        gl_kind,
-                    )
-                }
-            };
-
-            #[cfg(target_arch = "wasm32")]
-            let (window, glow_context, gl_kind) = {
-                use crate::{
-                    core::wasm_bindgen::JsCast,
-                    dpi::{LogicalSize, PhysicalSize},
-                    platform::web::WindowExtWebSys,
-                };
-                use serde::{Deserialize, Serialize};
-
-                let inner_size = window_builder.window_attributes().inner_size;
-                let window = window_builder.build(window_target).unwrap();
-
-                let web_window = crate::core::web_sys::window().unwrap();
-                let scale_factor = web_window.device_pixel_ratio();
-
-                let canvas = window.canvas().unwrap();
-
-                // For some reason winit completely ignores the requested inner size. This is a quick-n-dirty fix
-                // that also handles HiDPI monitors. It has one issue - if user changes DPI, it won't be handled
-                // correctly.
-                if let Some(inner_size) = inner_size {
-                    let physical_inner_size: PhysicalSize<u32> =
-                        inner_size.to_physical(scale_factor);
-
-                    canvas.set_width(physical_inner_size.width);
-                    canvas.set_height(physical_inner_size.height);
-
-                    let logical_inner_size: LogicalSize<f64> = inner_size.to_logical(scale_factor);
-                    Log::verify(
-                        canvas
-                            .style()
-                            .set_property("width", &format!("{}px", logical_inner_size.width)),
-                    );
-                    Log::verify(
-                        canvas
-                            .style()
-                            .set_property("height", &format!("{}px", logical_inner_size.height)),
-                    );
-                }
-
-                let document = web_window.document().unwrap();
-                let body = document.body().unwrap();
-
-                body.append_child(&canvas)
-                    .expect("Append canvas to HTML body");
-
-                #[derive(Serialize, Deserialize)]
-                #[allow(non_snake_case)]
-                struct ContextAttributes {
-                    alpha: bool,
-                    premultipliedAlpha: bool,
-                    powerPreference: String,
-                }
-
-                let context_attributes = ContextAttributes {
-                    // Prevent blending with the background of the canvas. Otherwise the background
-                    // will "leak" and interfere with the pixels produced by the engine.
-                    alpha: false,
-                    premultipliedAlpha: false,
-                    // Try to use high performance GPU.
-                    powerPreference: "high-performance".to_string(),
-                };
-
-                let webgl2_context = canvas
-                    .get_context_with_context_options(
-                        "webgl2",
-                        &serde_wasm_bindgen::to_value(&context_attributes).unwrap(),
-                    )
-                    .unwrap()
-                    .unwrap()
-                    .dyn_into::<crate::core::web_sys::WebGl2RenderingContext>()
-                    .unwrap();
-                (
-                    window,
-                    glow::Context::from_webgl2_context(webgl2_context),
-                    GlKind::OpenGLES,
-                )
-            };
+            let (window, renderer) = Renderer::new(
+                &self.resource_manager,
+                params,
+                window_target,
+                window_builder,
+            )?;
 
             for ui in self.user_interfaces.iter_mut() {
                 ui.set_screen_size(Vector2::new(
@@ -1605,26 +1422,8 @@ impl Engine {
                 ));
             }
 
-            #[cfg(not(target_arch = "wasm32"))]
-            gl_surface.resize(
-                &gl_context,
-                NonZeroU32::new(window.inner_size().width)
-                    .unwrap_or_else(|| NonZeroU32::new(1).unwrap()),
-                NonZeroU32::new(window.inner_size().height)
-                    .unwrap_or_else(|| NonZeroU32::new(1).unwrap()),
-            );
-
             self.graphics_context = GraphicsContext::Initialized(InitializedGraphicsContext {
-                #[cfg(not(target_arch = "wasm32"))]
-                gl_context,
-                #[cfg(not(target_arch = "wasm32"))]
-                gl_surface,
-                renderer: Renderer::new(
-                    glow_context,
-                    (window.inner_size().width, window.inner_size().height),
-                    &self.resource_manager,
-                    gl_kind,
-                )?,
+                renderer,
                 window,
                 params: params.clone(),
             });
@@ -1693,13 +1492,6 @@ impl Engine {
     pub fn set_frame_size(&mut self, new_size: (u32, u32)) -> Result<(), FrameworkError> {
         if let GraphicsContext::Initialized(ctx) = &mut self.graphics_context {
             ctx.renderer.set_frame_size(new_size)?;
-
-            #[cfg(not(target_arch = "wasm32"))]
-            ctx.gl_surface.resize(
-                &ctx.gl_context,
-                NonZeroU32::new(new_size.0).unwrap_or_else(|| NonZeroU32::new(1).unwrap()),
-                NonZeroU32::new(new_size.1).unwrap_or_else(|| NonZeroU32::new(1).unwrap()),
-            );
         }
 
         Ok(())
@@ -1734,7 +1526,7 @@ impl Engine {
     ) {
         self.handle_async_scene_loading(dt, lag, window_target);
         self.pre_update(dt, window_target, lag, switches);
-        self.post_update(dt, &Default::default());
+        self.post_update(dt, &Default::default(), lag, window_target);
         self.handle_plugins_hot_reloading(dt, window_target, lag, |_| {});
     }
 
@@ -2000,7 +1792,13 @@ impl Engine {
     ///
     /// Normally, this is called from `Engine::update()`.
     /// You should only call this manually if you don't use that method.
-    pub fn post_update(&mut self, dt: f32, ui_update_switches: &UiUpdateSwitches) {
+    pub fn post_update(
+        &mut self,
+        dt: f32,
+        ui_update_switches: &UiUpdateSwitches,
+        lag: &mut f32,
+        window_target: &EventLoopWindowTarget<()>,
+    ) {
         if let GraphicsContext::Initialized(ref ctx) = self.graphics_context {
             let inner_size = ctx.window.inner_size();
             let window_size = Vector2::new(inner_size.width as f32, inner_size.height as f32);
@@ -2011,6 +1809,8 @@ impl Engine {
             }
             self.performance_statistics.ui_time = instant::Instant::now() - time;
             self.elapsed_time += dt;
+
+            self.post_update_plugins(dt, window_target, lag);
         }
     }
 
@@ -2208,6 +2008,40 @@ impl Engine {
         self.performance_statistics.plugins_time = instant::Instant::now() - time;
     }
 
+    fn post_update_plugins(
+        &mut self,
+        dt: f32,
+        window_target: &EventLoopWindowTarget<()>,
+        lag: &mut f32,
+    ) {
+        let time = instant::Instant::now();
+
+        if self.plugins_enabled {
+            let mut context = PluginContext {
+                scenes: &mut self.scenes,
+                resource_manager: &self.resource_manager,
+                graphics_context: &mut self.graphics_context,
+                dt,
+                lag,
+                user_interfaces: &mut self.user_interfaces,
+                serialization_context: &self.serialization_context,
+                widget_constructors: &self.widget_constructors,
+                performance_statistics: &self.performance_statistics,
+                elapsed_time: self.elapsed_time,
+                script_processor: &self.script_processor,
+                async_scene_loader: &mut self.async_scene_loader,
+                window_target: Some(window_target),
+                task_pool: &mut self.task_pool,
+            };
+
+            for plugin in self.plugins.iter_mut() {
+                plugin.post_update(&mut context);
+            }
+        }
+
+        self.performance_statistics.plugins_time += instant::Instant::now() - time;
+    }
+
     pub(crate) fn handle_os_event_by_plugins(
         &mut self,
         event: &Event<()>,
@@ -2381,8 +2215,7 @@ impl Engine {
                     ));
 
                     // Build resource dependency graph and resolve it first.
-                    ResourceDependencyGraph::new(model, self.resource_manager.clone())
-                        .resolve(&self.resource_manager);
+                    ResourceDependencyGraph::new(model, self.resource_manager.clone()).resolve();
 
                     Log::info("Propagating changes to active scenes...");
 
@@ -2390,7 +2223,7 @@ impl Engine {
                     // TODO: This might be inefficient if there is bunch of scenes loaded,
                     // however this seems to be very rare case so it should be ok.
                     for scene in self.scenes.iter_mut() {
-                        scene.resolve(&self.resource_manager);
+                        scene.resolve();
                     }
                 }
             }
@@ -2406,27 +2239,20 @@ impl Engine {
         }
 
         if let GraphicsContext::Initialized(ref mut ctx) = self.graphics_context {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                ctx.renderer.render_and_swap_buffers(
-                    &self.scenes,
-                    self.user_interfaces
-                        .iter()
-                        .map(|ui| ui.get_drawing_context()),
-                    &ctx.gl_surface,
-                    &ctx.gl_context,
-                    &ctx.window,
-                )?;
+            // Process queued messages from scene nodes before rendering, this is mandatory to prevent
+            // "teleportation" bug (when an object is drawn at (0,0,0) for one frame and on the one
+            // draws where it should be).
+            for scene in self.scenes.iter_mut() {
+                scene.graph.process_node_messages(None);
             }
-            #[cfg(target_arch = "wasm32")]
-            {
-                ctx.renderer.render_and_swap_buffers(
-                    &self.scenes,
-                    self.user_interfaces
-                        .iter()
-                        .map(|ui| ui.get_drawing_context()),
-                )?;
-            }
+
+            ctx.renderer.render_and_swap_buffers(
+                &self.scenes,
+                self.user_interfaces
+                    .iter()
+                    .map(|ui| ui.get_drawing_context()),
+                &ctx.window,
+            )?;
         }
 
         Ok(())
@@ -2497,7 +2323,6 @@ impl Engine {
         resource_manager: &ResourceManager,
         plugin: &dyn Plugin,
     ) {
-        *widget_constructors.context_type_id.lock() = plugin.type_id();
         plugin.register(PluginRegistrationContext {
             serialization_context,
             widget_constructors,
@@ -2544,88 +2369,28 @@ impl Engine {
     where
         P: AsRef<Path> + 'static,
     {
-        let source_lib_path = if use_relative_paths {
-            let exe_folder = std::env::current_exe()
-                .map_err(|e| e.to_string())?
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default();
+        Ok(self.add_dynamic_plugin_custom(DyLibDynamicPlugin::new(
+            path,
+            reload_when_changed,
+            use_relative_paths,
+        )?))
+    }
 
-            exe_folder.join(path.as_ref())
-        } else {
-            path.as_ref().to_path_buf()
-        };
+    /// Adds a new abstract dynamic plugin
+    pub fn add_dynamic_plugin_custom<P>(&mut self, plugin: P) -> &dyn Plugin
+    where
+        P: DynamicPlugin + 'static,
+    {
+        let display_name = plugin.display_name();
 
-        let plugin = if reload_when_changed {
-            // Make sure each process will its own copy of the module. This is needed to prevent
-            // issues when there are two or more running processes and a library of the plugin
-            // changes. If the library is present in one instance in both (or more) processes, then
-            // it is impossible to replace it on disk. To prevent this, we need to add a suffix with
-            // executable name.
-            let mut suffix = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.file_stem().map(|s| s.to_owned()))
-                .unwrap_or_default();
-            suffix.push(".module");
-            let lib_path = source_lib_path.with_extension(suffix);
-            try_copy_library(&source_lib_path, &lib_path)?;
+        let plugin_container = PluginContainer::Dynamic(Box::new(plugin));
 
-            let need_reload = Arc::new(AtomicBool::new(false));
-            let need_reload_clone = need_reload.clone();
-            let source_lib_path_clone = source_lib_path.clone();
+        self.register_plugin(plugin_container.deref());
+        self.plugins.push(plugin_container);
 
-            let mut watcher =
-                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    if let Ok(event) = event {
-                        if let EventKind::Modify(_) | EventKind::Create(_) = event.kind {
-                            need_reload_clone.store(true, atomic::Ordering::Relaxed);
+        Log::info(format!("Plugin {display_name:?} was loaded successfully"));
 
-                            Log::warn(format!(
-                                "Plugin {} was changed. Performing hot reloading...",
-                                source_lib_path_clone.display()
-                            ))
-                        }
-                    }
-                })
-                .map_err(|e| e.to_string())?;
-
-            watcher
-                .watch(&source_lib_path, RecursiveMode::NonRecursive)
-                .map_err(|e| e.to_string())?;
-
-            Log::info(format!(
-                "Watching for changes in plugin {:?}...",
-                source_lib_path
-            ));
-
-            PluginContainer::Dynamic {
-                state: DynamicPluginState::Loaded(DynamicPlugin::load(lib_path.as_os_str())?),
-                lib_path,
-                source_lib_path: source_lib_path.clone(),
-                watcher: Some(watcher),
-                need_reload,
-            }
-        } else {
-            PluginContainer::Dynamic {
-                state: DynamicPluginState::Loaded(DynamicPlugin::load(
-                    source_lib_path.as_os_str(),
-                )?),
-                lib_path: source_lib_path.clone(),
-                source_lib_path: source_lib_path.clone(),
-                watcher: None,
-                need_reload: Default::default(),
-            }
-        };
-
-        self.register_plugin(plugin.deref());
-        self.plugins.push(plugin);
-
-        Log::info(format!(
-            "Plugin {:?} was loaded successfully",
-            source_lib_path
-        ));
-
-        Ok(&**self.plugins.last().unwrap())
+        &**self.plugins.last().unwrap()
     }
 
     /// Tries to reload a specified plugin. This method tries to perform least invasive reloading, by
@@ -2638,25 +2403,22 @@ impl Engine {
         lag: &mut f32,
     ) -> Result<(), String> {
         let plugin_container = &mut self.plugins[plugin_index];
-        let PluginContainer::Dynamic {
-            state,
-            source_lib_path,
-            lib_path,
-            need_reload,
-            ..
-        } = plugin_container
-        else {
+        let PluginContainer::Dynamic(plugin) = plugin_container else {
             return Err(format!(
                 "Plugin {plugin_index} is static and cannot be reloaded!",
             ));
         };
 
-        if matches!(state, DynamicPluginState::Unloaded { .. }) {
+        if !plugin.is_loaded() {
+            // TODO: this means that something bad happened during plugin reloading.
+            // don't we want to recover from this situation by trying to load it again
+            // (maybe with clearing  `need_reload` flag, to perform new attempt only when something is changed)
             return Err(format!("Cannot reload unloaded plugin {plugin_index}!"));
         }
+        plugin.prepare_to_reload();
 
-        let plugin_type_id = state.as_loaded_ref().plugin().type_id();
-        let plugin_assembly_name = state.as_loaded_ref().plugin().assembly_name();
+        let plugin_type_id = plugin.as_loaded_ref().type_id();
+        let plugin_assembly_name = plugin.as_loaded_ref().assembly_name();
 
         // Collect all the data that belongs to the plugin
         let mut scenes_state = Vec::new();
@@ -2665,7 +2427,7 @@ impl Engine {
                 scene_handle,
                 scene,
                 &self.serialization_context,
-                state.as_loaded_ref().plugin(),
+                plugin.as_loaded_ref(),
             )? {
                 scenes_state.push(data);
             }
@@ -2682,7 +2444,7 @@ impl Engine {
                         Handle::NONE,
                         &mut data.scene,
                         &self.serialization_context,
-                        state.as_loaded_ref().plugin(),
+                        plugin.as_loaded_ref(),
                     )? {
                         prefab_scenes.push((model.clone(), scene_state));
                     }
@@ -2768,47 +2530,29 @@ impl Engine {
             }
         }
 
-        // Unload the plugin.
-        if let DynamicPluginState::Loaded(dynamic) = state {
-            let mut visitor = hotreload::make_writing_visitor();
-            dynamic
-                .plugin_mut()
-                .visit("Plugin", &mut visitor)
-                .map_err(|e| e.to_string())?;
-            let mut binary_blob = Cursor::new(Vec::<u8>::new());
-            visitor
-                .save_binary_to_memory(&mut binary_blob)
-                .map_err(|e| e.to_string())?;
+        let mut visitor = hotreload::make_writing_visitor();
+        plugin
+            .as_loaded_mut()
+            .visit("Plugin", &mut visitor)
+            .map_err(|e| e.to_string())?;
+        let mut binary_blob = Cursor::new(Vec::<u8>::new());
+        visitor
+            .save_binary_to_memory(&mut binary_blob)
+            .map_err(|e| e.to_string())?;
 
-            Log::info(format!(
-                "Plugin {plugin_index} was serialized successfully!"
-            ));
+        Log::info(format!(
+            "Plugin {plugin_index} was serialized successfully!"
+        ));
 
-            // Explicitly drop the visitor to prevent any destructors from the previous version of
-            // the plugin to run at the end of the scope. This could happen, because the visitor
-            // manages serialized smart pointers and if they'll be kept alive longer than the plugin
-            // there's a very high chance of hard crash.
-            drop(visitor);
+        // Explicitly drop the visitor to prevent any destructors from the previous version of
+        // the plugin to run at the end of the scope. This could happen, because the visitor
+        // manages serialized smart pointers and if they'll be kept alive longer than the plugin
+        // there's a very high chance of hard crash.
+        drop(visitor);
 
-            *state = DynamicPluginState::Unloaded {
-                binary_blob: binary_blob.into_inner(),
-            };
+        let binary_blob = binary_blob.into_inner();
 
-            Log::info(format!("Plugin {plugin_index} was unloaded successfully!"));
-
-            // Replace the module.
-            try_copy_library(source_lib_path, lib_path)?;
-
-            Log::info(format!(
-                "{plugin_index} plugin's module {} was successfully cloned to {}.",
-                source_lib_path.display(),
-                lib_path.display()
-            ));
-        }
-
-        if let DynamicPluginState::Unloaded { binary_blob } = state {
-            let mut dynamic = DynamicPlugin::load(lib_path)?;
-
+        plugin.reload(&mut |plugin| {
             // Re-register the plugin. This is needed, because it might contain new script/node/widget
             // types (or removed ones too). This is done right before deserialization, because plugin
             // might contain some entities, that have dynamic registration.
@@ -2816,27 +2560,22 @@ impl Engine {
                 &self.serialization_context,
                 &self.widget_constructors,
                 &self.resource_manager,
-                dynamic.plugin(),
+                plugin,
             );
 
             let mut visitor = hotreload::make_reading_visitor(
-                binary_blob,
+                &binary_blob,
                 &self.serialization_context,
                 &self.resource_manager,
                 &self.widget_constructors,
             )
             .map_err(|e| e.to_string())?;
-            dynamic
-                .plugin_mut()
+
+            plugin
                 .visit("Plugin", &mut visitor)
                 .map_err(|e| e.to_string())?;
-
-            *state = DynamicPluginState::Loaded(dynamic);
-
-            need_reload.store(false, atomic::Ordering::Relaxed);
-
-            Log::info(format!("Plugin {plugin_index} was reloaded successfully!"));
-        }
+            Ok(())
+        })?;
 
         // Deserialize prefab scene content.
         for (model, scene_state) in prefab_scenes {
@@ -2862,7 +2601,7 @@ impl Engine {
         }
 
         // Call `on_loaded` for plugins, so they could restore some runtime non-serializable state.
-        state.as_loaded_mut().plugin_mut().on_loaded(PluginContext {
+        plugin.as_loaded_mut().on_loaded(PluginContext {
             scenes: &mut self.scenes,
             resource_manager: &self.resource_manager,
             user_interfaces: &mut self.user_interfaces,
@@ -2879,10 +2618,7 @@ impl Engine {
             task_pool: &mut self.task_pool,
         });
 
-        Log::info(format!(
-            "Plugin {} was successfully reloaded!",
-            plugin_index
-        ));
+        Log::info(format!("Plugin {plugin_index} was successfully reloaded!"));
 
         Ok(())
     }
@@ -2890,6 +2626,11 @@ impl Engine {
     /// Returns a reference to the plugins.
     pub fn plugins(&self) -> &[PluginContainer] {
         &self.plugins
+    }
+
+    /// Returns a mutable reference to the plugins.
+    pub fn plugins_mut(&mut self) -> &mut [PluginContainer] {
+        &mut self.plugins
     }
 
     /// Tries to reload all dynamic plugins registered in the engine, that needs to be reloaded.
@@ -2904,11 +2645,8 @@ impl Engine {
         F: FnMut(&dyn Plugin),
     {
         for plugin_index in 0..self.plugins.len() {
-            if let PluginContainer::Dynamic {
-                ref need_reload, ..
-            } = self.plugins[plugin_index]
-            {
-                if need_reload.load(atomic::Ordering::Relaxed) {
+            if let PluginContainer::Dynamic(plugin) = &self.plugins[plugin_index] {
+                if plugin.is_reload_needed_now() {
                     self.reload_plugin(plugin_index, dt, window_target, lag)?;
 
                     on_reloaded(self.plugins[plugin_index].deref_mut());

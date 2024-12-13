@@ -233,7 +233,8 @@ pub mod inspector;
 pub mod key;
 pub mod list_view;
 pub mod loader;
-pub mod matrix2;
+pub mod log;
+pub mod matrix;
 pub mod menu;
 pub mod message;
 pub mod messagebox;
@@ -253,6 +254,7 @@ pub mod scroll_viewer;
 pub mod searchbar;
 pub mod selector;
 pub mod stack_panel;
+pub mod style;
 pub mod tab_control;
 pub mod text;
 pub mod text_box;
@@ -277,7 +279,6 @@ use crate::{
         math::Rect,
         pool::{Handle, Pool},
         reflect::prelude::*,
-        scope_profile,
         uuid::uuid,
         visitor::prelude::*,
     },
@@ -328,39 +329,13 @@ use fyrox_graph::{
 pub use node::*;
 pub use thickness::*;
 
+use crate::constructor::new_widget_constructor_container;
+use crate::message::RoutingStrategy;
+use crate::style::resource::{StyleResource, StyleResourceExt};
+use crate::style::{Style, DEFAULT_STYLE};
 pub use fyrox_animation as generic_animation;
 use fyrox_core::pool::ErasedHandle;
-
-// TODO: Make this part of UserInterface struct.
-pub const COLOR_COAL_BLACK: Color = Color::opaque(10, 10, 10);
-pub const COLOR_DARKEST: Color = Color::opaque(20, 20, 20);
-pub const COLOR_DARKER: Color = Color::opaque(30, 30, 30);
-pub const COLOR_DARK: Color = Color::opaque(40, 40, 40);
-pub const COLOR_PRIMARY: Color = Color::opaque(50, 50, 50);
-pub const COLOR_LIGHT: Color = Color::opaque(70, 70, 70);
-pub const COLOR_LIGHTER: Color = Color::opaque(85, 85, 85);
-pub const COLOR_LIGHTEST: Color = Color::opaque(100, 100, 100);
-pub const COLOR_BRIGHT: Color = Color::opaque(130, 130, 130);
-pub const COLOR_BRIGHTEST: Color = Color::opaque(160, 160, 160);
-pub const COLOR_BRIGHT_BLUE: Color = Color::opaque(80, 118, 178);
-pub const COLOR_DIM_BLUE: Color = Color::opaque(66, 99, 149);
-pub const COLOR_TEXT: Color = Color::opaque(220, 220, 220);
-pub const COLOR_FOREGROUND: Color = Color::WHITE;
-
-pub const BRUSH_COAL_BLACK: Brush = Brush::Solid(COLOR_COAL_BLACK);
-pub const BRUSH_DARKEST: Brush = Brush::Solid(COLOR_DARKEST);
-pub const BRUSH_DARKER: Brush = Brush::Solid(COLOR_DARKER);
-pub const BRUSH_DARK: Brush = Brush::Solid(COLOR_DARK);
-pub const BRUSH_PRIMARY: Brush = Brush::Solid(COLOR_PRIMARY);
-pub const BRUSH_LIGHT: Brush = Brush::Solid(COLOR_LIGHT);
-pub const BRUSH_LIGHTER: Brush = Brush::Solid(COLOR_LIGHTER);
-pub const BRUSH_LIGHTEST: Brush = Brush::Solid(COLOR_LIGHTEST);
-pub const BRUSH_BRIGHT: Brush = Brush::Solid(COLOR_BRIGHT);
-pub const BRUSH_BRIGHTEST: Brush = Brush::Solid(COLOR_BRIGHTEST);
-pub const BRUSH_BRIGHT_BLUE: Brush = Brush::Solid(COLOR_BRIGHT_BLUE);
-pub const BRUSH_DIM_BLUE: Brush = Brush::Solid(COLOR_DIM_BLUE);
-pub const BRUSH_TEXT: Brush = Brush::Solid(COLOR_TEXT);
-pub const BRUSH_FOREGROUND: Brush = Brush::Solid(COLOR_FOREGROUND);
+use fyrox_resource::untyped::ResourceKind;
 
 #[derive(Default, Reflect, Debug)]
 pub(crate) struct RcUiNodeHandleInner {
@@ -513,7 +488,7 @@ impl NodeStatistics {
             let prev_count = prev_stats.count_of(type_name);
             let delta = count - prev_count;
             if delta != 0 || show_unchanged {
-                println!("{}: \x1b[93m{}\x1b[0m", type_name, delta);
+                println!("{type_name}: \x1b[93m{delta}\x1b[0m");
             }
         }
     }
@@ -524,7 +499,7 @@ impl NodeStatistics {
             let count = self.count_of(type_name);
             let prev_count = prev_stats.count_of(type_name);
             if count - prev_count != 0 {
-                println!("{}: \x1b[93m{}\x1b[0m", type_name, count);
+                println!("{type_name}: \x1b[93m{count}\x1b[0m");
             }
         }
     }
@@ -583,31 +558,28 @@ pub struct RestrictionEntry {
 }
 
 #[derive(Clone, Debug)]
-struct TooltipEntry {
-    tooltip: RcUiNodeHandle,
+pub struct TooltipEntry {
+    pub tooltip: RcUiNodeHandle,
+    pub appear_timer: f32,
+    pub shown: bool,
     /// Time remaining until this entry should disappear (in seconds).
-    time: f32,
+    pub disappear_timer: f32,
     /// Maximum time that it should be kept for
     /// This is stored here as well, because when hovering
     /// over the tooltip, we don't know the time it should stay for and
     /// so we use this to refresh the timer.
-    max_time: f32,
+    pub max_time: f32,
 }
+
 impl TooltipEntry {
-    fn new(tooltip: RcUiNodeHandle, time: f32) -> TooltipEntry {
+    fn new(tooltip: RcUiNodeHandle, appear_timeout: f32, disappear_timeout: f32) -> TooltipEntry {
         Self {
             tooltip,
-            time,
-            max_time: time,
+            appear_timer: appear_timeout,
+            shown: false,
+            disappear_timer: disappear_timeout,
+            max_time: disappear_timeout,
         }
-    }
-
-    fn decrease(&mut self, amount: f32) {
-        self.time -= amount;
-    }
-
-    fn should_display(&self) -> bool {
-        self.time > 0.0
     }
 }
 
@@ -616,6 +588,7 @@ pub enum LayoutEvent {
     MeasurementInvalidated(Handle<UiNode>),
     ArrangementInvalidated(Handle<UiNode>),
     VisibilityChanged(Handle<UiNode>),
+    ZIndexChanged(Handle<UiNode>),
 }
 
 #[derive(Clone, Debug, Visit, Reflect, Default)]
@@ -689,6 +662,7 @@ pub struct UserInterface {
     captured_node: Handle<UiNode>,
     keyboard_focus_node: Handle<UiNode>,
     cursor_position: Vector2<f32>,
+    pub style: StyleResource,
     #[reflect(hidden)]
     receiver: Receiver<UiMessage>,
     #[reflect(hidden)]
@@ -713,10 +687,13 @@ pub struct UserInterface {
     layout_events_sender: Sender<LayoutEvent>,
     need_update_global_transform: bool,
     #[reflect(hidden)]
+    z_index_update_set: FxHashSet<Handle<UiNode>>,
+    #[reflect(hidden)]
     pub default_font: FontResource,
     #[reflect(hidden)]
     double_click_entries: FxHashMap<MouseButton, DoubleClickEntry>,
     pub double_click_time_slice: f32,
+    pub tooltip_appear_delay: f32,
 }
 
 impl Visit for UserInterface {
@@ -747,6 +724,9 @@ impl Visit for UserInterface {
         self.cursor_icon.visit("CursorIcon", &mut region)?;
         self.double_click_time_slice
             .visit("DoubleClickTimeSlice", &mut region)?;
+        let _ = self
+            .tooltip_appear_delay
+            .visit("TooltipAppearDelay", &mut region);
 
         if region.is_reading() {
             for node in self.nodes.iter() {
@@ -780,6 +760,7 @@ impl Clone for UserInterface {
             captured_node: self.captured_node,
             keyboard_focus_node: self.keyboard_focus_node,
             cursor_position: self.cursor_position,
+            style: StyleResource::new_ok(ResourceKind::Embedded, Style::dark_style()),
             receiver,
             sender,
             stack: self.stack.clone(),
@@ -795,9 +776,11 @@ impl Clone for UserInterface {
             layout_events_receiver,
             layout_events_sender,
             need_update_global_transform: self.need_update_global_transform,
+            z_index_update_set: self.z_index_update_set.clone(),
             default_font: self.default_font.clone(),
             double_click_entries: self.double_click_entries.clone(),
             double_click_time_slice: self.double_click_time_slice,
+            tooltip_appear_delay: self.tooltip_appear_delay,
         }
     }
 }
@@ -963,8 +946,6 @@ fn draw_node(
     node_handle: Handle<UiNode>,
     drawing_context: &mut DrawingContext,
 ) {
-    scope_profile!();
-
     let node = &nodes[node_handle];
     if !node.is_globally_visible() {
         return;
@@ -1067,6 +1048,7 @@ impl UserInterface {
         screen_size: Vector2<f32>,
     ) -> UserInterface {
         let (layout_events_sender, layout_events_receiver) = mpsc::channel();
+        let style = StyleResource::new_ok(ResourceKind::Embedded, Style::dark_style());
         let mut ui = UserInterface {
             screen_size,
             sender,
@@ -1076,9 +1058,10 @@ impl UserInterface {
             root_canvas: Handle::NONE,
             nodes: Pool::new(),
             cursor_position: Vector2::new(0.0, 0.0),
-            drawing_context: DrawingContext::new(),
+            drawing_context: DrawingContext::new(style.clone()),
             picked_node: Handle::NONE,
             prev_picked_node: Handle::NONE,
+            style,
             keyboard_focus_node: Handle::NONE,
             stack: Default::default(),
             picking_stack: Default::default(),
@@ -1093,15 +1076,30 @@ impl UserInterface {
             layout_events_receiver,
             layout_events_sender,
             need_update_global_transform: Default::default(),
-            default_font: BUILT_IN_FONT.clone(),
+            z_index_update_set: Default::default(),
+            default_font: BUILT_IN_FONT.resource(),
             double_click_entries: Default::default(),
             double_click_time_slice: 0.5, // 500 ms is standard in most operating systems.
+            tooltip_appear_delay: 0.55,
         };
-        ui.root_canvas = ui.add_node(UiNode::new(Canvas {
-            widget: WidgetBuilder::new().build(),
-        }));
+        let root_node = UiNode::new(Canvas {
+            widget: WidgetBuilder::new().build(&ui.build_ctx()),
+        });
+        ui.root_canvas = ui.add_node(root_node);
         ui.keyboard_focus_node = ui.root_canvas;
         ui
+    }
+
+    pub fn set_tooltip_appear_delay(&mut self, appear_delay: f32) {
+        self.tooltip_appear_delay = appear_delay;
+    }
+
+    pub fn tooltip_appear_delay(&self) -> f32 {
+        self.tooltip_appear_delay
+    }
+
+    pub fn active_tooltip(&self) -> Option<&TooltipEntry> {
+        self.active_tooltip.as_ref()
     }
 
     pub fn keyboard_modifiers(&self) -> KeyboardModifiers {
@@ -1142,8 +1140,6 @@ impl UserInterface {
     }
 
     fn update_global_visibility(&mut self, from: Handle<UiNode>) {
-        scope_profile!();
-
         self.stack.clear();
         self.stack.push(from);
         while let Some(node_handle) = self.stack.pop() {
@@ -1175,8 +1171,6 @@ impl UserInterface {
     }
 
     fn update_visual_transform(&mut self, from: Handle<UiNode>) {
-        scope_profile!();
-
         self.stack.clear();
         self.stack.push(from);
         while let Some(node_handle) = self.stack.pop() {
@@ -1243,7 +1237,25 @@ impl UserInterface {
                 LayoutEvent::VisibilityChanged(node) => {
                     self.update_global_visibility(node);
                 }
+                LayoutEvent::ZIndexChanged(node) => {
+                    if let Some(node_ref) = self.nodes.try_borrow(node) {
+                        // Z index affects the location of the node in its parent's children list.
+                        // Hash set will remove duplicate requests of z-index updates, thus improving
+                        // performance.
+                        self.z_index_update_set.insert(node_ref.parent);
+                    }
+                }
             }
+        }
+
+        // Do z-index sorting.
+        for node_handle in self.z_index_update_set.drain() {
+            let mbc = self.nodes.begin_multi_borrow();
+            if let Ok(mut node) = mbc.try_get_mut(node_handle) {
+                node.children.sort_by_key(|handle| {
+                    mbc.try_get(*handle).map(|c| *c.z_index).unwrap_or_default()
+                });
+            };
         }
     }
 
@@ -1318,13 +1330,35 @@ impl UserInterface {
         }
     }
 
+    pub fn style(&self) -> &StyleResource {
+        &self.style
+    }
+
+    pub fn set_style(&mut self, style: StyleResource) {
+        self.style = style;
+
+        fn notify_depth_first(node: Handle<UiNode>, ui: &UserInterface) {
+            if let Some(node_ref) = ui.try_get(node) {
+                for child in node_ref.children.iter() {
+                    notify_depth_first(*child, ui);
+                }
+
+                ui.send_message(WidgetMessage::style(
+                    node,
+                    MessageDirection::ToWidget,
+                    ui.style.clone(),
+                ));
+            }
+        }
+
+        notify_depth_first(self.root_canvas, self);
+    }
+
     pub fn cursor(&self) -> CursorIcon {
         self.cursor_icon
     }
 
     pub fn draw(&mut self) -> &DrawingContext {
-        scope_profile!();
-
         self.drawing_context.clear();
 
         for node in self.nodes.iter_mut() {
@@ -1384,7 +1418,9 @@ impl UserInterface {
                 self.drawing_context.push_rounded_rect(&bounds, 1.0, 2.0, 6);
                 self.drawing_context.commit(
                     bounds,
-                    Brush::Solid(COLOR_BRIGHT_BLUE),
+                    DEFAULT_STYLE
+                        .resource
+                        .get_or_default(Style::BRUSH_BRIGHT_BLUE),
                     CommandTexture::None,
                     None,
                 );
@@ -1403,8 +1439,6 @@ impl UserInterface {
     }
 
     pub fn arrange_node(&self, handle: Handle<UiNode>, final_rect: &Rect<f32>) -> bool {
-        scope_profile!();
-
         let node = self.node(handle);
 
         if node.is_arrange_valid() && node.prev_arrange.get() == *final_rect {
@@ -1485,8 +1519,6 @@ impl UserInterface {
     }
 
     pub fn measure_node(&self, handle: Handle<UiNode>, available_size: Vector2<f32>) -> bool {
-        scope_profile!();
-
         let node = self.node(handle);
 
         if node.is_measure_valid() && node.prev_measure.get() == available_size {
@@ -1554,8 +1586,6 @@ impl UserInterface {
     }
 
     fn is_node_clipped(&self, node_handle: Handle<UiNode>, pt: Vector2<f32>) -> bool {
-        scope_profile!();
-
         let mut clipped = true;
 
         let widget = self.nodes.borrow(node_handle);
@@ -1586,8 +1616,6 @@ impl UserInterface {
     }
 
     fn is_node_contains_point(&self, node_handle: Handle<UiNode>, pt: Vector2<f32>) -> bool {
-        scope_profile!();
-
         let widget = self.nodes.borrow(node_handle);
 
         if !widget.is_globally_visible() {
@@ -1613,8 +1641,6 @@ impl UserInterface {
         pt: Vector2<f32>,
         level: &mut i32,
     ) -> Handle<UiNode> {
-        scope_profile!();
-
         let widget = self.nodes.borrow(node_handle);
 
         if !widget.is_hit_test_visible()
@@ -1646,6 +1672,7 @@ impl UserInterface {
         picked
     }
 
+    /// Cursor position in screen space coordinate system.
     pub fn cursor_position(&self) -> Vector2<f32> {
         self.cursor_position
     }
@@ -1657,8 +1684,6 @@ impl UserInterface {
     }
 
     pub fn hit_test(&self, pt: Vector2<f32>) -> Handle<UiNode> {
-        scope_profile!();
-
         if self.nodes.is_valid_handle(self.captured_node) {
             self.captured_node
         } else if self.picking_stack.is_empty() {
@@ -1753,8 +1778,6 @@ impl UserInterface {
     }
 
     fn bubble_message(&mut self, message: &mut UiMessage) {
-        scope_profile!();
-
         // Dispatch event using bubble strategy. Bubble routing means that message will go
         // from specified destination up on tree to tree root.
         // Gather chain of nodes from source to root.
@@ -1796,35 +1819,17 @@ impl UserInterface {
                     }
                 }
 
-                self.bubble_message(&mut message);
+                match message.routing_strategy {
+                    RoutingStrategy::BubbleUp => self.bubble_message(&mut message),
+                    RoutingStrategy::Direct => {
+                        let (ticket, mut node) = self.nodes.take_reserve(message.destination());
+                        node.handle_routed_message(self, &mut message);
+                        self.nodes.put_back(ticket, node);
+                    }
+                }
 
                 if let Some(msg) = message.data::<WidgetMessage>() {
                     match msg {
-                        WidgetMessage::ZIndex(_) => {
-                            // Keep order of children of a parent node of a node that changed z-index
-                            // the same as z-index of children.
-                            if let Some(parent) =
-                                self.try_get(message.destination()).map(|n| n.parent())
-                            {
-                                self.stack.clear();
-                                for child in self.nodes.borrow(parent).children() {
-                                    self.stack.push(*child);
-                                }
-
-                                let nodes = &mut self.nodes;
-                                self.stack.sort_by(|a, b| {
-                                    let z_a = nodes.borrow(*a).z_index();
-                                    let z_b = nodes.borrow(*b).z_index();
-                                    z_a.cmp(&z_b)
-                                });
-
-                                let parent = self.nodes.borrow_mut(parent);
-                                parent.clear_children();
-                                for child in self.stack.iter() {
-                                    parent.add_child(*child, false);
-                                }
-                            }
-                        }
                         WidgetMessage::Focus => {
                             if self.nodes.is_valid_handle(message.destination())
                                 && message.direction() == MessageDirection::ToWidget
@@ -2104,16 +2109,20 @@ impl UserInterface {
         ));
     }
 
-    fn replace_or_update_tooltip(&mut self, tooltip: RcUiNodeHandle, time: f32) {
+    fn replace_or_update_tooltip(&mut self, tooltip: RcUiNodeHandle, disappear_timeout: f32) {
         if let Some(entry) = self.active_tooltip.as_mut() {
             if entry.tooltip == tooltip {
-                // Keep current visible.
-                entry.time = time;
+                if entry.shown {
+                    // Keep current visible.
+                    entry.disappear_timer = disappear_timeout;
+                }
             } else {
                 let old_tooltip = entry.tooltip.clone();
 
+                entry.shown = false;
+                entry.appear_timer = self.tooltip_appear_delay;
+                entry.disappear_timer = disappear_timeout;
                 entry.tooltip = tooltip.clone();
-                self.show_tooltip(tooltip);
 
                 // Hide previous.
                 self.send_message(WidgetMessage::visibility(
@@ -2123,8 +2132,11 @@ impl UserInterface {
                 ));
             }
         } else {
-            self.show_tooltip(tooltip.clone());
-            self.active_tooltip = Some(TooltipEntry::new(tooltip, time));
+            self.active_tooltip = Some(TooltipEntry::new(
+                tooltip,
+                self.tooltip_appear_delay,
+                disappear_timeout,
+            ));
         }
     }
 
@@ -2133,19 +2145,28 @@ impl UserInterface {
     fn update_tooltips(&mut self, dt: f32) {
         let sender = &self.sender;
         if let Some(entry) = self.active_tooltip.as_mut() {
-            entry.decrease(dt);
-            if !entry.should_display() {
-                // This uses sender directly since we're currently mutably borrowing
-                // visible_tooltips
-                sender
-                    .send(WidgetMessage::visibility(
-                        entry.tooltip.handle(),
-                        MessageDirection::ToWidget,
-                        false,
-                    ))
-                    .unwrap();
+            if entry.shown {
+                entry.disappear_timer -= dt;
+                if entry.disappear_timer <= 0.0 {
+                    // This uses sender directly since we're currently mutably borrowing
+                    // visible_tooltips
+                    sender
+                        .send(WidgetMessage::visibility(
+                            entry.tooltip.handle(),
+                            MessageDirection::ToWidget,
+                            false,
+                        ))
+                        .unwrap();
 
-                self.active_tooltip = None;
+                    self.active_tooltip = None;
+                }
+            } else {
+                entry.appear_timer -= dt;
+                if entry.appear_timer <= 0.0 {
+                    entry.shown = true;
+                    let tooltip = entry.tooltip.clone();
+                    self.show_tooltip(tooltip);
+                }
             }
         }
 
@@ -2158,14 +2179,14 @@ impl UserInterface {
 
             if let Some(tooltip) = node.tooltip() {
                 // They have a tooltip, we stop here and use that.
-                let tooltip_time = node.tooltip_time();
-                self.replace_or_update_tooltip(tooltip, tooltip_time);
+                let disappear_timeout = node.tooltip_time();
+                self.replace_or_update_tooltip(tooltip, disappear_timeout);
                 break;
             } else if let Some(entry) = self.active_tooltip.as_mut() {
                 if entry.tooltip.handle() == handle {
                     // The current node was a tooltip.
                     // We refresh the timer back to the stored max time.
-                    entry.time = entry.max_time;
+                    entry.disappear_timer = entry.max_time;
                     break;
                 }
             }
@@ -2797,15 +2818,6 @@ impl UserInterface {
         self.isolate_node(child_handle);
         self.nodes[child_handle].set_parent(parent_handle);
         self.nodes[parent_handle].add_child(child_handle, in_front);
-
-        // Sort by Z index. This uses stable sort, so every child node with the same z index will
-        // remain on its position.
-        let mbc = self.nodes.begin_multi_borrow();
-        if let Ok(mut parent) = mbc.try_get_mut(parent_handle) {
-            parent
-                .children
-                .sort_by_key(|handle| mbc.try_get(*handle).map(|c| *c.z_index).unwrap_or_default());
-        };
     }
 
     #[inline]
@@ -2975,7 +2987,7 @@ impl UserInterface {
     ) -> Result<Self, VisitError> {
         Self::load_from_file_ex(
             path,
-            Arc::new(WidgetConstructorContainer::new()),
+            Arc::new(new_widget_constructor_container()),
             resource_manager,
             &FsResourceIo,
         )
@@ -2987,6 +2999,7 @@ impl UserInterface {
             widget.handle = handle;
             widget.layout_events_sender = Some(self.layout_events_sender.clone());
             widget.invalidate_layout();
+            widget.notify_z_index_changed();
         }
     }
 
@@ -3038,8 +3051,7 @@ impl UserInterface {
         let used_resources_count = used_resources.len();
 
         Log::info(format!(
-            "UserInterface - {} resources collected. Waiting them to load...",
-            used_resources_count
+            "UserInterface - {used_resources_count} resources collected. Waiting them to load..."
         ));
 
         // Wait everything.
@@ -3127,6 +3139,7 @@ impl BaseSceneGraph for UserInterface {
         node.handle = node_handle;
         self.methods_registry.register(node);
         node.invalidate_layout();
+        node.notify_z_index_changed();
         self.layout_events_sender
             .send(LayoutEvent::VisibilityChanged(node_handle))
             .unwrap();
@@ -3440,13 +3453,33 @@ impl ResourceData for UserInterface {
     }
 }
 
+pub mod test {
+    use crate::{
+        core::{algebra::Vector2, pool::Handle},
+        message::MessageDirection,
+        widget::WidgetMessage,
+        BuildContext, UiNode, UserInterface,
+    };
+
+    pub fn test_widget_deletion(constructor: impl FnOnce(&mut BuildContext) -> Handle<UiNode>) {
+        let screen_size = Vector2::new(100.0, 100.0);
+        let mut ui = UserInterface::new(screen_size);
+        let widget = constructor(&mut ui.build_ctx());
+        ui.send_message(WidgetMessage::remove(widget, MessageDirection::ToWidget));
+        ui.update(screen_size, 1.0 / 60.0, &Default::default());
+        while ui.poll_message().is_some() {}
+        // Only root node must be alive.
+        assert_eq!(ui.nodes().alive_count(), 1);
+    }
+}
+
 #[cfg(test)]
-mod test {
-    use crate::message::{ButtonState, KeyCode};
+mod test_inner {
     use crate::{
         border::BorderBuilder,
         core::algebra::{Rotation2, UnitComplex, Vector2},
         message::MessageDirection,
+        message::{ButtonState, KeyCode},
         text_box::TextBoxBuilder,
         transform_size,
         widget::{WidgetBuilder, WidgetMessage},

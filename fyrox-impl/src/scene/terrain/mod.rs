@@ -20,12 +20,6 @@
 
 //! Everything related to terrains. See [`Terrain`] docs for more info.
 
-use crate::material::MaterialResourceExtension;
-use crate::renderer::bundle::PersistentIdentifier;
-use crate::resource::texture::{
-    TextureDataRefMut, TextureMagnificationFilter, TextureMinificationFilter,
-};
-use crate::scene::node::RdcControlFlow;
 use crate::{
     asset::{Resource, ResourceDataRef},
     core::{
@@ -36,21 +30,24 @@ use crate::{
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{prelude::*, PodVecView},
-        TypeUuidProvider,
     },
-    material::{Material, MaterialResource, PropertyValue},
+    material::MaterialResourceExtension,
+    material::{Material, MaterialProperty, MaterialResource},
     renderer::{
         self,
         bundle::{RenderContext, SurfaceInstanceData},
-        framework::geometry_buffer::ElementRange,
+        framework::ElementRange,
     },
     resource::texture::{
         Texture, TextureKind, TexturePixelKind, TextureResource, TextureResourceExtension,
         TextureWrapMode,
     },
+    resource::texture::{TextureDataRefMut, TextureMagnificationFilter, TextureMinificationFilter},
+    scene::node::RdcControlFlow,
     scene::{
         base::{Base, BaseBuilder},
         debug::SceneDrawingContext,
@@ -79,7 +76,9 @@ pub mod brushstroke;
 mod geometry;
 mod quadtree;
 
+use crate::scene::node::constructor::NodeConstructor;
 pub use brushstroke::*;
+use fyrox_graph::constructor::ConstructorProvider;
 
 /// Current implementation version marker.
 pub const VERSION: u8 = 2;
@@ -130,7 +129,7 @@ pub struct ChunkHeightData<'a>(pub ResourceDataRef<'a, Texture>);
 /// (0,0) is the actual origin of the chunk, while (-1,-1) is the in the margin of the chunk.
 pub struct ChunkHeightMutData<'a>(pub TextureDataRefMut<'a>);
 
-impl<'a> ChunkHeightData<'a> {
+impl ChunkHeightData<'_> {
     /// The size of the hight map, excluding the margins
     pub fn size(&self) -> Vector2<u32> {
         match self.0.kind() {
@@ -160,7 +159,7 @@ impl<'a> ChunkHeightData<'a> {
     }
 }
 
-impl<'a> ChunkHeightMutData<'a> {
+impl ChunkHeightMutData<'_> {
     /// The size of the hight map, excluding the margins
     pub fn size(&self) -> Vector2<u32> {
         match self.0.kind() {
@@ -198,7 +197,7 @@ impl<'a> ChunkHeightMutData<'a> {
     }
 }
 
-impl<'a> std::ops::Index<Vector2<i32>> for ChunkHeightData<'a> {
+impl std::ops::Index<Vector2<i32>> for ChunkHeightData<'_> {
     type Output = f32;
 
     fn index(&self, position: Vector2<i32>) -> &Self::Output {
@@ -212,7 +211,7 @@ impl<'a> std::ops::Index<Vector2<i32>> for ChunkHeightData<'a> {
         }
     }
 }
-impl<'a> std::ops::Index<Vector2<i32>> for ChunkHeightMutData<'a> {
+impl std::ops::Index<Vector2<i32>> for ChunkHeightMutData<'_> {
     type Output = f32;
 
     fn index(&self, position: Vector2<i32>) -> &Self::Output {
@@ -223,7 +222,7 @@ impl<'a> std::ops::Index<Vector2<i32>> for ChunkHeightMutData<'a> {
         &self.0.data_of_type::<f32>().unwrap()[y * row_size + x]
     }
 }
-impl<'a> std::ops::IndexMut<Vector2<i32>> for ChunkHeightMutData<'a> {
+impl std::ops::IndexMut<Vector2<i32>> for ChunkHeightMutData<'_> {
     fn index_mut(&mut self, position: Vector2<i32>) -> &mut Self::Output {
         assert!(self.is_valid_index(position));
         let row_size = self.row_size();
@@ -1038,7 +1037,7 @@ impl BrushContext {
 /// count the number of pixels needed to render the vertices of that part of the terrain, which means that they
 /// overlap with their neighbors just as chunks overlap. Two adjacent blocks share vertices along their edge,
 /// so they also share pixels in the height map data.
-#[derive(Debug, Reflect, Clone)]
+#[derive(Debug, Reflect, Clone, ComponentProvider)]
 pub struct Terrain {
     base: Base,
 
@@ -1229,14 +1228,16 @@ impl Visit for Terrain {
                     // TODO: Due to the bug in resource system, material properties are not kept in sync
                     // so here we must re-create the material and put every property from the old material
                     // to the new.
-                    let mut new_material = Material::standard_terrain();
+                    let new_material = Material::standard_terrain();
 
+                    // TODO
+                    /*
                     let mut material_state = layer.material.state();
                     if let Some(material) = material_state.data() {
                         for (name, value) in material.properties() {
                             Log::verify(new_material.set_property(name.clone(), value.clone()));
                         }
-                    }
+                    }*/
 
                     self.layers.push(Layer {
                         material: MaterialResource::new_ok(Default::default(), new_material),
@@ -1266,7 +1267,7 @@ impl Visit for Terrain {
         if region.is_reading() {
             self.geometry = TerrainGeometry::new(*self.block_size);
             if version < 2 {
-                Log::info(format!("Updating terrain to version: {}", VERSION));
+                Log::info(format!("Updating terrain to version: {VERSION}"));
                 *self.height_map_size = self.height_map_size.map(|x| x + 2);
                 for c in self.chunks.iter() {
                     if c.height_map_size() != self.height_map_size() {
@@ -2410,7 +2411,7 @@ impl Terrain {
             Log::err("Invalid brush stroke. Holes are not enabled on terrain.");
             return;
         }
-        stroke.start_stroke(brush, self.self_handle, self.texture_data(target))
+        stroke.start_stroke(brush, self.handle(), self.texture_data(target))
     }
     /// Modify the given BrushStroke to include a stamp of its brush at the given position.
     /// The location of the stamp relative to the textures is determined based on the global position
@@ -2508,37 +2509,27 @@ fn validate_block_size(x: u32, size: Vector2<u32>) -> Result<(), String> {
     ))
 }
 
-impl NodeTrait for Terrain {
-    crate::impl_query_component!();
+fn create_terrain_layer_material() -> MaterialResource {
+    let mut material = Material::standard_terrain();
+    material.set_property("texCoordScale", Vector2::new(10.0, 10.0));
+    MaterialResource::new_ok(Default::default(), material)
+}
 
-    fn validate(&self, _: &Scene) -> Result<(), String> {
-        let h_size = self.height_map_size();
-        validate_height_map_size(h_size.x, h_size)?;
-        validate_height_map_size(h_size.y, h_size)?;
-        let b_size = self.block_size();
-        validate_block_size(b_size.x, b_size)?;
-        validate_block_size(b_size.y, b_size)?;
-        if b_size.x - 1 > h_size.x - 3 {
-            return Err(format!(
-                "Block size ({}, {}): {} is too large for height map. Consider: {}",
-                b_size.x,
-                b_size.y,
-                b_size.x,
-                h_size.x - 2
-            ));
-        }
-        if b_size.y - 1 > h_size.y - 3 {
-            return Err(format!(
-                "Block size ({}, {}): {} is too large for height map. Consider: {}",
-                b_size.x,
-                b_size.y,
-                b_size.y,
-                h_size.y - 2
-            ));
-        }
-        Ok(())
+impl ConstructorProvider<Node, Graph> for Terrain {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>().with_variant("Terrain", |_| {
+            TerrainBuilder::new(BaseBuilder::new().with_name("Terrain"))
+                .with_layers(vec![Layer {
+                    material: create_terrain_layer_material(),
+                    ..Default::default()
+                }])
+                .build_node()
+                .into()
+        })
     }
+}
 
+impl NodeTrait for Terrain {
     /// Returns pre-cached bounding axis-aligned bounding box of the terrain. Keep in mind that
     /// if you're modified terrain, bounding box will be recalculated and it is not fast.
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
@@ -2617,7 +2608,7 @@ impl NodeTrait for Terrain {
                 let quad_tree = chunk.quad_tree.lock();
                 let levels = (0..=quad_tree.max_level)
                     .map(|n| {
-                        ctx.z_far
+                        ctx.observer_info.z_far
                             * ((quad_tree.max_level - n) as f32 / quad_tree.max_level as f32)
                                 .powf(3.0)
                     })
@@ -2636,36 +2627,19 @@ impl NodeTrait for Terrain {
                     self.height_map_size(),
                     self.chunk_size(),
                     ctx.frustum,
-                    *ctx.observer_position,
+                    ctx.observer_info.observer_position,
                     &levels,
                     &mut selection,
                 );
 
                 let mut material = layer.material.deep_copy().data_ref().clone();
 
-                Log::verify_message(
-                    material.set_property(
-                        &layer.mask_property_name,
-                        chunk.layer_masks[layer_index].clone(),
-                    ),
-                    "Unable to set mask texture for terrain material.",
+                material.bind(
+                    &layer.mask_property_name,
+                    chunk.layer_masks[layer_index].clone(),
                 );
-
-                Log::verify_message(
-                    material.set_property(&layer.height_map_property_name, chunk.heightmap.clone()),
-                    "Unable to set height map texture for terrain material.",
-                );
-
-                Log::verify_message(
-                    material.set_property(
-                        &layer.hole_mask_property_name,
-                        PropertyValue::Sampler {
-                            value: chunk.hole_mask.clone(),
-                            fallback: Default::default(),
-                        },
-                    ),
-                    "Unable to set hole mask texture for terrain material.",
-                );
+                material.bind(&layer.height_map_property_name, chunk.heightmap.clone());
+                material.bind(&layer.hole_mask_property_name, chunk.hole_mask.clone());
 
                 // The size of the chunk excluding the margins
                 let size = self.height_map_size.map(|x| (x - 3) as f32);
@@ -2678,12 +2652,9 @@ impl NodeTrait for Terrain {
                     let kw = (node.size.x - 1) as f32 / size.x;
                     let kh = (node.size.y - 1) as f32 / size.y;
 
-                    Log::verify_message(
-                        material.set_property(
-                            &layer.node_uv_offsets_property_name,
-                            PropertyValue::Vector4(Vector4::new(kx, kz, kw, kh)),
-                        ),
-                        "Unable to set node uv offsets for terrain material.",
+                    material.set_property(
+                        &layer.node_uv_offsets_property_name,
+                        MaterialProperty::Vector4(Vector4::new(kx, kz, kw, kh)),
                     );
 
                     let material = MaterialResource::new_ok(Default::default(), material.clone());
@@ -2711,12 +2682,7 @@ impl NodeTrait for Terrain {
                                 bone_matrices: Default::default(),
                                 blend_shapes_weights: Default::default(),
                                 element_range: ElementRange::Full,
-                                persistent_identifier: PersistentIdentifier::new_combined(
-                                    &self.geometry.data,
-                                    self.self_handle,
-                                    node.persistent_index,
-                                ),
-                                node_handle: self.self_handle,
+                                node_handle: self.handle(),
                             },
                         );
                     } else {
@@ -2732,12 +2698,7 @@ impl NodeTrait for Terrain {
                                         bone_matrices: Default::default(),
                                         blend_shapes_weights: Default::default(),
                                         element_range: self.geometry.quadrants[i],
-                                        persistent_identifier: PersistentIdentifier::new_combined(
-                                            &self.geometry.data,
-                                            self.self_handle,
-                                            node.persistent_index,
-                                        ),
-                                        node_handle: self.self_handle,
+                                        node_handle: self.handle(),
                                     },
                                 );
                             }
@@ -2754,6 +2715,34 @@ impl NodeTrait for Terrain {
         for chunk in self.chunks.iter() {
             chunk.debug_draw(&self.global_transform(), ctx)
         }
+    }
+
+    fn validate(&self, _: &Scene) -> Result<(), String> {
+        let h_size = self.height_map_size();
+        validate_height_map_size(h_size.x, h_size)?;
+        validate_height_map_size(h_size.y, h_size)?;
+        let b_size = self.block_size();
+        validate_block_size(b_size.x, b_size)?;
+        validate_block_size(b_size.y, b_size)?;
+        if b_size.x - 1 > h_size.x - 3 {
+            return Err(format!(
+                "Block size ({}, {}): {} is too large for height map. Consider: {}",
+                b_size.x,
+                b_size.y,
+                b_size.x,
+                h_size.x - 2
+            ));
+        }
+        if b_size.y - 1 > h_size.y - 3 {
+            return Err(format!(
+                "Block size ({}, {}): {} is too large for height map. Consider: {}",
+                b_size.x,
+                b_size.y,
+                b_size.y,
+                h_size.y - 2
+            ));
+        }
+        Ok(())
     }
 }
 

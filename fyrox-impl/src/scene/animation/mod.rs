@@ -21,16 +21,17 @@
 //! Animation player is a node that contains multiple animations. It updates and plays all the animations.
 //! See [`AnimationPlayer`] docs for more info.
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         log::{Log, MessageKind},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     generic_animation::value::{BoundValueCollection, TrackValue, ValueBinding},
     scene::{
@@ -39,6 +40,7 @@ use crate::{
         node::{Node, NodeTrait, UpdateContext},
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
@@ -48,7 +50,7 @@ pub mod spritesheet;
 /// Scene specific animation.
 pub type Animation = crate::generic_animation::Animation<Handle<Node>>;
 /// Scene specific animation track.
-pub type Track = crate::generic_animation::track::Track<Handle<Node>>;
+pub type Track = crate::generic_animation::track::Track;
 /// Scene specific animation container.
 pub type AnimationContainer = crate::generic_animation::AnimationContainer<Handle<Node>>;
 /// Scene specific animation pose.
@@ -190,6 +192,7 @@ impl BoundValueCollectionExt for BoundValueCollection {
 /// next code snippet is for you.
 ///
 /// ```rust
+/// # use fyrox_animation::track::TrackBinding;
 /// # use fyrox_impl::{
 /// #     core::{
 /// #         math::curve::{Curve, CurveKey, CurveKeyKind},
@@ -211,13 +214,11 @@ impl BoundValueCollectionExt for BoundValueCollection {
 ///         CurveKey::new(0.6, 0.0, CurveKeyKind::Linear),
 ///     ]);
 ///
-///     // Create a track that will animated the node using the curve above.
+///     // Create a track that will animate the node using the curve above.
 ///     let mut track = Track::new(frames_container, ValueBinding::Position);
-///     track.set_target(animated_node);
-///
 ///     // Finally create an animation and set its time slice and turn it on.
 ///     let mut animation = Animation::default();
-///     animation.add_track(track);
+///     animation.add_track_with_binding(TrackBinding::new(animated_node),track);
 ///     animation.set_time_slice(0.0..0.6);
 ///     animation.set_enabled(true);
 ///     animation
@@ -242,10 +243,12 @@ impl BoundValueCollectionExt for BoundValueCollection {
 /// The example creates a bounce animation first - it is a simple animation that animates position of a given node
 /// (`animated_node`). Only then it creates an animation player node with an animation container with a single animation.
 /// To understand why this is so complicated, see the docs of [`Animation`].
-#[derive(Visit, Reflect, Clone, Debug)]
+#[derive(Visit, Reflect, Clone, Debug, ComponentProvider)]
 pub struct AnimationPlayer {
     base: Base,
+    #[component(include)]
     animations: InheritableVariable<AnimationContainer>,
+    #[component(include)]
     auto_apply: bool,
 }
 
@@ -316,12 +319,19 @@ impl DerefMut for AnimationPlayer {
     }
 }
 
-impl NodeTrait for AnimationPlayer {
-    crate::impl_query_component!(
-        animations: InheritableVariable<AnimationContainer>,
-        auto_apply: bool
-    );
+impl ConstructorProvider<Node, Graph> for AnimationPlayer {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Animation Player", |_| {
+                AnimationPlayerBuilder::new(BaseBuilder::new())
+                    .build_node()
+                    .into()
+            })
+            .with_group("Animation")
+    }
+}
 
+impl NodeTrait for AnimationPlayer {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         self.base.local_bounding_box()
     }

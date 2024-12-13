@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use fyrox_core::{scope_profile, uuid_provider};
+use fyrox_core::uuid_provider;
 
 use crate::{
     brush::Brush,
@@ -32,6 +32,7 @@ use crate::{
     BuildContext, Control, UiNode, UserInterface,
 };
 use fyrox_core::variable::InheritableVariable;
+use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
 use fyrox_resource::untyped::UntypedResource;
 use std::ops::{Deref, DerefMut};
@@ -52,13 +53,24 @@ pub struct NinePatch {
     pub top_margin_pixel: InheritableVariable<u32>,
 }
 
+impl ConstructorProvider<UiNode, UserInterface> for NinePatch {
+    fn constructor() -> GraphNodeConstructor<UiNode, UserInterface> {
+        GraphNodeConstructor::new::<Self>()
+            .with_variant("Nine Patch", |ui| {
+                NinePatchBuilder::new(WidgetBuilder::new().with_name("Nine Patch"))
+                    .build(&mut ui.build_ctx())
+                    .into()
+            })
+            .with_group("Visual")
+    }
+}
+
 crate::define_widget_deref!(NinePatch);
 
 uuid_provider!(NinePatch = "c345033e-8c10-4186-b101-43f73b85981d");
 
 impl Control for NinePatch {
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
         let mut size: Vector2<f32> = available_size;
 
         let column1_width_pixels = *self.left_margin_pixel as f32;
@@ -83,8 +95,6 @@ impl Control for NinePatch {
     }
 
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
-
         let column1_width_pixels = *self.left_margin_pixel as f32;
         let column3_width_pixels = *self.right_margin_pixel as f32;
 
@@ -412,9 +422,9 @@ impl NinePatchBuilder {
         self.top_margin_pixel = Some(margin);
         self
     }
-    pub fn build(mut self, ui: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
         if self.widget_builder.background.is_none() {
-            self.widget_builder.background = Some(Brush::Solid(Color::WHITE))
+            self.widget_builder.background = Some(Brush::Solid(Color::WHITE).into())
         }
 
         // if one of the margins hasn't been set just mirror the opposite one.
@@ -449,7 +459,7 @@ impl NinePatchBuilder {
         };
 
         let grid = NinePatch {
-            widget: self.widget_builder.build(),
+            widget: self.widget_builder.build(ctx),
             texture: self.texture.into(),
             bottom_margin_pixel: bottom_margin_pixel.into(),
             bottom_margin_uv: bottom_margin_uv.into(),
@@ -460,7 +470,7 @@ impl NinePatchBuilder {
             top_margin_pixel: top_margin_pixel.into(),
             top_margin_uv: top_margin_uv.into(),
         };
-        ui.add_node(UiNode::new(grid))
+        ctx.add_node(UiNode::new(grid))
     }
 }
 fn draw_image(
@@ -474,4 +484,15 @@ fn draw_image(
     drawing_context.push_rect_filled(&bounds, Some(tex_coords));
     let texture = CommandTexture::Texture(image.clone());
     drawing_context.commit(clip_bounds, background, texture, None);
+}
+
+#[cfg(test)]
+mod test {
+    use crate::nine_patch::NinePatchBuilder;
+    use crate::{test::test_widget_deletion, widget::WidgetBuilder};
+
+    #[test]
+    fn test_deletion() {
+        test_widget_deletion(|ctx| NinePatchBuilder::new(WidgetBuilder::new()).build(ctx));
+    }
 }

@@ -40,6 +40,7 @@ use crate::{
     scene::{node::Node, transform::Transform},
     script::{Script, ScriptTrait},
 };
+use fyrox_core::algebra::UnitQuaternion;
 use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
@@ -346,6 +347,76 @@ impl Visit for ScriptRecord {
     }
 }
 
+#[allow(clippy::enum_variant_names)] // STFU
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub(crate) enum NodeMessageKind {
+    TransformChanged,
+    VisibilityChanged,
+    EnabledFlagChanged,
+}
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub(crate) struct NodeMessage {
+    pub node: Handle<Node>,
+    pub kind: NodeMessageKind,
+}
+
+impl NodeMessage {
+    pub fn new(node: Handle<Node>, kind: NodeMessageKind) -> Self {
+        Self { node, kind }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TrackedProperty<T> {
+    property: T,
+    node_message_kind: NodeMessageKind,
+    node_handle: Handle<Node>,
+    sender: Option<Sender<NodeMessage>>,
+}
+
+impl<T> TrackedProperty<T> {
+    fn unbound(property: T, kind: NodeMessageKind) -> Self {
+        Self {
+            property,
+            node_message_kind: kind,
+            node_handle: Default::default(),
+            sender: None,
+        }
+    }
+
+    fn set_message_data(&mut self, sender: Sender<NodeMessage>, node_handle: Handle<Node>) {
+        self.sender = Some(sender);
+        self.node_handle = node_handle;
+    }
+}
+
+impl<T: Visit> Visit for TrackedProperty<T> {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        self.property.visit(name, visitor)
+    }
+}
+
+impl<T> Deref for TrackedProperty<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.property
+    }
+}
+
+impl<T> DerefMut for TrackedProperty<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if let Some(sender) = self.sender.as_ref() {
+            Log::verify(sender.send(NodeMessage {
+                node: self.node_handle,
+                kind: self.node_message_kind,
+            }))
+        }
+        &mut self.property
+    }
+}
+
 /// Base scene graph node is a simplest possible node, it is used to build more complex ones using composition.
 /// It contains all fundamental properties for each scene graph nodes, like local and global transforms, name,
 /// lifetime, etc. Base node is a building block for all complex node hierarchies - it contains list of children
@@ -369,20 +440,27 @@ impl Visit for ScriptRecord {
 #[derive(Debug, Reflect, Clone)]
 pub struct Base {
     #[reflect(hidden)]
-    pub(crate) self_handle: Handle<Node>,
+    self_handle: Handle<Node>,
 
     #[reflect(hidden)]
-    pub(crate) script_message_sender: Option<Sender<NodeScriptMessage>>,
+    script_message_sender: Option<Sender<NodeScriptMessage>>,
+
+    #[reflect(hidden)]
+    message_sender: Option<Sender<NodeMessage>>,
 
     // Name is not inheritable, because property inheritance works bad with external 3D models.
     // They use names to search "original" nodes.
     #[reflect(setter = "set_name_internal")]
     pub(crate) name: ImmutableString,
 
-    pub(crate) local_transform: Transform,
+    #[reflect(deref)]
+    local_transform: TrackedProperty<Transform>,
 
-    #[reflect(setter = "set_visibility")]
-    visibility: InheritableVariable<bool>,
+    #[reflect(deref)]
+    visibility: TrackedProperty<InheritableVariable<bool>>,
+
+    #[reflect(deref)]
+    enabled: TrackedProperty<InheritableVariable<bool>>,
 
     #[reflect(
         description = "Maximum amount of Some(time) that node will \"live\" or None if the node has unlimited lifetime."
@@ -403,15 +481,11 @@ pub struct Base {
 
     /// A set of custom properties that can hold almost any data. It can be used to set additional
     /// properties to scene nodes.
-
     #[reflect(setter = "set_properties")]
     pub properties: InheritableVariable<Vec<Property>>,
 
     #[reflect(setter = "set_frustum_culling")]
     frustum_culling: InheritableVariable<bool>,
-
-    #[reflect(hidden)]
-    pub(crate) transform_modified: Cell<bool>,
 
     // When `true` it means that this node is instance of `resource`.
     // More precisely - this node is root of whole descendant nodes
@@ -458,8 +532,6 @@ pub struct Base {
     // Use it at your own risk only when you're completely sure what you are doing.
     pub(crate) scripts: Vec<ScriptRecord>,
 
-    enabled: InheritableVariable<bool>,
-
     #[reflect(hidden)]
     pub(crate) global_enabled: Cell<bool>,
 }
@@ -471,6 +543,12 @@ impl Drop for Base {
 }
 
 impl Base {
+    /// Returns handle of the node. A node has valid handle only after it was inserted in a graph!
+    #[inline]
+    pub fn handle(&self) -> Handle<Node> {
+        self.self_handle
+    }
+
     /// Sets name of node. Can be useful to mark a node to be able to find it later on.
     #[inline]
     pub fn set_name<N: AsRef<str>>(&mut self, name: N) {
@@ -500,18 +578,45 @@ impl Base {
         &self.local_transform
     }
 
+    pub(crate) fn on_connected_to_graph(
+        &mut self,
+        self_handle: Handle<Node>,
+        message_sender: Sender<NodeMessage>,
+        script_message_sender: Sender<NodeScriptMessage>,
+    ) {
+        self.self_handle = self_handle;
+        self.message_sender = Some(message_sender.clone());
+        self.script_message_sender = Some(script_message_sender);
+        self.local_transform
+            .set_message_data(message_sender.clone(), self_handle);
+        self.visibility
+            .set_message_data(message_sender.clone(), self_handle);
+        self.enabled.set_message_data(message_sender, self_handle);
+        // Kick off initial hierarchical property propagation.
+        self.notify(self.self_handle, NodeMessageKind::TransformChanged);
+        self.notify(self.self_handle, NodeMessageKind::VisibilityChanged);
+        self.notify(self.self_handle, NodeMessageKind::EnabledFlagChanged);
+    }
+
+    fn notify(&self, node: Handle<Node>, kind: NodeMessageKind) {
+        let Some(sender) = self.message_sender.as_ref() else {
+            return;
+        };
+        Log::verify(sender.send(NodeMessage::new(node, kind)));
+    }
+
     /// Returns mutable reference to local transform of a node, can be used to set
     /// some local spatial properties, such as position, rotation, scale, etc.
     #[inline]
     pub fn local_transform_mut(&mut self) -> &mut Transform {
-        self.transform_modified.set(true);
         &mut self.local_transform
     }
 
     /// Sets new local transform of a node.
     #[inline]
     pub fn set_local_transform(&mut self, transform: Transform) {
-        self.local_transform = transform;
+        self.local_transform.property = transform;
+        self.notify(self.self_handle, NodeMessageKind::TransformChanged);
     }
 
     /// Tries to find properties by the name. The method returns an iterator because it possible
@@ -579,6 +684,15 @@ impl Base {
         self.global_transform.get()
     }
 
+    /// Calculates global transform of the node, but discards scaling part of it.
+    #[inline]
+    pub fn global_transform_without_scaling(&self) -> Matrix4<f32> {
+        const EPSILON: f32 = 10.0 * f32::EPSILON;
+        let basis = self.global_transform().basis();
+        let rotation = UnitQuaternion::from_matrix_eps(&basis, EPSILON, 16, Default::default());
+        Matrix4::new_translation(&self.global_position()) * rotation.to_homogeneous()
+    }
+
     /// Returns inverse of bind pose matrix. Bind pose matrix - is special matrix
     /// for bone nodes, it stores initial transform of bone node at the moment
     /// of "binding" vertices to bones.
@@ -608,7 +722,7 @@ impl Base {
     /// Returns local visibility of a node.
     #[inline]
     pub fn visibility(&self) -> bool {
-        *self.visibility
+        *self.visibility.property
     }
 
     /// Returns current **local-space** bounding box. Keep in mind that this value is just
@@ -968,8 +1082,8 @@ impl Base {
     /// and you disable the node, all children nodes will be disabled too even if their [`Self::is_enabled`] method
     /// returns `true`.
     #[inline]
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled.set_value_and_mark_modified(enabled);
+    pub fn set_enabled(&mut self, enabled: bool) -> bool {
+        self.enabled.set_value_and_mark_modified(enabled)
     }
 
     /// Returns `true` if the node is enabled, `false` - otherwise. The return value does **not** include the state
@@ -977,7 +1091,7 @@ impl Base {
     /// the state of parent nodes, use [`Self::is_globally_enabled`] method.
     #[inline]
     pub fn is_enabled(&self) -> bool {
-        *self.enabled
+        *self.enabled.property
     }
 
     /// Returns `true` if the node and every parent up in hierarchy is enabled, `false` - otherwise. This method
@@ -1046,8 +1160,7 @@ pub(crate) fn visit_opt_script(
                     .try_create(&script_type_uuid)
                     .ok_or_else(|| {
                         VisitError::User(format!(
-                            "There is no corresponding script constructor for {} type!",
-                            script_type_uuid
+                            "There is no corresponding script constructor for {script_type_uuid} type!"
                         ))
                     })?,
             )
@@ -1274,11 +1387,22 @@ impl BaseBuilder {
         Base {
             self_handle: Default::default(),
             script_message_sender: None,
+            message_sender: None,
             name: self.name.into(),
             children: self.children,
-            local_transform: self.local_transform,
+            local_transform: TrackedProperty::unbound(
+                self.local_transform,
+                NodeMessageKind::TransformChanged,
+            ),
             lifetime: self.lifetime.into(),
-            visibility: self.visibility.into(),
+            visibility: TrackedProperty::unbound(
+                self.visibility.into(),
+                NodeMessageKind::VisibilityChanged,
+            ),
+            enabled: TrackedProperty::unbound(
+                self.enabled.into(),
+                NodeMessageKind::EnabledFlagChanged,
+            ),
             global_visibility: Cell::new(true),
             parent: Handle::NONE,
             global_transform: Cell::new(Matrix4::identity()),
@@ -1290,12 +1414,11 @@ impl BaseBuilder {
             mobility: self.mobility.into(),
             tag: self.tag.into(),
             properties: Default::default(),
-            transform_modified: Cell::new(false),
             frustum_culling: self.frustum_culling.into(),
             cast_shadows: self.cast_shadows.into(),
             scripts: self.scripts,
             instance_id: SceneNodeId(Uuid::new_v4()),
-            enabled: self.enabled.into(),
+
             global_enabled: Cell::new(true),
         }
     }

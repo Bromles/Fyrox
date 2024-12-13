@@ -33,20 +33,22 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
+        uuid_provider,
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
-        TypeUuidProvider,
     },
     scene::{
-        base::Base,
+        base::{Base, BaseBuilder},
         debug::SceneDrawingContext,
         graph::Graph,
         light::{BaseLight, BaseLightBuilder},
+        node::constructor::NodeConstructor,
         node::{Node, NodeTrait},
     },
 };
-use fyrox_core::uuid_provider;
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 use strum_macros::{AsRefStr, EnumString, VariantNames};
@@ -125,8 +127,9 @@ impl CsmOptions {
 }
 
 /// See module docs.
-#[derive(Default, Debug, Visit, Reflect, Clone)]
+#[derive(Default, Debug, Visit, Reflect, Clone, ComponentProvider)]
 pub struct DirectionalLight {
+    #[component(include)]
     base_light: BaseLight,
     /// See [`CsmOptions`].
     pub csm_options: InheritableVariable<CsmOptions>,
@@ -173,11 +176,23 @@ impl DirectionalLight {
     }
 }
 
-impl NodeTrait for DirectionalLight {
-    crate::impl_query_component!(base_light: BaseLight);
+impl ConstructorProvider<Node, Graph> for DirectionalLight {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Directional Light", |_| {
+                DirectionalLightBuilder::new(BaseLightBuilder::new(
+                    BaseBuilder::new().with_name("DirectionalLight"),
+                ))
+                .build_node()
+                .into()
+            })
+            .with_group("Light")
+    }
+}
 
+impl NodeTrait for DirectionalLight {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
-        AxisAlignedBoundingBox::unit()
+        AxisAlignedBoundingBox::default()
     }
 
     fn world_bounding_box(&self) -> AxisAlignedBoundingBox {

@@ -42,6 +42,8 @@
 //! Light scattering feature may significantly impact performance on low-end
 //! hardware!
 
+use crate::scene::base::BaseBuilder;
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Matrix4, UnitQuaternion, Vector3},
@@ -49,10 +51,10 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext},
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
-        TypeUuidProvider,
     },
     resource::texture::TextureResource,
     scene::{
@@ -63,12 +65,14 @@ use crate::{
         node::{Node, NodeTrait},
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// See module docs.
-#[derive(Debug, Reflect, Clone, Visit)]
+#[derive(Debug, Reflect, Clone, Visit, ComponentProvider)]
 pub struct SpotLight {
+    #[component(include)]
     base_light: BaseLight,
 
     #[reflect(min_value = 0.0, max_value = 3.14159, step = 0.1)]
@@ -215,16 +219,32 @@ impl SpotLight {
     }
 }
 
-impl NodeTrait for SpotLight {
-    crate::impl_query_component!(base_light: BaseLight);
+impl ConstructorProvider<Node, Graph> for SpotLight {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Spot Light", |_| {
+                SpotLightBuilder::new(BaseLightBuilder::new(
+                    BaseBuilder::new().with_name("SpotLight"),
+                ))
+                .with_distance(10.0)
+                .with_hotspot_cone_angle(45.0f32.to_radians())
+                .with_falloff_angle_delta(2.0f32.to_radians())
+                .build_node()
+                .into()
+            })
+            .with_group("Light")
+    }
+}
 
+impl NodeTrait for SpotLight {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
-        AxisAlignedBoundingBox::unit()
+        AxisAlignedBoundingBox::from_radius(self.distance())
     }
 
     fn world_bounding_box(&self) -> AxisAlignedBoundingBox {
+        // Discard scaling part, light emission distance does not affected by scaling.
         self.local_bounding_box()
-            .transform(&self.global_transform())
+            .transform(&self.global_transform_without_scaling())
     }
 
     fn id(&self) -> Uuid {

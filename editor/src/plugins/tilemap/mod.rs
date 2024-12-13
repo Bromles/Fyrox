@@ -28,6 +28,7 @@ mod preview;
 pub mod tile_set_import;
 pub mod tileset;
 
+use crate::plugins::inspector::InspectorPlugin;
 use crate::{
     command::SetPropertyCommand,
     fyrox::{
@@ -135,7 +136,6 @@ impl TileMapInteractionMode {
     ) -> Option<Vector2<i32>> {
         let tile_map = scene.graph.try_get_of_type::<TileMap>(self.tile_map)?;
         let global_transform = tile_map.global_transform();
-        let inv_global_transform = global_transform.try_inverse().unwrap_or_default();
 
         let camera = scene.graph[game_scene.camera_controller.camera].as_camera();
         let ray = camera.make_ray(mouse_position, frame_size);
@@ -144,13 +144,8 @@ impl TileMapInteractionMode {
             Plane::from_normal_and_point(&global_transform.look(), &global_transform.position())
                 .unwrap_or_default();
 
-        ray.plane_intersection_point(&plane).map(|intersection| {
-            let local_intersection = inv_global_transform.transform_point(&intersection.into());
-            Vector2::new(
-                local_intersection.x.round() as i32,
-                local_intersection.y.round() as i32,
-            )
-        })
+        ray.plane_intersection_point(&plane)
+            .map(|intersection| tile_map.world_to_grid(intersection))
     }
 }
 
@@ -648,12 +643,11 @@ impl EditorPlugin for TileMapEditorPlugin {
             .preview_generators
             .add(TileSet::type_uuid(), TileSetPreview);
 
-        editor
-            .inspector
+        let inspector = editor.plugins.get_mut::<InspectorPlugin>();
+        inspector
             .property_editors
             .insert(TilesPropertyEditorDefinition);
-        editor
-            .inspector
+        inspector
             .property_editors
             .insert(InheritablePropertyEditorDefinition::<Tiles>::new());
     }
@@ -695,13 +689,15 @@ impl EditorPlugin for TileMapEditorPlugin {
     fn on_ui_message(&mut self, message: &mut UiMessage, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
 
+        let inspector = editor.plugins.get::<InspectorPlugin>();
+
         if let Some(tile_set_editor) = self.tile_set_editor.take() {
             self.tile_set_editor = tile_set_editor.handle_ui_message(
                 message,
                 ui,
                 &editor.engine.resource_manager,
                 &editor.message_sender,
-                editor.inspector.property_editors.clone(),
+                inspector.property_editors.clone(),
                 editor.engine.serialization_context.clone(),
             );
         }

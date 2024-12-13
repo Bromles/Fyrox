@@ -20,6 +20,7 @@
 
 //! Joint is used to restrict motion of two rigid bodies.
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Isometry2, Matrix4, UnitComplex, Vector2},
@@ -27,10 +28,10 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, m4x4_approx_eq},
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     scene::{
         base::{Base, BaseBuilder},
@@ -41,7 +42,8 @@ use crate::{
     },
 };
 use fyrox_core::uuid_provider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::constructor::ConstructorProvider;
+use fyrox_graph::{BaseSceneGraph, SceneGraphNode};
 use rapier2d::dynamics::ImpulseJointHandle;
 use std::{
     cell::{Cell, RefCell},
@@ -156,7 +158,7 @@ impl JointLocalFrames {
 
 /// Joint is used to restrict motion of two rigid bodies. There are numerous examples of joints in
 /// real life: door hinge, ball joints in human arms, etc.
-#[derive(Visit, Reflect, Debug)]
+#[derive(Visit, Reflect, Debug, ComponentProvider)]
 pub struct Joint {
     base: Base,
 
@@ -281,9 +283,32 @@ impl Joint {
     }
 }
 
-impl NodeTrait for Joint {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Joint {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Ball Joint 2D", |_| {
+                JointBuilder::new(BaseBuilder::new().with_name("Ball Joint 2D"))
+                    .with_params(JointParams::BallJoint(Default::default()))
+                    .build_node()
+                    .into()
+            })
+            .with_variant("Prismatic Joint 2D", |_| {
+                JointBuilder::new(BaseBuilder::new().with_name("Prismatic Joint 2D"))
+                    .with_params(JointParams::PrismaticJoint(Default::default()))
+                    .build_node()
+                    .into()
+            })
+            .with_variant("Fixed Joint 2D", |_| {
+                JointBuilder::new(BaseBuilder::new().with_name("Fixed Joint 2D"))
+                    .with_params(JointParams::FixedJoint(Default::default()))
+                    .build_node()
+                    .into()
+            })
+            .with_group("Physics 2D")
+    }
+}
 
+impl NodeTrait for Joint {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         self.base.local_bounding_box()
     }
@@ -312,7 +337,11 @@ impl NodeTrait for Joint {
             .sync_to_joint_node(context.nodes, self_handle, self);
     }
 
-    fn sync_transform(&self, new_global_transform: &Matrix4<f32>, _context: &mut SyncContext) {
+    fn on_global_transform_changed(
+        &self,
+        new_global_transform: &Matrix4<f32>,
+        _context: &mut SyncContext,
+    ) {
         if !m4x4_approx_eq(new_global_transform, &self.global_transform()) {
             self.local_frames.borrow_mut().take();
         }
@@ -320,7 +349,7 @@ impl NodeTrait for Joint {
 
     fn validate(&self, scene: &Scene) -> Result<(), String> {
         if let Some(body1) = scene.graph.try_get(self.body1()) {
-            if body1.query_component_ref::<RigidBody>().is_none() {
+            if body1.component_ref::<RigidBody>().is_none() {
                 return Err("First body of 2D Joint must be an \
                     instance of 2D Rigid Body!"
                     .to_string());
@@ -332,7 +361,7 @@ impl NodeTrait for Joint {
         }
 
         if let Some(body2) = scene.graph.try_get(self.body2()) {
-            if body2.query_component_ref::<RigidBody>().is_none() {
+            if body2.component_ref::<RigidBody>().is_none() {
                 return Err("Second body of 2D Joint must be an instance \
                     of 2D Rigid Body!"
                     .to_string());

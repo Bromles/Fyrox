@@ -27,11 +27,11 @@ use fyrox::{
         message::{MessageDirection, UiMessage},
         scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
         stack_panel::StackPanelBuilder,
+        style::{resource::StyleResourceExt, Style},
         text::{TextBuilder, TextMessage},
         widget::WidgetBuilder,
         window::{WindowBuilder, WindowMessage, WindowTitle},
         BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
-        BRUSH_DARKEST,
     },
 };
 use std::{
@@ -54,7 +54,7 @@ pub struct BuildWindow {
 }
 
 impl BuildWindow {
-    pub fn new(ctx: &mut BuildContext) -> Self {
+    pub fn new(project: &str, ctx: &mut BuildContext) -> Self {
         let log_text;
         let stop;
         let scroll_viewer;
@@ -69,7 +69,7 @@ impl BuildWindow {
                             TextBuilder::new(
                                 WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
                             )
-                            .with_text("Please wait while your game is building...\nLog:")
+                            .with_text(format!("Please wait while the {project} is building..."))
                             .build(ctx),
                         )
                         .with_child(
@@ -77,7 +77,7 @@ impl BuildWindow {
                                 WidgetBuilder::new()
                                     .on_row(1)
                                     .with_margin(Thickness::uniform(2.0))
-                                    .with_background(BRUSH_DARKEST)
+                                    .with_background(ctx.style.property(Style::BRUSH_DARKEST))
                                     .with_child({
                                         scroll_viewer =
                                             ScrollViewerBuilder::new(WidgetBuilder::new())
@@ -119,7 +119,7 @@ impl BuildWindow {
                 .add_column(Column::stretch())
                 .build(ctx),
             )
-            .with_title(WindowTitle::text("Building the Game..."))
+            .with_title(WindowTitle::text(format!("Building the {project}...")))
             .build(ctx);
 
         Self {

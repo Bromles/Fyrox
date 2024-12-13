@@ -26,10 +26,10 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, m4x4_approx_eq},
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     define_with,
     scene::{
@@ -42,6 +42,7 @@ use crate::{
 // Re-export some the fyrox_sound entities.
 pub use fyrox_sound::{
     buffer::{
+        generic::Samples,
         loader::{SoundBufferImportOptions, SoundBufferLoader},
         DataSource, SoundBuffer, SoundBufferResource, SoundBufferResourceLoadError,
     },
@@ -56,7 +57,9 @@ pub use fyrox_sound::{
     source::Status,
 };
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::scene::Scene;
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use fyrox_resource::state::ResourceState;
 use fyrox_sound::source::SoundSource;
@@ -70,7 +73,7 @@ pub mod context;
 pub mod listener;
 
 /// Sound source.
-#[derive(Visit, Reflect, Debug)]
+#[derive(Visit, Reflect, Debug, ComponentProvider)]
 pub struct Sound {
     base: Base,
 
@@ -385,9 +388,19 @@ impl Sound {
     }
 }
 
-impl NodeTrait for Sound {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Sound {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Sound Source", |_| {
+                SoundBuilder::new(BaseBuilder::new().with_name("Sound Source"))
+                    .build_node()
+                    .into()
+            })
+            .with_group("Sound")
+    }
+}
 
+impl NodeTrait for Sound {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         AxisAlignedBoundingBox::unit()
     }
@@ -416,7 +429,11 @@ impl NodeTrait for Sound {
         )
     }
 
-    fn sync_transform(&self, new_global_transform: &Matrix4<f32>, context: &mut SyncContext) {
+    fn on_global_transform_changed(
+        &self,
+        new_global_transform: &Matrix4<f32>,
+        context: &mut SyncContext,
+    ) {
         if !m4x4_approx_eq(new_global_transform, &self.global_transform()) {
             context.sound_context.set_sound_position(self);
         }
@@ -445,7 +462,7 @@ impl NodeTrait for Sound {
                             None => Err("Sound buffer is failed to load, the reason is unknown!"
                                 .to_string()),
                             Some(err) => {
-                                Err(format!("Sound buffer is failed to load. Reason: {:?}", err))
+                                Err(format!("Sound buffer is failed to load. Reason: {err:?}"))
                             }
                         }
                     }

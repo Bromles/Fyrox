@@ -428,7 +428,6 @@ impl<T: VertexDataProvider> Graph<T> {
     /// This implementation is fast and allows for multiple searches in parallel, but does not attempt to find the optimal route
     ///
     /// **See `Graph<T>.max_search_iterations`** to change the maximum amount of search iterations
-
     pub fn build_indexed_path(
         &self,
         from: usize,
@@ -756,7 +755,7 @@ mod test {
 
         println!();
         for size in [10, 40, 100, 500] {
-            println!("benchmarking grid size of: {}^2", size);
+            println!("benchmarking grid size of: {size}^2");
             let setup_start_time = Instant::now();
 
             let mut pathfinder = Graph::new();

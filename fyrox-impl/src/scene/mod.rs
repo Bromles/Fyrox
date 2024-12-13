@@ -48,6 +48,7 @@ pub mod terrain;
 pub mod tilemap;
 pub mod transform;
 
+use crate::renderer::framework::PolygonFillMode;
 use crate::{
     asset::{self, manager::ResourceManager, untyped::UntypedResource},
     core::{
@@ -61,7 +62,6 @@ use crate::{
     },
     engine::SerializationContext,
     graph::NodeHandleMap,
-    renderer::framework::state::PolygonFillMode,
     resource::texture::TextureResource,
     scene::{
         base::BaseBuilder,
@@ -333,7 +333,7 @@ impl SceneLoader {
     }
 
     /// Finishes scene loading.
-    pub async fn finish(self, resource_manager: &ResourceManager) -> Scene {
+    pub async fn finish(self) -> Scene {
         let mut scene = self.scene;
 
         Log::info("SceneLoader::finish() - Collecting resources used by the scene...");
@@ -356,16 +356,14 @@ impl SceneLoader {
         let used_resources_count = used_resources.len();
 
         Log::info(format!(
-            "SceneLoader::finish() - {} resources collected. Waiting them to load...",
-            used_resources_count
+            "SceneLoader::finish() - {used_resources_count} resources collected. Waiting them to load..."
         ));
 
         // Wait everything.
         join_all(used_resources.into_iter()).await;
 
         Log::info(format!(
-            "SceneLoader::finish() - All {} resources have finished loading.",
-            used_resources_count
+            "SceneLoader::finish() - All {used_resources_count} resources have finished loading."
         ));
 
         // TODO: Move into Camera::restore_resources?
@@ -382,7 +380,7 @@ impl SceneLoader {
         join_all(skybox_textures).await;
 
         // And do resolve to extract correct graphical data and so on.
-        scene.resolve(resource_manager);
+        scene.resolve();
 
         scene
     }
@@ -408,10 +406,10 @@ impl Scene {
     }
 
     /// Synchronizes the state of the scene with external resources.
-    pub fn resolve(&mut self, resource_manager: &ResourceManager) {
+    pub fn resolve(&mut self) {
         Log::writeln(MessageKind::Information, "Starting resolve...");
 
-        self.graph.resolve(resource_manager);
+        self.graph.resolve();
 
         Log::writeln(MessageKind::Information, "Resolve succeeded!");
     }

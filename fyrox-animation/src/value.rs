@@ -23,14 +23,19 @@
 
 use crate::core::{
     algebra::{Unit, UnitQuaternion, Vector2, Vector3, Vector4},
+    log::Log,
     math::lerpf,
     num_traits::AsPrimitive,
     reflect::prelude::*,
     visitor::prelude::*,
+    ImmutableString,
 };
-use fyrox_core::log::Log;
-use fyrox_core::ImmutableString;
-use std::fmt::{Debug, Display, Formatter};
+use std::any::TypeId;
+use std::{
+    any,
+    any::Any,
+    fmt::{Debug, Display, Formatter},
+};
 
 /// An actual type of a property value.
 #[derive(Visit, Reflect, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -133,6 +138,60 @@ pub enum ValueType {
     UnitQuaternionF64,
 }
 
+impl ValueType {
+    /// Converts the value type into its respective type id.
+    pub fn into_type_id(self) -> TypeId {
+        match self {
+            ValueType::Bool => TypeId::of::<bool>(),
+            ValueType::F32 => TypeId::of::<f32>(),
+            ValueType::F64 => TypeId::of::<f64>(),
+            ValueType::U64 => TypeId::of::<u64>(),
+            ValueType::I64 => TypeId::of::<i64>(),
+            ValueType::U32 => TypeId::of::<u32>(),
+            ValueType::I32 => TypeId::of::<i32>(),
+            ValueType::U16 => TypeId::of::<u16>(),
+            ValueType::I16 => TypeId::of::<i16>(),
+            ValueType::U8 => TypeId::of::<u8>(),
+            ValueType::I8 => TypeId::of::<i8>(),
+            ValueType::Vector2Bool => TypeId::of::<Vector2<bool>>(),
+            ValueType::Vector2F32 => TypeId::of::<Vector2<f32>>(),
+            ValueType::Vector2F64 => TypeId::of::<Vector2<f64>>(),
+            ValueType::Vector2U64 => TypeId::of::<Vector2<u64>>(),
+            ValueType::Vector2I64 => TypeId::of::<Vector2<i64>>(),
+            ValueType::Vector2U32 => TypeId::of::<Vector2<u32>>(),
+            ValueType::Vector2I32 => TypeId::of::<Vector2<i32>>(),
+            ValueType::Vector2U16 => TypeId::of::<Vector2<u16>>(),
+            ValueType::Vector2I16 => TypeId::of::<Vector2<i16>>(),
+            ValueType::Vector2U8 => TypeId::of::<Vector2<u8>>(),
+            ValueType::Vector2I8 => TypeId::of::<Vector2<i8>>(),
+            ValueType::Vector3Bool => TypeId::of::<Vector3<bool>>(),
+            ValueType::Vector3F32 => TypeId::of::<Vector3<f32>>(),
+            ValueType::Vector3F64 => TypeId::of::<Vector3<f64>>(),
+            ValueType::Vector3U64 => TypeId::of::<Vector3<u64>>(),
+            ValueType::Vector3I64 => TypeId::of::<Vector3<i64>>(),
+            ValueType::Vector3U32 => TypeId::of::<Vector3<u32>>(),
+            ValueType::Vector3I32 => TypeId::of::<Vector3<i32>>(),
+            ValueType::Vector3U16 => TypeId::of::<Vector3<u16>>(),
+            ValueType::Vector3I16 => TypeId::of::<Vector3<i16>>(),
+            ValueType::Vector3U8 => TypeId::of::<Vector3<u8>>(),
+            ValueType::Vector3I8 => TypeId::of::<Vector3<i8>>(),
+            ValueType::Vector4Bool => TypeId::of::<Vector4<bool>>(),
+            ValueType::Vector4F32 => TypeId::of::<Vector4<f32>>(),
+            ValueType::Vector4F64 => TypeId::of::<Vector4<f64>>(),
+            ValueType::Vector4U64 => TypeId::of::<Vector4<u64>>(),
+            ValueType::Vector4I64 => TypeId::of::<Vector4<i64>>(),
+            ValueType::Vector4U32 => TypeId::of::<Vector4<u32>>(),
+            ValueType::Vector4I32 => TypeId::of::<Vector4<i32>>(),
+            ValueType::Vector4U16 => TypeId::of::<Vector4<u16>>(),
+            ValueType::Vector4I16 => TypeId::of::<Vector4<i16>>(),
+            ValueType::Vector4U8 => TypeId::of::<Vector4<u8>>(),
+            ValueType::Vector4I8 => TypeId::of::<Vector4<i8>>(),
+            ValueType::UnitQuaternionF32 => TypeId::of::<UnitQuaternion<f32>>(),
+            ValueType::UnitQuaternionF64 => TypeId::of::<UnitQuaternion<f64>>(),
+        }
+    }
+}
+
 impl Default for ValueType {
     fn default() -> Self {
         Self::F32
@@ -176,7 +235,7 @@ impl TrackValue {
 
     /// Tries to perform a numeric type casting of the current value to some other and returns a boxed value, that can
     /// be used to set the value using reflection.
-    pub fn numeric_type_cast(&self, value_type: ValueType) -> Option<Box<dyn Reflect>> {
+    pub fn apply_to_any(&self, any: &mut dyn Any, value_type: ValueType) {
         fn convert_vec2<T>(vec2: &Vector2<f32>) -> Vector2<T>
         where
             f32: AsPrimitive<T>,
@@ -201,78 +260,92 @@ impl TrackValue {
             Vector4::new(vec4.x.as_(), vec4.y.as_(), vec4.z.as_(), vec4.w.as_())
         }
 
+        fn set<T>(any: &mut dyn Any, value: T)
+        where
+            T: Any + Copy,
+        {
+            if let Some(boolean) = any.downcast_mut::<T>() {
+                *boolean = value;
+            } else {
+                Log::err(format!(
+                    "Animation: unable to set value of type {}! Types mismatch!",
+                    any::type_name::<T>()
+                ))
+            }
+        }
+
         match self {
             TrackValue::Real(real) => match value_type {
-                ValueType::Bool => Some(Box::new(real.ne(&0.0))),
-                ValueType::F32 => Some(Box::new(*real)),
-                ValueType::F64 => Some(Box::new(*real as f64)),
-                ValueType::U64 => Some(Box::new(*real as u64)),
-                ValueType::I64 => Some(Box::new(*real as i64)),
-                ValueType::U32 => Some(Box::new(*real as u32)),
-                ValueType::I32 => Some(Box::new(*real as i32)),
-                ValueType::U16 => Some(Box::new(*real as u16)),
-                ValueType::I16 => Some(Box::new(*real as i16)),
-                ValueType::U8 => Some(Box::new(*real as u8)),
-                ValueType::I8 => Some(Box::new(*real as i8)),
-                _ => None,
+                ValueType::Bool => set(any, real.ne(&0.0)),
+                ValueType::F32 => set(any, *real),
+                ValueType::F64 => set(any, *real as f64),
+                ValueType::U64 => set(any, *real as u64),
+                ValueType::I64 => set(any, *real as i64),
+                ValueType::U32 => set(any, *real as u32),
+                ValueType::I32 => set(any, *real as i32),
+                ValueType::U16 => set(any, *real as u16),
+                ValueType::I16 => set(any, *real as i16),
+                ValueType::U8 => set(any, *real as u8),
+                ValueType::I8 => set(any, *real as i8),
+                _ => (),
             },
             TrackValue::Vector2(vec2) => match value_type {
-                ValueType::Vector2Bool => {
-                    Some(Box::new(Vector2::new(vec2.x.ne(&0.0), vec2.y.ne(&0.0))))
-                }
-                ValueType::Vector2F32 => Some(Box::new(*vec2)),
-                ValueType::Vector2F64 => Some(Box::new(convert_vec2::<f64>(vec2))),
-                ValueType::Vector2U64 => Some(Box::new(convert_vec2::<u64>(vec2))),
-                ValueType::Vector2I64 => Some(Box::new(convert_vec2::<i64>(vec2))),
-                ValueType::Vector2U32 => Some(Box::new(convert_vec2::<u32>(vec2))),
-                ValueType::Vector2I32 => Some(Box::new(convert_vec2::<i32>(vec2))),
-                ValueType::Vector2U16 => Some(Box::new(convert_vec2::<u16>(vec2))),
-                ValueType::Vector2I16 => Some(Box::new(convert_vec2::<i16>(vec2))),
-                ValueType::Vector2U8 => Some(Box::new(convert_vec2::<u8>(vec2))),
-                ValueType::Vector2I8 => Some(Box::new(convert_vec2::<i8>(vec2))),
-                _ => None,
+                ValueType::Vector2Bool => set(any, Vector2::new(vec2.x.ne(&0.0), vec2.y.ne(&0.0))),
+                ValueType::Vector2F32 => set(any, *vec2),
+                ValueType::Vector2F64 => set(any, convert_vec2::<f64>(vec2)),
+                ValueType::Vector2U64 => set(any, convert_vec2::<u64>(vec2)),
+                ValueType::Vector2I64 => set(any, convert_vec2::<i64>(vec2)),
+                ValueType::Vector2U32 => set(any, convert_vec2::<u32>(vec2)),
+                ValueType::Vector2I32 => set(any, convert_vec2::<i32>(vec2)),
+                ValueType::Vector2U16 => set(any, convert_vec2::<u16>(vec2)),
+                ValueType::Vector2I16 => set(any, convert_vec2::<i16>(vec2)),
+                ValueType::Vector2U8 => set(any, convert_vec2::<u8>(vec2)),
+                ValueType::Vector2I8 => set(any, convert_vec2::<i8>(vec2)),
+                _ => (),
             },
             TrackValue::Vector3(vec3) => match value_type {
-                ValueType::Vector3Bool => Some(Box::new(Vector3::new(
-                    vec3.x.ne(&0.0),
-                    vec3.y.ne(&0.0),
-                    vec3.z.ne(&0.0),
-                ))),
-                ValueType::Vector3F32 => Some(Box::new(*vec3)),
-                ValueType::Vector3F64 => Some(Box::new(convert_vec3::<f64>(vec3))),
-                ValueType::Vector3U64 => Some(Box::new(convert_vec3::<u64>(vec3))),
-                ValueType::Vector3I64 => Some(Box::new(convert_vec3::<i64>(vec3))),
-                ValueType::Vector3U32 => Some(Box::new(convert_vec3::<u32>(vec3))),
-                ValueType::Vector3I32 => Some(Box::new(convert_vec3::<i32>(vec3))),
-                ValueType::Vector3U16 => Some(Box::new(convert_vec3::<u16>(vec3))),
-                ValueType::Vector3I16 => Some(Box::new(convert_vec3::<i16>(vec3))),
-                ValueType::Vector3U8 => Some(Box::new(convert_vec3::<u8>(vec3))),
-                ValueType::Vector3I8 => Some(Box::new(convert_vec3::<i8>(vec3))),
-                _ => None,
+                ValueType::Vector3Bool => set(
+                    any,
+                    Vector3::new(vec3.x.ne(&0.0), vec3.y.ne(&0.0), vec3.z.ne(&0.0)),
+                ),
+                ValueType::Vector3F32 => set(any, *vec3),
+                ValueType::Vector3F64 => set(any, convert_vec3::<f64>(vec3)),
+                ValueType::Vector3U64 => set(any, convert_vec3::<u64>(vec3)),
+                ValueType::Vector3I64 => set(any, convert_vec3::<i64>(vec3)),
+                ValueType::Vector3U32 => set(any, convert_vec3::<u32>(vec3)),
+                ValueType::Vector3I32 => set(any, convert_vec3::<i32>(vec3)),
+                ValueType::Vector3U16 => set(any, convert_vec3::<u16>(vec3)),
+                ValueType::Vector3I16 => set(any, convert_vec3::<i16>(vec3)),
+                ValueType::Vector3U8 => set(any, convert_vec3::<u8>(vec3)),
+                ValueType::Vector3I8 => set(any, convert_vec3::<i8>(vec3)),
+                _ => (),
             },
             TrackValue::Vector4(vec4) => match value_type {
-                ValueType::Vector4Bool => Some(Box::new(Vector4::new(
-                    vec4.x.ne(&0.0),
-                    vec4.y.ne(&0.0),
-                    vec4.z.ne(&0.0),
-                    vec4.w.ne(&0.0),
-                ))),
-                ValueType::Vector4F32 => Some(Box::new(*vec4)),
-                ValueType::Vector4F64 => Some(Box::new(convert_vec4::<f64>(vec4))),
-                ValueType::Vector4U64 => Some(Box::new(convert_vec4::<u64>(vec4))),
-                ValueType::Vector4I64 => Some(Box::new(convert_vec4::<i64>(vec4))),
-                ValueType::Vector4U32 => Some(Box::new(convert_vec4::<u32>(vec4))),
-                ValueType::Vector4I32 => Some(Box::new(convert_vec4::<i32>(vec4))),
-                ValueType::Vector4U16 => Some(Box::new(convert_vec4::<u16>(vec4))),
-                ValueType::Vector4I16 => Some(Box::new(convert_vec4::<i16>(vec4))),
-                ValueType::Vector4U8 => Some(Box::new(convert_vec4::<u8>(vec4))),
-                ValueType::Vector4I8 => Some(Box::new(convert_vec4::<i8>(vec4))),
-                _ => None,
+                ValueType::Vector4Bool => set(
+                    any,
+                    Vector4::new(
+                        vec4.x.ne(&0.0),
+                        vec4.y.ne(&0.0),
+                        vec4.z.ne(&0.0),
+                        vec4.w.ne(&0.0),
+                    ),
+                ),
+                ValueType::Vector4F32 => set(any, *vec4),
+                ValueType::Vector4F64 => set(any, convert_vec4::<f64>(vec4)),
+                ValueType::Vector4U64 => set(any, convert_vec4::<u64>(vec4)),
+                ValueType::Vector4I64 => set(any, convert_vec4::<i64>(vec4)),
+                ValueType::Vector4U32 => set(any, convert_vec4::<u32>(vec4)),
+                ValueType::Vector4I32 => set(any, convert_vec4::<i32>(vec4)),
+                ValueType::Vector4U16 => set(any, convert_vec4::<u16>(vec4)),
+                ValueType::Vector4I16 => set(any, convert_vec4::<i16>(vec4)),
+                ValueType::Vector4U8 => set(any, convert_vec4::<u8>(vec4)),
+                ValueType::Vector4I8 => set(any, convert_vec4::<i8>(vec4)),
+                _ => (),
             },
             TrackValue::UnitQuaternion(quat) => match value_type {
-                ValueType::UnitQuaternionF32 => Some(Box::new(*quat)),
-                ValueType::UnitQuaternionF64 => Some(Box::new(quat.cast::<f64>())),
-                _ => None,
+                ValueType::UnitQuaternionF32 => set(any, *quat),
+                ValueType::UnitQuaternionF64 => set(any, quat.cast::<f64>()),
+                _ => (),
             },
         }
     }
@@ -282,9 +355,10 @@ impl TrackValue {
 /// cases for the most used properties and a generic one for arbitrary properties. Arbitrary properties are set using
 /// reflection system, while the special cases handles bindings to standard properties (such as position, scaling, or
 /// rotation) for optimization. Reflection is quite slow to be used as the universal property setting mechanism.  
-#[derive(Clone, Visit, Reflect, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Visit, Reflect, Debug, PartialEq, Eq)]
 pub enum ValueBinding {
     /// A binding to position of a scene node.
+    #[default]
     Position,
     /// A binding to scale of a scene node.
     Scale,
@@ -305,7 +379,7 @@ impl Display for ValueBinding {
             ValueBinding::Position => write!(f, "Position"),
             ValueBinding::Scale => write!(f, "Scale"),
             ValueBinding::Rotation => write!(f, "Rotation"),
-            ValueBinding::Property { name, .. } => write!(f, "{}", name),
+            ValueBinding::Property { name, .. } => write!(f, "{name}"),
         }
     }
 }
@@ -331,32 +405,21 @@ impl BoundValue {
     pub fn apply_to_object(
         &self,
         object: &mut dyn Reflect,
-        property_name: &str,
+        property_path: &str,
         value_type: ValueType,
     ) {
-        if let Some(casted) = self.value.numeric_type_cast(value_type) {
-            let mut casted = Some(casted);
-            object.as_reflect_mut(&mut |object_ref| {
-                object_ref.set_field_by_path(property_name, casted.take().unwrap(), &mut |result| {
-                    if let Err(err) = result {
-                        match err {
-                            SetFieldByPathError::InvalidPath { reason, .. } => {
-                                Log::err(format!(
-                                    "Failed to set property {}! Invalid path: {}",
-                                    property_name, reason
-                                ));
-                            }
-                            SetFieldByPathError::InvalidValue(_) => {
-                                Log::err(format!(
-                                    "Failed to set property {}! Types mismatch!",
-                                    property_name
-                                ));
-                            }
-                        }
-                    }
-                })
-            })
-        }
+        object.as_reflect_mut(&mut |object_ref| {
+            object_ref.resolve_path_mut(property_path, &mut |result| match result {
+                Ok(property) => property.as_any_mut(&mut |any| {
+                    self.value.apply_to_any(any, value_type);
+                }),
+                Err(err) => {
+                    Log::err(format!(
+                        "Failed to set property {property_path}! Reason: {err:?}"
+                    ));
+                }
+            });
+        })
     }
 }
 
@@ -391,4 +454,60 @@ pub fn nlerp(mut a: UnitQuaternion<f32>, b: &UnitQuaternion<f32>, w: f32) -> Uni
 /// Negate the given quaternion by negating each of its components.
 pub fn negate_unit_quaternion(a: &UnitQuaternion<f32>) -> UnitQuaternion<f32> {
     Unit::new_unchecked(-a.as_ref())
+}
+
+#[cfg(test)]
+mod test {
+    use crate::value::{BoundValue, TrackValue, ValueBinding, ValueType};
+    use fyrox_core::reflect::prelude::*;
+
+    #[derive(Default, Reflect, Debug, PartialEq)]
+    struct OtherStruct {
+        field: u32,
+    }
+
+    #[derive(Default, Reflect, Debug, PartialEq)]
+    struct MyStruct {
+        some_bool: bool,
+        some_property: f32,
+        other_struct: OtherStruct,
+    }
+
+    #[test]
+    fn test_apply_value() {
+        let some_bool_value = BoundValue {
+            binding: ValueBinding::Property {
+                name: "some_bool".into(),
+                value_type: ValueType::Bool,
+            },
+            value: TrackValue::Real(1.0),
+        };
+
+        let some_property_value = BoundValue {
+            binding: ValueBinding::Property {
+                name: "some_property".into(),
+                value_type: ValueType::F32,
+            },
+            value: TrackValue::Real(123.0),
+        };
+
+        let field_value = BoundValue {
+            binding: ValueBinding::Property {
+                name: "field".into(),
+                value_type: ValueType::U32,
+            },
+            value: TrackValue::Real(123.0),
+        };
+
+        let mut object = MyStruct::default();
+
+        some_bool_value.apply_to_object(&mut object, "some_bool", ValueType::Bool);
+        assert!(object.some_bool);
+
+        some_property_value.apply_to_object(&mut object, "some_property", ValueType::F32);
+        assert_eq!(object.some_property, 123.0);
+
+        field_value.apply_to_object(&mut object, "other_struct.field", ValueType::U32);
+        assert_eq!(object.other_struct.field, 123);
+    }
 }

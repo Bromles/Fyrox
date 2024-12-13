@@ -23,14 +23,15 @@
 //!
 //! See [`Listener`] docs for more info.
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     scene::{
         base::{Base, BaseBuilder},
@@ -38,6 +39,7 @@ use crate::{
         node::{Node, NodeTrait, SyncContext},
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
@@ -55,7 +57,7 @@ use std::ops::{Deref, DerefMut};
 ///
 /// 2D sound sources (with spatial blend == 0.0) are not influenced by listener's position and
 /// orientation.
-#[derive(Visit, Reflect, Default, Clone, Debug)]
+#[derive(Visit, Reflect, Default, Clone, Debug, ComponentProvider)]
 pub struct Listener {
     base: Base,
 }
@@ -80,9 +82,19 @@ impl TypeUuidProvider for Listener {
     }
 }
 
-impl NodeTrait for Listener {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Listener {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Listener", |_| {
+                ListenerBuilder::new(BaseBuilder::new().with_name("Listener"))
+                    .build_node()
+                    .into()
+            })
+            .with_group("Sound")
+    }
+}
 
+impl NodeTrait for Listener {
     /// Returns local bounding box of the listener, since listener cannot have any bounds -
     /// returned bounding box is collapsed into a point.
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {

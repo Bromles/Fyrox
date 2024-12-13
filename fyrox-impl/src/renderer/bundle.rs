@@ -20,33 +20,53 @@
 
 //! The module responsible for bundle generation for rendering optimizations.
 
+#![allow(missing_docs)] // TODO
+
 use crate::{
     asset::untyped::ResourceKind,
     core::{
-        algebra::{Matrix4, Vector3},
+        algebra::{Matrix4, Vector3, Vector4},
+        arrayvec::ArrayVec,
+        color,
         color::Color,
+        log::Log,
         math::{frustum::Frustum, Rect},
         pool::Handle,
         sstorage::ImmutableString,
     },
     graph::BaseSceneGraph,
-    material::{shader::SamplerFallback, Material, MaterialResource, PropertyValue},
+    material::{
+        self, shader::ShaderDefinition, MaterialProperty, MaterialPropertyGroup, MaterialResource,
+    },
     renderer::{
-        cache::{geometry::GeometryCache, shader::ShaderCache, texture::TextureCache, TimeToLive},
+        cache::{
+            geometry::GeometryCache,
+            shader::ShaderCache,
+            texture::TextureCache,
+            uniform::{UniformBlockLocation, UniformMemoryAllocator},
+            TimeToLive,
+        },
         framework::{
             error::FrameworkError,
-            framebuffer::FrameBuffer,
-            geometry_buffer::ElementRange,
-            gpu_program::{BuiltInUniform, GpuProgramBinding},
+            framebuffer::{BufferLocation, FrameBuffer, ResourceBindGroup, ResourceBinding},
+            gpu_program::{ShaderProperty, ShaderPropertyKind, ShaderResourceKind},
             gpu_texture::GpuTexture,
-            state::PipelineState,
+            server::GraphicsServer,
+            uniform::StaticUniformBuffer,
+            uniform::{ByteStorage, UniformBuffer},
+            ElementRange,
         },
-        storage::MatrixStorageCache,
-        LightData, RenderPassStatistics,
+        FallbackResources, LightData, RenderPassStatistics,
     },
     resource::texture::TextureResource,
     scene::{
         graph::Graph,
+        light::{
+            directional::{CsmOptions, DirectionalLight},
+            point::PointLight,
+            spot::SpotLight,
+            BaseLight,
+        },
         mesh::{
             buffer::{
                 BytesStorage, TriangleBuffer, TriangleBufferRefMut, VertexAttributeDescriptor,
@@ -59,9 +79,10 @@ use crate::{
     },
 };
 use fxhash::{FxBuildHasher, FxHashMap, FxHasher};
+use fyrox_core::math::Matrix4Ext;
+use fyrox_graph::{SceneGraph, SceneGraphNode};
 use std::{
     cell::RefCell,
-    collections::hash_map::DefaultHasher,
     fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
     rc::Rc,
@@ -69,6 +90,7 @@ use std::{
 
 /// Observer info contains all the data, that describes an observer. It could be a real camera, light source's
 /// "virtual camera" that is used for shadow mapping, etc.
+#[derive(Clone, Default)]
 pub struct ObserverInfo {
     /// World-space position of the observer.
     pub observer_position: Vector3<f32>,
@@ -85,16 +107,7 @@ pub struct ObserverInfo {
 /// Render context is used to collect render data from the scene nodes. It provides all required information about
 /// the observer (camera, light source virtual camera, etc.), that could be used for culling.
 pub struct RenderContext<'a> {
-    /// World-space position of the observer.
-    pub observer_position: &'a Vector3<f32>,
-    /// Location of the near clipping plane.
-    pub z_near: f32,
-    /// Location of the far clipping plane.
-    pub z_far: f32,
-    /// View matrix of the observer.
-    pub view_matrix: &'a Matrix4<f32>,
-    /// Projection matrix of the observer.
-    pub projection_matrix: &'a Matrix4<f32>,
+    pub observer_info: &'a ObserverInfo,
     /// Frustum of the observer, it is built using observer's view and projection matrix. Use the frustum to do
     /// frustum culling.
     pub frustum: Option<&'a Frustum>,
@@ -108,7 +121,7 @@ pub struct RenderContext<'a> {
     pub render_pass_name: &'a ImmutableString,
 }
 
-impl<'a> RenderContext<'a> {
+impl RenderContext<'_> {
     /// Calculates sorting index using of the given point by transforming it in the view space and
     /// using Z coordinate. This index could be used for back-to-front sorting to prevent blending
     /// issues.
@@ -116,6 +129,7 @@ impl<'a> RenderContext<'a> {
         let granularity = 1000.0;
         u64::MAX
             - (self
+                .observer_info
                 .view_matrix
                 .transform_point(&(global_position.into()))
                 .z
@@ -124,286 +138,24 @@ impl<'a> RenderContext<'a> {
 }
 
 #[allow(missing_docs)] // TODO
-pub struct InstanceContext<'a> {
-    pub matrix_storage: &'a mut MatrixStorageCache,
-    pub persistent_identifier: PersistentIdentifier,
-
-    pub world_matrix: &'a Matrix4<f32>,
-    pub wvp_matrix: &'a Matrix4<f32>,
-    pub bone_matrices: &'a [Matrix4<f32>],
-    pub use_skeletal_animation: bool,
-    pub blend_shapes_weights: &'a [f32],
-}
-
-impl<'a> InstanceContext<'a> {
-    #[allow(missing_docs)] // TODO
-    pub fn apply_to(self, program_binding: &mut GpuProgramBinding) {
-        let InstanceContext {
-            matrix_storage,
-            persistent_identifier,
-            world_matrix,
-            wvp_matrix,
-            bone_matrices,
-            use_skeletal_animation,
-            blend_shapes_weights,
-        } = self;
-
-        let built_in_uniforms = &program_binding.program.built_in_uniform_locations;
-
-        // Apply values for built-in uniforms.
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::WorldMatrix as usize] {
-            program_binding.set_matrix4(location, world_matrix);
-        }
-        if let Some(location) =
-            &built_in_uniforms[BuiltInUniform::WorldViewProjectionMatrix as usize]
-        {
-            program_binding.set_matrix4(location, wvp_matrix);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::BoneMatrices as usize] {
-            let active_sampler = program_binding.active_sampler();
-
-            let storage = matrix_storage
-                .try_bind_and_upload(
-                    program_binding.state,
-                    persistent_identifier,
-                    bone_matrices,
-                    active_sampler,
-                )
-                .expect("Failed to upload bone matrices!");
-
-            program_binding.set_texture_to_sampler(location, storage.texture(), active_sampler);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::UseSkeletalAnimation as usize] {
-            program_binding.set_bool(location, use_skeletal_animation);
-        }
-
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::BlendShapesWeights as usize] {
-            program_binding.set_f32_slice(location, blend_shapes_weights);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::BlendShapesCount as usize] {
-            program_binding.set_i32(location, blend_shapes_weights.len() as i32);
-        }
-    }
-}
-
-#[allow(missing_docs)] // TODO
 pub struct BundleRenderContext<'a> {
     pub texture_cache: &'a mut TextureCache,
     pub render_pass_name: &'a ImmutableString,
-    pub frame_buffer: &'a FrameBuffer,
+    pub frame_buffer: &'a mut dyn FrameBuffer,
     pub viewport: Rect<i32>,
-    pub matrix_storage: &'a mut MatrixStorageCache,
+    pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
 
     // Built-in uniforms.
-    pub view_projection_matrix: &'a Matrix4<f32>,
     pub use_pom: bool,
     pub light_position: &'a Vector3<f32>,
-    pub light_data: Option<&'a LightData>,
     pub ambient_light: Color,
     // TODO: Add depth pre-pass to remove Option here. Current architecture allows only forward
     // renderer to have access to depth buffer that is available from G-Buffer.
-    pub scene_depth: Option<&'a Rc<RefCell<GpuTexture>>>,
-
-    pub camera_position: &'a Vector3<f32>,
-    pub camera_up_vector: &'a Vector3<f32>,
-    pub camera_side_vector: &'a Vector3<f32>,
-    pub z_near: f32,
-    pub z_far: f32,
-
-    // Fallback textures.
-    pub normal_dummy: &'a Rc<RefCell<GpuTexture>>,
-    pub white_dummy: &'a Rc<RefCell<GpuTexture>>,
-    pub black_dummy: &'a Rc<RefCell<GpuTexture>>,
-    pub volume_dummy: &'a Rc<RefCell<GpuTexture>>,
+    pub scene_depth: Option<&'a Rc<RefCell<dyn GpuTexture>>>,
+    pub fallback_resources: &'a FallbackResources,
 }
 
-impl<'a> BundleRenderContext<'a> {
-    #[allow(missing_docs)] // TODO
-    pub fn apply_material(
-        &mut self,
-        material: &Material,
-        program_binding: &mut GpuProgramBinding,
-        blend_shapes_storage: Option<TextureResource>,
-    ) {
-        let built_in_uniforms = &program_binding.program.built_in_uniform_locations;
-
-        // Apply values for built-in uniforms.
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::ViewProjectionMatrix as usize] {
-            program_binding.set_matrix4(location, self.view_projection_matrix);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::CameraPosition as usize] {
-            program_binding.set_vector3(location, self.camera_position);
-        }
-
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::CameraUpVector as usize] {
-            program_binding.set_vector3(location, self.camera_up_vector);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::CameraSideVector as usize] {
-            program_binding.set_vector3(location, self.camera_side_vector);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::ZNear as usize] {
-            program_binding.set_f32(location, self.z_near);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::ZFar as usize] {
-            program_binding.set_f32(location, self.z_far);
-        }
-
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::SceneDepth as usize] {
-            if let Some(scene_depth) = self.scene_depth.as_ref() {
-                program_binding.set_texture(location, scene_depth);
-            }
-        }
-
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::UsePOM as usize] {
-            program_binding.set_bool(location, self.use_pom);
-        }
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::LightPosition as usize] {
-            program_binding.set_vector3(location, self.light_position);
-        }
-
-        if let Some(light_data) = self.light_data {
-            if let Some(location) = &built_in_uniforms[BuiltInUniform::LightCount as usize] {
-                program_binding.set_i32(location, light_data.count as i32);
-            }
-
-            if let Some(location) = &built_in_uniforms[BuiltInUniform::LightsColorRadius as usize] {
-                program_binding.set_vector4_slice(location, &light_data.color_radius);
-            }
-
-            if let Some(location) = &built_in_uniforms[BuiltInUniform::LightsPosition as usize] {
-                program_binding.set_vector3_slice(location, &light_data.position);
-            }
-
-            if let Some(location) = &built_in_uniforms[BuiltInUniform::LightsDirection as usize] {
-                program_binding.set_vector3_slice(location, &light_data.direction);
-            }
-
-            if let Some(location) = &built_in_uniforms[BuiltInUniform::LightsParameters as usize] {
-                program_binding.set_vector2_slice(location, &light_data.parameters);
-            }
-        }
-
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::AmbientLight as usize] {
-            program_binding.set_srgb_color(location, &self.ambient_light);
-        }
-
-        if let Some(location) = &built_in_uniforms[BuiltInUniform::BlendShapesStorage as usize] {
-            if let Some(texture) = blend_shapes_storage
-                .as_ref()
-                .and_then(|blend_shapes_storage| {
-                    self.texture_cache
-                        .get(program_binding.state, blend_shapes_storage)
-                })
-            {
-                program_binding.set_texture(location, texture);
-            } else {
-                program_binding.set_texture(location, self.volume_dummy);
-            }
-        }
-
-        // Apply material properties.
-        for (name, value) in material.properties() {
-            if let Some(uniform) = program_binding.uniform_location(name) {
-                match value {
-                    PropertyValue::Float(v) => {
-                        program_binding.set_f32(&uniform, *v);
-                    }
-                    PropertyValue::Int(v) => {
-                        program_binding.set_i32(&uniform, *v);
-                    }
-                    PropertyValue::UInt(v) => {
-                        program_binding.set_u32(&uniform, *v);
-                    }
-                    PropertyValue::Vector2(v) => {
-                        program_binding.set_vector2(&uniform, v);
-                    }
-                    PropertyValue::Vector3(v) => {
-                        program_binding.set_vector3(&uniform, v);
-                    }
-                    PropertyValue::Vector4(v) => {
-                        program_binding.set_vector4(&uniform, v);
-                    }
-                    PropertyValue::Matrix2(v) => {
-                        program_binding.set_matrix2(&uniform, v);
-                    }
-                    PropertyValue::Matrix3(v) => {
-                        program_binding.set_matrix3(&uniform, v);
-                    }
-                    PropertyValue::Matrix4(v) => {
-                        program_binding.set_matrix4(&uniform, v);
-                    }
-                    PropertyValue::Color(v) => {
-                        program_binding.set_srgb_color(&uniform, v);
-                    }
-                    PropertyValue::Bool(v) => {
-                        program_binding.set_bool(&uniform, *v);
-                    }
-                    PropertyValue::Sampler { value, fallback } => {
-                        let texture = value
-                            .as_ref()
-                            .and_then(|t| self.texture_cache.get(program_binding.state, t))
-                            .unwrap_or(match fallback {
-                                SamplerFallback::White => self.white_dummy,
-                                SamplerFallback::Normal => self.normal_dummy,
-                                SamplerFallback::Black => self.black_dummy,
-                            });
-
-                        program_binding.set_texture(&uniform, texture);
-                    }
-                    PropertyValue::FloatArray(v) => {
-                        program_binding.set_f32_slice(&uniform, v);
-                    }
-                    PropertyValue::IntArray(v) => {
-                        program_binding.set_i32_slice(&uniform, v);
-                    }
-                    PropertyValue::UIntArray(v) => {
-                        program_binding.set_u32_slice(&uniform, v);
-                    }
-                    PropertyValue::Vector2Array(v) => {
-                        program_binding.set_vector2_slice(&uniform, v);
-                    }
-                    PropertyValue::Vector3Array(v) => {
-                        program_binding.set_vector3_slice(&uniform, v);
-                    }
-                    PropertyValue::Vector4Array(v) => {
-                        program_binding.set_vector4_slice(&uniform, v);
-                    }
-                    PropertyValue::Matrix2Array(v) => {
-                        program_binding.set_matrix2_array(&uniform, v);
-                    }
-                    PropertyValue::Matrix3Array(v) => {
-                        program_binding.set_matrix3_array(&uniform, v);
-                    }
-                    PropertyValue::Matrix4Array(v) => {
-                        program_binding.set_matrix4_array(&uniform, v);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Persistent identifier marks drawing data, telling the renderer that the data is the same, no matter from which
-/// render bundle it came from. It is used by the renderer to create associated GPU resources.
-#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq)]
-pub struct PersistentIdentifier(pub u64);
-
-impl PersistentIdentifier {
-    /// Creates a new persistent identifier using shared surface data, node handle and an arbitrary index.
-    pub fn new_combined(
-        surface_data: &SurfaceResource,
-        handle: Handle<Node>,
-        index: usize,
-    ) -> Self {
-        let mut hasher = DefaultHasher::new();
-        handle.hash(&mut hasher);
-        hasher.write_u64(surface_data.key());
-        hasher.write_usize(index);
-        Self(hasher.finish())
-    }
-}
-
-/// A set of data of a surface for rendering.  
+/// A set of data of a surface for rendering.
 pub struct SurfaceInstanceData {
     /// A world matrix.
     pub world_transform: Matrix4<f32>,
@@ -414,9 +166,6 @@ pub struct SurfaceInstanceData {
     /// A range of elements of the instance. Allows you to draw either the full range ([`ElementRange::Full`])
     /// of the graphics primitives from the surface data or just a part of it ([`ElementRange::Specific`]).
     pub element_range: ElementRange,
-    /// Persistent identifier of the instance. In most cases it can be generated by [`PersistentIdentifier::new_combined`]
-    /// method.
-    pub persistent_identifier: PersistentIdentifier,
     /// A handle of a node that emitted this surface data. Could be none, if there's no info about scene node.
     pub node_handle: Handle<Node>,
 }
@@ -448,15 +197,247 @@ impl Debug for RenderDataBundle {
     }
 }
 
+/// Describes where to the actual uniform data is located in the memory backed by the uniform
+/// memory allocator on per-instance basis.
+pub struct InstanceUniformData {
+    /// Instance info block location.
+    pub instance_block: UniformBlockLocation,
+    /// Bone matrices block location. Could be [`None`], if there's no bone matrices.
+    pub bone_matrices_block: Option<UniformBlockLocation>,
+}
+
+/// Describes where to the actual uniform data is located in the memory backed by the uniform
+/// memory allocator on per-bundle basis.
+pub struct BundleUniformData {
+    /// Material info block location.
+    pub material_property_group_blocks: Vec<(usize, UniformBlockLocation)>,
+    /// Lights info block location.
+    pub light_data_block: UniformBlockLocation,
+    /// Block locations for each instance in a bundle.
+    pub instance_blocks: Vec<InstanceUniformData>,
+}
+
+pub struct GlobalUniformData {
+    /// Camera info block location.
+    pub camera_block: UniformBlockLocation,
+    /// Light source data info block location.
+    pub lights_block: UniformBlockLocation,
+    /// Graphics settings block location.
+    pub graphics_settings_block: UniformBlockLocation,
+}
+
+fn write_with_material<T: ByteStorage>(
+    shader_property_group: &[ShaderProperty],
+    material_property_group: &MaterialPropertyGroup,
+    buf: &mut UniformBuffer<T>,
+) {
+    // The order of fields is strictly defined in shader, so we must iterate over shader definition
+    // of a structure and look for respective values in the material.
+    for shader_property in shader_property_group {
+        let material_property = material_property_group.property_ref(shader_property.name.clone());
+
+        macro_rules! push_value {
+            ($variant:ident, $shader_value:ident) => {
+                if let Some(property) = material_property {
+                    if let MaterialProperty::$variant(material_value) = property {
+                        buf.push(material_value);
+                    } else {
+                        buf.push($shader_value);
+                        Log::err(format!(
+                            "Unable to use material property {} because of mismatching types.\
+                            Expected {:?} got {:?}. Fallback to shader default value.",
+                            shader_property.name, shader_property, property
+                        ));
+                    }
+                } else {
+                    buf.push($shader_value);
+                }
+            };
+        }
+
+        macro_rules! push_slice {
+            ($variant:ident, $shader_value:ident, $max_size:ident) => {
+                if let Some(property) = material_property {
+                    if let MaterialProperty::$variant(material_value) = property {
+                        buf.push_slice_with_max_size(material_value, *$max_size);
+                    } else {
+                        buf.push_slice_with_max_size($shader_value, *$max_size);
+                        Log::err(format!(
+                            "Unable to use material property {} because of mismatching types.\
+                            Expected {:?} got {:?}. Fallback to shader default value.",
+                            shader_property.name, shader_property, property
+                        ))
+                    }
+                } else {
+                    buf.push_slice_with_max_size($shader_value, *$max_size);
+                }
+            };
+        }
+
+        use ShaderPropertyKind::*;
+        match &shader_property.kind {
+            Float(value) => push_value!(Float, value),
+            FloatArray { value, max_len } => push_slice!(FloatArray, value, max_len),
+            Int(value) => push_value!(Int, value),
+            IntArray { value, max_len } => push_slice!(IntArray, value, max_len),
+            UInt(value) => push_value!(UInt, value),
+            UIntArray { value, max_len } => push_slice!(UIntArray, value, max_len),
+            Vector2(value) => push_value!(Vector2, value),
+            Vector2Array { value, max_len } => push_slice!(Vector2Array, value, max_len),
+            Vector3(value) => push_value!(Vector3, value),
+            Vector3Array { value, max_len } => push_slice!(Vector3Array, value, max_len),
+            Vector4(value) => push_value!(Vector4, value),
+            Vector4Array { value, max_len } => push_slice!(Vector4Array, value, max_len),
+            Matrix2(value) => push_value!(Matrix2, value),
+            Matrix2Array { value, max_len } => push_slice!(Matrix2Array, value, max_len),
+            Matrix3(value) => push_value!(Matrix3, value),
+            Matrix3Array { value, max_len } => push_slice!(Matrix3Array, value, max_len),
+            Matrix4(value) => push_value!(Matrix4, value),
+            Matrix4Array { value, max_len } => push_slice!(Matrix4Array, value, max_len),
+            Bool(value) => push_value!(Bool, value),
+            Color { r, g, b, a } => {
+                let value = &color::Color::from_rgba(*r, *g, *b, *a);
+                push_value!(Color, value)
+            }
+        };
+    }
+}
+
+fn write_shader_values<T: ByteStorage>(
+    shader_property_group: &[ShaderProperty],
+    buf: &mut UniformBuffer<T>,
+) {
+    for property in shader_property_group {
+        use ShaderPropertyKind::*;
+        match &property.kind {
+            Float(value) => buf.push(value),
+            FloatArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Int(value) => buf.push(value),
+            IntArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            UInt(value) => buf.push(value),
+            UIntArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Vector2(value) => buf.push(value),
+            Vector2Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Vector3(value) => buf.push(value),
+            Vector3Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Vector4(value) => buf.push(value),
+            Vector4Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Matrix2(value) => buf.push(value),
+            Matrix2Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Matrix3(value) => buf.push(value),
+            Matrix3Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Matrix4(value) => buf.push(value),
+            Matrix4Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
+            Bool(value) => buf.push(value),
+            Color { r, g, b, a } => buf.push(&color::Color::from_rgba(*r, *g, *b, *a)),
+        };
+    }
+}
+
 impl RenderDataBundle {
+    /// Writes all the required uniform data of the bundle to uniform memory allocator.
+    pub fn write_uniforms(
+        &self,
+        view_projection_matrix: &Matrix4<f32>,
+        render_context: &mut BundleRenderContext,
+    ) -> Option<BundleUniformData> {
+        let mut material_state = self.material.state();
+
+        let material = material_state.data()?;
+
+        // Upload material property groups.
+        let mut material_property_group_blocks = Vec::new();
+        let shader = material.shader().data_ref();
+        for resource_definition in shader.definition.resources.iter() {
+            // Ignore built-in groups.
+            if resource_definition.is_built_in() {
+                continue;
+            }
+
+            let ShaderResourceKind::PropertyGroup(ref shader_property_group) =
+                resource_definition.kind
+            else {
+                continue;
+            };
+
+            let mut buf = StaticUniformBuffer::<16384>::new();
+
+            if let Some(material_property_group) =
+                material.property_group_ref(resource_definition.name.clone())
+            {
+                write_with_material(shader_property_group, material_property_group, &mut buf);
+            } else {
+                // No respective resource bound in the material, use shader defaults. This is very
+                // important, because some drivers will crash if uniform buffer has insufficient
+                // data.
+                write_shader_values(shader_property_group, &mut buf)
+            }
+
+            material_property_group_blocks.push((
+                resource_definition.binding,
+                render_context.uniform_memory_allocator.allocate(buf),
+            ))
+        }
+
+        let light_data = StaticUniformBuffer::<256>::new()
+            .with(render_context.light_position)
+            .with(&render_context.ambient_light.as_frgba());
+        let light_data_block = render_context.uniform_memory_allocator.allocate(light_data);
+
+        // Upload instance uniforms.
+        let mut instance_blocks = Vec::with_capacity(self.instances.len());
+        for instance in self.instances.iter() {
+            let instance_buffer = StaticUniformBuffer::<1024>::new()
+                .with(&instance.world_transform)
+                .with(&(view_projection_matrix * instance.world_transform))
+                .with(&(instance.blend_shapes_weights.len() as i32))
+                .with(&(!instance.bone_matrices.is_empty()))
+                .with_slice_with_max_size(
+                    &instance.blend_shapes_weights,
+                    ShaderDefinition::MAX_BLEND_SHAPE_WEIGHT_GROUPS,
+                );
+
+            let mut instance_uniform_data = InstanceUniformData {
+                instance_block: render_context
+                    .uniform_memory_allocator
+                    .allocate(instance_buffer),
+                bone_matrices_block: None,
+            };
+
+            if !instance.bone_matrices.is_empty() {
+                const INIT: Matrix4<f32> = Matrix4::new(
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                );
+                let mut matrices = [INIT; ShaderDefinition::MAX_BONE_MATRICES];
+                const SIZE: usize = ShaderDefinition::MAX_BONE_MATRICES * size_of::<Matrix4<f32>>();
+                matrices[0..instance.bone_matrices.len()].copy_from_slice(&instance.bone_matrices);
+
+                let bone_matrices_block = render_context
+                    .uniform_memory_allocator
+                    .allocate(StaticUniformBuffer::<SIZE>::new().with_slice(&matrices));
+                instance_uniform_data.bone_matrices_block = Some(bone_matrices_block);
+            }
+
+            instance_blocks.push(instance_uniform_data);
+        }
+
+        Some(BundleUniformData {
+            material_property_group_blocks,
+            light_data_block,
+            instance_blocks,
+        })
+    }
+
     /// Draws the entire bundle to the specified frame buffer with the specified rendering environment.
     pub fn render_to_frame_buffer<F>(
         &self,
-        state: &PipelineState,
+        server: &dyn GraphicsServer,
         geometry_cache: &mut GeometryCache,
         shader_cache: &mut ShaderCache,
-        mut instance_filter: F,
-        mut render_context: BundleRenderContext,
+        instance_filter: &mut F,
+        render_context: &mut BundleRenderContext,
+        bundle_uniform_data: BundleUniformData,
+        global_uniform_data: &GlobalUniformData,
     ) -> Result<RenderPassStatistics, FrameworkError>
     where
         F: FnMut(&SurfaceInstanceData) -> bool,
@@ -469,54 +450,183 @@ impl RenderDataBundle {
             return Ok(stats);
         };
 
-        let Some(geometry) = geometry_cache.get(state, &self.data, self.time_to_live) else {
+        let Some(geometry) = geometry_cache.get(server, &self.data, self.time_to_live) else {
             return Ok(stats);
         };
 
-        let blend_shapes_storage = self
-            .data
-            .data_ref()
-            .blend_shapes_container
-            .as_ref()
-            .and_then(|c| c.blend_shape_storage.clone());
-
-        let Some(render_pass) = shader_cache
-            .get(state, material.shader())
-            .and_then(|shader_set| {
-                shader_set
-                    .render_passes
-                    .get(render_context.render_pass_name)
-            })
+        let Some(render_pass) =
+            shader_cache
+                .get(server, material.shader())
+                .and_then(|shader_set| {
+                    shader_set
+                        .render_passes
+                        .get(render_context.render_pass_name)
+                })
         else {
             return Ok(stats);
         };
 
-        state.set_framebuffer(render_context.frame_buffer.id());
-        state.set_viewport(render_context.viewport);
-        state.apply_draw_parameters(&render_pass.draw_params);
+        let mut material_bindings = ArrayVec::<ResourceBinding, 32>::new();
+        let shader = material.shader().data_ref();
+        for resource_definition in shader.definition.resources.iter() {
+            let name = resource_definition.name.as_str();
 
-        let mut program_binding = render_pass.program.bind(state);
-        render_context.apply_material(material, &mut program_binding, blend_shapes_storage);
+            match name {
+                "fyrox_sceneDepth" => {
+                    material_bindings.push(ResourceBinding::texture_with_binding(
+                        if let Some(scene_depth) = render_context.scene_depth.as_ref() {
+                            scene_depth
+                        } else {
+                            &render_context.fallback_resources.black_dummy
+                        },
+                        resource_definition.binding,
+                    ));
+                }
+                "fyrox_cameraData" => {
+                    material_bindings.push(
+                        render_context.uniform_memory_allocator.block_to_binding(
+                            global_uniform_data.camera_block,
+                            resource_definition.binding,
+                        ),
+                    );
+                }
+                "fyrox_lightData" => {
+                    material_bindings.push(
+                        render_context.uniform_memory_allocator.block_to_binding(
+                            bundle_uniform_data.light_data_block,
+                            resource_definition.binding,
+                        ),
+                    );
+                }
+                "fyrox_graphicsSettings" => {
+                    material_bindings.push(
+                        render_context.uniform_memory_allocator.block_to_binding(
+                            global_uniform_data.graphics_settings_block,
+                            resource_definition.binding,
+                        ),
+                    );
+                }
+                "fyrox_lightsBlock" => {
+                    material_bindings.push(
+                        render_context.uniform_memory_allocator.block_to_binding(
+                            global_uniform_data.lights_block,
+                            resource_definition.binding,
+                        ),
+                    );
+                }
+                _ => match resource_definition.kind {
+                    ShaderResourceKind::Texture { fallback, .. } => {
+                        let fallback = render_context.fallback_resources.sampler_fallback(fallback);
 
-        let geometry_binding = geometry.bind(state);
+                        let texture = if let Some(binding) =
+                            material.binding_ref(resource_definition.name.clone())
+                        {
+                            if let material::MaterialResourceBinding::Texture(binding) = binding {
+                                binding
+                                    .value
+                                    .as_ref()
+                                    .and_then(|t| render_context.texture_cache.get(server, t))
+                                    .unwrap_or(fallback)
+                            } else {
+                                Log::err(format!(
+                                    "Unable to use texture binding {}, types mismatch! Expected \
+                                {:?} got {:?}",
+                                    resource_definition.name, resource_definition.kind, binding
+                                ));
 
-        for instance in self.instances.iter() {
+                                fallback
+                            }
+                        } else {
+                            fallback
+                        };
+
+                        material_bindings.push(ResourceBinding::texture_with_binding(
+                            texture,
+                            resource_definition.binding,
+                        ));
+                    }
+                    ShaderResourceKind::PropertyGroup(_) => {
+                        // No validation here, it is done in uniform variables collection step.
+                        if let Some((_, block_location)) = bundle_uniform_data
+                            .material_property_group_blocks
+                            .iter()
+                            .find(|(binding, _)| *binding == resource_definition.binding)
+                        {
+                            material_bindings.push(
+                                render_context
+                                    .uniform_memory_allocator
+                                    .block_to_binding(*block_location, resource_definition.binding),
+                            );
+                        }
+                    }
+                },
+            }
+        }
+
+        for (instance, uniform_data) in self
+            .instances
+            .iter()
+            .zip(bundle_uniform_data.instance_blocks)
+        {
             if !instance_filter(instance) {
                 continue;
             }
+            let mut instance_bindings = ArrayVec::<ResourceBinding, 32>::new();
 
-            InstanceContext {
-                world_matrix: &instance.world_transform,
-                wvp_matrix: &(render_context.view_projection_matrix * instance.world_transform),
-                bone_matrices: &instance.bone_matrices,
-                use_skeletal_animation: !instance.bone_matrices.is_empty(),
-                blend_shapes_weights: &instance.blend_shapes_weights,
-                matrix_storage: render_context.matrix_storage,
-                persistent_identifier: instance.persistent_identifier,
+            for resource_definition in shader.definition.resources.iter() {
+                let name = resource_definition.name.as_str();
+                match name {
+                    "fyrox_instanceData" => {
+                        instance_bindings.push(
+                            render_context.uniform_memory_allocator.block_to_binding(
+                                uniform_data.instance_block,
+                                resource_definition.binding,
+                            ),
+                        );
+                    }
+                    "fyrox_boneMatrices" => {
+                        match uniform_data.bone_matrices_block {
+                            Some(block) => {
+                                instance_bindings.push(
+                                    render_context
+                                        .uniform_memory_allocator
+                                        .block_to_binding(block, resource_definition.binding),
+                                );
+                            }
+                            None => {
+                                // Bind stub buffer, instead of creating and uploading 16kb with zeros per draw
+                                // call.
+                                instance_bindings.push(ResourceBinding::Buffer {
+                                    buffer: &*render_context
+                                        .fallback_resources
+                                        .bone_matrices_stub_uniform_buffer,
+                                    binding: BufferLocation::Explicit {
+                                        binding: resource_definition.binding,
+                                    },
+                                    data_usage: Default::default(),
+                                });
+                            }
+                        }
+                    }
+                    _ => (),
+                };
             }
-            .apply_to(&mut program_binding);
 
-            stats += geometry_binding.draw(instance.element_range)?;
+            stats += render_context.frame_buffer.draw(
+                geometry,
+                render_context.viewport,
+                &*render_pass.program,
+                &render_pass.draw_params,
+                &[
+                    ResourceBindGroup {
+                        bindings: &material_bindings,
+                    },
+                    ResourceBindGroup {
+                        bindings: &instance_bindings,
+                    },
+                ],
+                instance.element_range,
+            )?;
         }
 
         Ok(stats)
@@ -569,16 +679,72 @@ pub trait RenderDataBundleStorageTrait {
     );
 }
 
+pub enum LightSourceKind {
+    Spot {
+        full_cone_angle: f32,
+        hotspot_cone_angle: f32,
+        distance: f32,
+        shadow_bias: f32,
+        cookie_texture: Option<TextureResource>,
+    },
+    Point {
+        radius: f32,
+        shadow_bias: f32,
+    },
+    Directional {
+        csm_options: CsmOptions,
+    },
+    Unknown,
+}
+
+pub struct LightSource {
+    pub handle: Handle<Node>,
+    pub global_transform: Matrix4<f32>,
+    pub kind: LightSourceKind,
+    pub position: Vector3<f32>,
+    pub up_vector: Vector3<f32>,
+    pub side_vector: Vector3<f32>,
+    pub look_vector: Vector3<f32>,
+    pub cast_shadows: bool,
+    pub local_scale: Vector3<f32>,
+    pub color: Color,
+    pub intensity: f32,
+    pub scatter_enabled: bool,
+    pub scatter: Vector3<f32>,
+}
+
 /// Bundle storage handles bundle generation for a scene before rendering. It is used to optimize
 /// rendering by reducing amount of state changes of OpenGL context.
-#[derive(Default)]
 pub struct RenderDataBundleStorage {
     bundle_map: FxHashMap<u64, usize>,
+    pub observer_info: ObserverInfo,
     /// A sorted list of bundles.
     pub bundles: Vec<RenderDataBundle>,
+    pub light_sources: Vec<LightSource>,
+}
+
+pub struct RenderDataBundleStorageOptions {
+    pub collect_lights: bool,
+}
+
+impl Default for RenderDataBundleStorageOptions {
+    fn default() -> Self {
+        Self {
+            collect_lights: true,
+        }
+    }
 }
 
 impl RenderDataBundleStorage {
+    pub fn new_empty(observer_info: ObserverInfo) -> Self {
+        Self {
+            bundle_map: Default::default(),
+            observer_info,
+            bundles: Default::default(),
+            light_sources: Default::default(),
+        }
+    }
+
     /// Creates a new render bundle storage from the given graph and observer info. It "asks" every node in the
     /// graph one-by-one to give render data which is then put in the storage, sorted and ready for rendering.
     /// Frustum culling is done on scene node side ([`crate::scene::node::NodeTrait::collect_render_data`]).
@@ -586,16 +752,24 @@ impl RenderDataBundleStorage {
         graph: &Graph,
         observer_info: ObserverInfo,
         render_pass_name: ImmutableString,
+        options: RenderDataBundleStorageOptions,
     ) -> Self {
         // Aim for the worst-case scenario when every node has unique render data.
         let capacity = graph.node_count() as usize;
         let mut storage = Self {
             bundle_map: FxHashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
+            observer_info: observer_info.clone(),
             bundles: Vec::with_capacity(capacity),
+            light_sources: Default::default(),
         };
 
+        let frustum = Frustum::from_view_projection_matrix(
+            observer_info.projection_matrix * observer_info.view_matrix,
+        )
+        .unwrap_or_default();
+
         let mut lod_filter = vec![true; graph.capacity() as usize];
-        for node in graph.linear_iter() {
+        for (node_handle, node) in graph.pair_iter() {
             if let Some(lod_group) = node.lod_group() {
                 for level in lod_group.levels.iter() {
                     for &object in level.objects.iter() {
@@ -612,19 +786,58 @@ impl RenderDataBundleStorage {
                     }
                 }
             }
+
+            if options.collect_lights {
+                if let Some(base_light) = node.component_ref::<BaseLight>() {
+                    if frustum.is_intersects_aabb(&node.world_bounding_box())
+                        && base_light.global_visibility()
+                        && base_light.is_globally_enabled()
+                    {
+                        let kind = if let Some(spot_light) = node.cast::<SpotLight>() {
+                            LightSourceKind::Spot {
+                                full_cone_angle: spot_light.full_cone_angle(),
+                                hotspot_cone_angle: spot_light.hotspot_cone_angle(),
+                                distance: spot_light.distance(),
+                                shadow_bias: spot_light.shadow_bias(),
+                                cookie_texture: spot_light.cookie_texture(),
+                            }
+                        } else if let Some(point_light) = node.cast::<PointLight>() {
+                            LightSourceKind::Point {
+                                radius: point_light.radius(),
+                                shadow_bias: point_light.shadow_bias(),
+                            }
+                        } else if let Some(directional_light) = node.cast::<DirectionalLight>() {
+                            LightSourceKind::Directional {
+                                csm_options: (*directional_light.csm_options).clone(),
+                            }
+                        } else {
+                            LightSourceKind::Unknown
+                        };
+
+                        let source = LightSource {
+                            handle: node_handle,
+                            global_transform: base_light.global_transform(),
+                            kind,
+                            position: base_light.global_position(),
+                            up_vector: base_light.up_vector(),
+                            side_vector: base_light.side_vector(),
+                            look_vector: base_light.look_vector(),
+                            cast_shadows: base_light.cast_shadows(),
+                            local_scale: **base_light.local_transform().scale(),
+                            color: base_light.color(),
+                            intensity: base_light.intensity(),
+                            scatter_enabled: base_light.is_scatter_enabled(),
+                            scatter: base_light.scatter(),
+                        };
+
+                        storage.light_sources.push(source);
+                    }
+                }
+            }
         }
 
-        let frustum = Frustum::from_view_projection_matrix(
-            observer_info.projection_matrix * observer_info.view_matrix,
-        )
-        .unwrap_or_default();
-
         let mut ctx = RenderContext {
-            observer_position: &observer_info.observer_position,
-            z_near: observer_info.z_near,
-            z_far: observer_info.z_far,
-            view_matrix: &observer_info.view_matrix,
-            projection_matrix: &observer_info.projection_matrix,
+            observer_info: &observer_info,
             frustum: Some(&frustum),
             storage: &mut storage,
             graph,
@@ -658,6 +871,143 @@ impl RenderDataBundleStorage {
     /// Sorts the bundles by their respective sort index.
     pub fn sort(&mut self) {
         self.bundles.sort_unstable_by_key(|b| b.sort_index);
+    }
+
+    pub fn write_global_uniform_blocks(
+        &self,
+        render_context: &mut BundleRenderContext,
+    ) -> GlobalUniformData {
+        let mut light_data = LightData::<{ ShaderDefinition::MAX_LIGHTS }>::default();
+
+        for (i, light) in self
+            .light_sources
+            .iter()
+            .enumerate()
+            .take(ShaderDefinition::MAX_LIGHTS)
+        {
+            let color = light.color.as_frgb();
+
+            light_data.color_radius[i] = Vector4::new(color.x, color.y, color.z, 0.0);
+            light_data.position[i] = light.position;
+            light_data.direction[i] = light.up_vector;
+
+            match light.kind {
+                LightSourceKind::Spot {
+                    full_cone_angle,
+                    hotspot_cone_angle,
+                    distance,
+                    ..
+                } => {
+                    light_data.color_radius[i].w = distance;
+                    light_data.parameters[i].x = (hotspot_cone_angle * 0.5).cos();
+                    light_data.parameters[i].y = (full_cone_angle * 0.5).cos();
+                }
+                LightSourceKind::Point { radius, .. } => {
+                    light_data.color_radius[i].w = radius;
+                    light_data.parameters[i].x = std::f32::consts::PI.cos();
+                    light_data.parameters[i].y = std::f32::consts::PI.cos();
+                }
+                LightSourceKind::Directional { .. } => {
+                    light_data.color_radius[i].w = f32::INFINITY;
+                    light_data.parameters[i].x = std::f32::consts::PI.cos();
+                    light_data.parameters[i].y = std::f32::consts::PI.cos();
+                }
+                LightSourceKind::Unknown => {}
+            }
+
+            light_data.count += 1;
+        }
+
+        let lights_data = StaticUniformBuffer::<2048>::new()
+            .with(&(light_data.count as i32))
+            .with_slice(&light_data.color_radius)
+            .with_slice(&light_data.parameters)
+            .with_slice(&light_data.position)
+            .with_slice(&light_data.direction);
+        let lights_block = render_context
+            .uniform_memory_allocator
+            .allocate(lights_data);
+
+        // Upload camera uniforms.
+        let inv_view = self
+            .observer_info
+            .view_matrix
+            .try_inverse()
+            .unwrap_or_default();
+        let view_projection = self.observer_info.projection_matrix * self.observer_info.view_matrix;
+        let camera_up = inv_view.up();
+        let camera_side = inv_view.side();
+        let camera_uniforms = StaticUniformBuffer::<512>::new()
+            .with(&view_projection)
+            .with(&self.observer_info.observer_position)
+            .with(&camera_up)
+            .with(&camera_side)
+            .with(&self.observer_info.z_near)
+            .with(&self.observer_info.z_far)
+            .with(&(self.observer_info.z_far - self.observer_info.z_near));
+        let camera_block = render_context
+            .uniform_memory_allocator
+            .allocate(camera_uniforms);
+
+        let graphics_settings = StaticUniformBuffer::<256>::new().with(&render_context.use_pom);
+        let graphics_settings_block = render_context
+            .uniform_memory_allocator
+            .allocate(graphics_settings);
+
+        GlobalUniformData {
+            camera_block,
+            lights_block,
+            graphics_settings_block,
+        }
+    }
+
+    /// Draws the entire bundle set to the specified frame buffer with the specified rendering environment.
+    pub fn render_to_frame_buffer<BundleFilter, InstanceFilter>(
+        &self,
+        server: &dyn GraphicsServer,
+        geometry_cache: &mut GeometryCache,
+        shader_cache: &mut ShaderCache,
+        mut bundle_filter: BundleFilter,
+        mut instance_filter: InstanceFilter,
+        mut render_context: BundleRenderContext,
+    ) -> Result<RenderPassStatistics, FrameworkError>
+    where
+        BundleFilter: FnMut(&RenderDataBundle) -> bool,
+        InstanceFilter: FnMut(&SurfaceInstanceData) -> bool,
+    {
+        let global_uniforms = self.write_global_uniform_blocks(&mut render_context);
+
+        let view_projection = self.observer_info.projection_matrix * self.observer_info.view_matrix;
+        let mut bundle_uniform_data_set = Vec::with_capacity(self.bundles.len());
+        for bundle in self.bundles.iter() {
+            if !bundle_filter(bundle) {
+                continue;
+            }
+            bundle_uniform_data_set
+                .push(bundle.write_uniforms(&view_projection, &mut render_context));
+        }
+        render_context.uniform_memory_allocator.upload(server)?;
+
+        let mut stats = RenderPassStatistics::default();
+        for (bundle, bundle_uniform_data) in self
+            .bundles
+            .iter()
+            .filter(|bundle| bundle_filter(bundle))
+            .zip(bundle_uniform_data_set)
+        {
+            if let Some(bundle_uniform_data) = bundle_uniform_data {
+                stats += bundle.render_to_frame_buffer(
+                    server,
+                    geometry_cache,
+                    shader_cache,
+                    &mut instance_filter,
+                    &mut render_context,
+                    bundle_uniform_data,
+                    &global_uniforms,
+                )?
+            }
+        }
+        Ok(stats)
     }
 }
 
@@ -720,7 +1070,6 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
             );
 
             self.bundle_map.insert(key, self.bundles.len());
-            let persistent_identifier = PersistentIdentifier::new_combined(&data, node_handle, 0);
             self.bundles.push(RenderDataBundle {
                 data,
                 sort_index,
@@ -731,7 +1080,6 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
                         bone_matrices: Default::default(),
                         blend_shapes_weights: Default::default(),
                         element_range: Default::default(),
-                        persistent_identifier,
                         node_handle,
                     },
                 ],

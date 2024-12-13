@@ -20,52 +20,52 @@
 
 use crate::{
     fyrox::{
-        core::{
-            algebra::{Matrix4, Vector3},
-            color::Color,
-            math::Matrix4Ext,
-            pool::Handle,
-            sstorage::ImmutableString,
-        },
+        core::{color::Color, pool::Handle, sstorage::ImmutableString},
         fxhash::FxHashSet,
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::BaseSceneGraph,
         renderer::{
-            bundle::{BundleRenderContext, RenderContext, RenderDataBundleStorage},
+            bundle::{BundleRenderContext, ObserverInfo, RenderContext, RenderDataBundleStorage},
             framework::{
+                buffer::BufferUsage,
                 error::FrameworkError,
                 framebuffer::{
-                    Attachment, AttachmentKind, BlendParameters, DrawParameters, FrameBuffer,
+                    Attachment, AttachmentKind, BufferLocation, FrameBuffer, ResourceBindGroup,
+                    ResourceBinding,
                 },
-                geometry_buffer::{ElementRange, GeometryBuffer, GeometryBufferKind},
+                geometry_buffer::GeometryBuffer,
                 gpu_program::{GpuProgram, UniformLocation},
-                gpu_texture::{
-                    Coordinate, GpuTexture, GpuTextureKind, MagnificationFilter,
-                    MinificationFilter, PixelKind, WrapMode,
-                },
-                state::{BlendFactor, BlendFunc, PipelineState},
+                gpu_texture::PixelKind,
+                server::GraphicsServer,
+                uniform::StaticUniformBuffer,
+                BlendFactor, BlendFunc, BlendParameters, CompareFunc, DrawParameters, ElementRange,
+                GeometryBufferExt,
             },
-            RenderPassStatistics, SceneRenderPass, SceneRenderPassContext,
+            make_viewport_matrix, RenderPassStatistics, SceneRenderPass, SceneRenderPassContext,
         },
         scene::{mesh::surface::SurfaceData, node::Node, Scene},
     },
     Editor,
 };
+use fyrox::graph::SceneGraph;
 use std::{any::TypeId, cell::RefCell, rc::Rc};
 
 struct EdgeDetectShader {
-    program: GpuProgram,
-    wvp_matrix: UniformLocation,
+    program: Box<dyn GpuProgram>,
+    uniform_buffer_binding: usize,
     frame_texture: UniformLocation,
-    color: UniformLocation,
 }
 
 impl EdgeDetectShader {
-    pub fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = r#"
 layout (location = 0) out vec4 outColor;
 
 uniform sampler2D frameTexture;
-uniform vec4 color;
+
+layout(std140) uniform Uniforms {
+    mat4 worldViewProjection;
+    vec4 color;
+};
 
 in vec2 texCoord;
 
@@ -97,7 +97,10 @@ void main() {
 layout(location = 0) in vec3 vertexPosition;
 layout(location = 1) in vec2 vertexTexCoord;
 
-uniform mat4 worldViewProjection;
+layout(std140) uniform Uniforms {
+    mat4 worldViewProjection;
+    vec4 color;
+};
 
 out vec2 texCoord;
 
@@ -107,96 +110,73 @@ void main()
     gl_Position = worldViewProjection * vec4(vertexPosition, 1.0);
 }"#;
 
-        let program =
-            GpuProgram::from_source(state, "EdgeDetectShader", vertex_source, fragment_source)?;
+        let program = server.create_program("EdgeDetectShader", vertex_source, fragment_source)?;
         Ok(Self {
-            wvp_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
-            frame_texture: program
-                .uniform_location(state, &ImmutableString::new("frameTexture"))?,
-            color: program.uniform_location(state, &ImmutableString::new("color"))?,
+            uniform_buffer_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
+            frame_texture: program.uniform_location(&ImmutableString::new("frameTexture"))?,
             program,
         })
     }
 }
 
 pub struct HighlightRenderPass {
-    framebuffer: FrameBuffer,
-    quad: GeometryBuffer,
+    framebuffer: Box<dyn FrameBuffer>,
+    quad: Box<dyn GeometryBuffer>,
     edge_detect_shader: EdgeDetectShader,
     pub scene_handle: Handle<Scene>,
     pub nodes_to_highlight: FxHashSet<Handle<Node>>,
 }
 
 impl HighlightRenderPass {
-    fn create_frame_buffer(state: &PipelineState, width: usize, height: usize) -> FrameBuffer {
-        let mut depth_stencil_texture = GpuTexture::new(
-            state,
-            GpuTextureKind::Rectangle { width, height },
-            PixelKind::D24S8,
-            MinificationFilter::Nearest,
-            MagnificationFilter::Nearest,
-            1,
-            None,
-        )
-        .unwrap();
-        depth_stencil_texture
-            .bind_mut(state, 0)
-            .set_wrap(Coordinate::S, WrapMode::ClampToEdge)
-            .set_wrap(Coordinate::T, WrapMode::ClampToEdge);
+    fn create_frame_buffer(
+        server: &dyn GraphicsServer,
+        width: usize,
+        height: usize,
+    ) -> Box<dyn FrameBuffer> {
+        let depth_stencil = server
+            .create_2d_render_target(PixelKind::D24S8, width, height)
+            .unwrap();
 
-        let depth_stencil = Rc::new(RefCell::new(depth_stencil_texture));
+        let frame_texture = server
+            .create_2d_render_target(PixelKind::RGBA8, width, height)
+            .unwrap();
 
-        let mut frame_texture = GpuTexture::new(
-            state,
-            GpuTextureKind::Rectangle { width, height },
-            PixelKind::RGBA8,
-            MinificationFilter::Linear,
-            MagnificationFilter::Linear,
-            1,
-            None,
-        )
-        .unwrap();
-        frame_texture
-            .bind_mut(state, 0)
-            .set_wrap(Coordinate::S, WrapMode::ClampToEdge)
-            .set_wrap(Coordinate::T, WrapMode::ClampToEdge);
-
-        FrameBuffer::new(
-            state,
-            Some(Attachment {
-                kind: AttachmentKind::DepthStencil,
-                texture: depth_stencil,
-            }),
-            vec![Attachment {
-                kind: AttachmentKind::Color,
-                texture: Rc::new(RefCell::new(frame_texture)),
-            }],
-        )
-        .unwrap()
+        server
+            .create_frame_buffer(
+                Some(Attachment {
+                    kind: AttachmentKind::DepthStencil,
+                    texture: depth_stencil,
+                }),
+                vec![Attachment {
+                    kind: AttachmentKind::Color,
+                    texture: frame_texture,
+                }],
+            )
+            .unwrap()
     }
 
-    pub fn new_raw(state: &PipelineState, width: usize, height: usize) -> Self {
+    pub fn new_raw(server: &dyn GraphicsServer, width: usize, height: usize) -> Self {
         Self {
-            framebuffer: Self::create_frame_buffer(state, width, height),
-            quad: GeometryBuffer::from_surface_data(
+            framebuffer: Self::create_frame_buffer(server, width, height),
+            quad: <dyn GeometryBuffer>::from_surface_data(
                 &SurfaceData::make_unit_xy_quad(),
-                GeometryBufferKind::StaticDraw,
-                state,
+                BufferUsage::StaticDraw,
+                server,
             )
             .unwrap(),
-            edge_detect_shader: EdgeDetectShader::new(state).unwrap(),
+            edge_detect_shader: EdgeDetectShader::new(server).unwrap(),
             scene_handle: Default::default(),
             nodes_to_highlight: Default::default(),
         }
     }
 
-    pub fn new(state: &PipelineState, width: usize, height: usize) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(Self::new_raw(state, width, height)))
+    pub fn new(server: &dyn GraphicsServer, width: usize, height: usize) -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Self::new_raw(server, width, height)))
     }
 
-    pub fn resize(&mut self, state: &PipelineState, width: usize, height: usize) {
-        self.framebuffer = Self::create_frame_buffer(state, width, height);
+    pub fn resize(&mut self, server: &dyn GraphicsServer, width: usize, height: usize) {
+        self.framebuffer = Self::create_frame_buffer(server, width, height);
     }
 }
 
@@ -205,6 +185,8 @@ impl SceneRenderPass for HighlightRenderPass {
         &mut self,
         ctx: SceneRenderPassContext,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let mut stats = RenderPassStatistics::default();
+
         if self.scene_handle != ctx.scene_handle {
             return Ok(Default::default());
         }
@@ -213,15 +195,20 @@ impl SceneRenderPass for HighlightRenderPass {
         {
             let render_pass_name = ImmutableString::new("Forward");
 
-            let mut render_bundle_storage = RenderDataBundleStorage::default();
+            let observer_info = ObserverInfo {
+                observer_position: ctx.camera.global_position(),
+                z_near: ctx.camera.projection().z_near(),
+                z_far: ctx.camera.projection().z_far(),
+                view_matrix: ctx.camera.view_matrix(),
+                projection_matrix: ctx.camera.projection_matrix(),
+            };
+
+            let mut render_bundle_storage =
+                RenderDataBundleStorage::new_empty(observer_info.clone());
 
             let frustum = ctx.camera.frustum();
             let mut render_context = RenderContext {
-                observer_position: &ctx.camera.global_position(),
-                z_near: ctx.camera.projection().z_near(),
-                z_far: ctx.camera.projection().z_far(),
-                view_matrix: &ctx.camera.view_matrix(),
-                projection_matrix: &ctx.camera.projection_matrix(),
+                observer_info: &observer_info,
                 frustum: Some(&frustum),
                 storage: &mut render_bundle_storage,
                 graph: &ctx.scene.graph,
@@ -230,102 +217,77 @@ impl SceneRenderPass for HighlightRenderPass {
 
             for &root_node_handle in self.nodes_to_highlight.iter() {
                 if ctx.scene.graph.is_valid_handle(root_node_handle) {
-                    for node_handle in ctx.scene.graph.traverse_handle_iter(root_node_handle) {
-                        if let Some(node) = ctx.scene.graph.try_get(node_handle) {
-                            node.collect_render_data(&mut render_context);
-                        }
+                    for (_, node) in ctx.scene.graph.traverse_iter(root_node_handle) {
+                        node.collect_render_data(&mut render_context);
                     }
                 }
             }
 
             render_bundle_storage.sort();
 
-            self.framebuffer.clear(
-                ctx.pipeline_state,
-                ctx.viewport,
-                Some(Color::TRANSPARENT),
-                Some(1.0),
-                None,
-            );
+            self.framebuffer
+                .clear(ctx.viewport, Some(Color::TRANSPARENT), Some(1.0), None);
 
-            let view_projection = ctx.camera.view_projection_matrix();
-            let inv_view = ctx.camera.inv_view_matrix().unwrap();
-
-            let camera_up = inv_view.up();
-            let camera_side = inv_view.side();
-
-            for bundle in render_bundle_storage.bundles.iter() {
-                bundle.render_to_frame_buffer(
-                    ctx.pipeline_state,
-                    ctx.geometry_cache,
-                    ctx.shader_cache,
-                    |_| true,
-                    BundleRenderContext {
-                        texture_cache: ctx.texture_cache,
-                        render_pass_name: &render_pass_name,
-                        frame_buffer: &self.framebuffer,
-                        view_projection_matrix: &view_projection,
-                        camera_position: &ctx.camera.global_position(),
-                        camera_up_vector: &camera_up,
-                        camera_side_vector: &camera_side,
-                        z_near: ctx.camera.projection().z_near(),
-                        z_far: ctx.camera.projection().z_far(),
-                        use_pom: false,
-                        light_position: &Default::default(),
-                        normal_dummy: &ctx.normal_dummy,
-                        white_dummy: &ctx.white_dummy,
-                        black_dummy: &ctx.black_dummy,
-                        volume_dummy: &ctx.volume_dummy,
-                        matrix_storage: ctx.matrix_storage,
-                        light_data: None,
-                        ambient_light: Default::default(),
-                        scene_depth: Some(&ctx.depth_texture),
-                        viewport: ctx.viewport,
-                    },
-                )?;
-            }
+            stats += render_bundle_storage.render_to_frame_buffer(
+                ctx.server,
+                ctx.geometry_cache,
+                ctx.shader_cache,
+                |_| true,
+                |_| true,
+                BundleRenderContext {
+                    texture_cache: ctx.texture_cache,
+                    render_pass_name: &render_pass_name,
+                    frame_buffer: &mut *self.framebuffer,
+                    use_pom: false,
+                    light_position: &Default::default(),
+                    fallback_resources: ctx.fallback_resources,
+                    ambient_light: Default::default(),
+                    scene_depth: Some(&ctx.depth_texture),
+                    viewport: ctx.viewport,
+                    uniform_memory_allocator: ctx.uniform_memory_allocator,
+                },
+            )?;
         }
 
         // Render full screen quad with edge detect shader to draw outline of selected objects.
         {
-            let frame_matrix = Matrix4::new_orthographic(
-                0.0,
-                ctx.viewport.w() as f32,
-                ctx.viewport.h() as f32,
-                0.0,
-                -1.0,
-                1.0,
-            ) * Matrix4::new_nonuniform_scaling(&Vector3::new(
-                ctx.viewport.w() as f32,
-                ctx.viewport.h() as f32,
-                0.0,
-            ));
+            let frame_matrix = make_viewport_matrix(ctx.viewport);
             let shader = &self.edge_detect_shader;
             let frame_texture = self.framebuffer.color_attachments()[0].texture.clone();
             ctx.framebuffer.draw(
-                &self.quad,
-                ctx.pipeline_state,
+                &*self.quad,
                 ctx.viewport,
-                &shader.program,
+                &*shader.program,
                 &DrawParameters {
                     cull_face: None,
                     color_write: Default::default(),
                     depth_write: false,
                     stencil_test: None,
-                    depth_test: true,
+                    depth_test: Some(CompareFunc::Less),
                     blend: Some(BlendParameters {
                         func: BlendFunc::new(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
                         ..Default::default()
                     }),
                     stencil_op: Default::default(),
+                    scissor_box: None,
                 },
+                &[ResourceBindGroup {
+                    bindings: &[
+                        ResourceBinding::texture(&frame_texture, &shader.frame_texture),
+                        ResourceBinding::Buffer {
+                            buffer: ctx.uniform_buffer_cache.write(
+                                StaticUniformBuffer::<256>::new()
+                                    .with(&frame_matrix)
+                                    .with(&Color::ORANGE),
+                            )?,
+                            binding: BufferLocation::Auto {
+                                shader_location: shader.uniform_buffer_binding,
+                            },
+                            data_usage: Default::default(),
+                        },
+                    ],
+                }],
                 ElementRange::Full,
-                |mut program_binding| {
-                    program_binding
-                        .set_matrix4(&shader.wvp_matrix, &frame_matrix)
-                        .set_texture(&shader.frame_texture, &frame_texture)
-                        .set_srgb_color(&shader.color, &Color::ORANGE);
-                },
             )?;
         }
 

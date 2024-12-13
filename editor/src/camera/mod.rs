@@ -245,7 +245,7 @@ impl CameraController {
     pub fn fit_object(&mut self, scene: &mut Scene, handle: Handle<Node>) {
         // Combine AABBs from the descendants.
         let mut aabb = AxisAlignedBoundingBox::default();
-        for descendant in scene.graph.traverse_iter(handle) {
+        for (_, descendant) in scene.graph.traverse_iter(handle) {
             let descendant_aabb = descendant.local_bounding_box();
             if !descendant_aabb.is_invalid_or_degenerate() {
                 aabb.add_box(descendant_aabb.transform(&descendant.global_transform()))
@@ -821,7 +821,7 @@ fn read_triangle(
 }
 
 fn has_hull(node: &Node) -> bool {
-    node.query_component_ref::<Mesh>().is_some()
+    node.component_ref::<Mesh>().is_some()
 }
 
 fn precise_ray_test(
@@ -832,7 +832,7 @@ fn precise_ray_test(
     let mut closest_distance = f32::MAX;
     let mut closest_point = None;
 
-    if let Some(mesh) = node.query_component_ref::<Mesh>() {
+    if let Some(mesh) = node.component_ref::<Mesh>() {
         let transform = mesh.global_transform();
 
         for surface in mesh.surfaces().iter() {

@@ -22,6 +22,7 @@
 
 #![warn(missing_docs)]
 
+use crate::style::StyledProperty;
 use crate::{
     border::BorderBuilder,
     core::{
@@ -32,11 +33,13 @@ use crate::{
     define_constructor,
     font::FontResource,
     message::{KeyCode, MessageDirection, UiMessage},
+    style::{resource::StyleResourceExt, Style},
     text::TextBuilder,
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
-    VerticalAlignment, BRUSH_DARKER, BRUSH_LIGHT, BRUSH_LIGHTER, BRUSH_LIGHTEST,
+    VerticalAlignment,
 };
+use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::{
     cell::RefCell,
     ops::{Deref, DerefMut},
@@ -131,6 +134,37 @@ pub struct Button {
     /// hold or not. Default is `false` (disabled).
     #[visit(optional)]
     pub repeat_clicks_on_hold: InheritableVariable<bool>,
+}
+
+impl Button {
+    /// A name of style property, that defines corner radius of a button.
+    pub const CORNER_RADIUS: &'static str = "Button.CornerRadius";
+    /// A name of style property, that defines border thickness of a button.
+    pub const BORDER_THICKNESS: &'static str = "Button.BorderThickness";
+
+    /// Returns a style of the widget. This style contains only widget-specific properties.
+    pub fn style() -> Style {
+        Style::default()
+            .with(Self::CORNER_RADIUS, 4.0f32)
+            .with(Self::BORDER_THICKNESS, Thickness::uniform(1.0))
+    }
+}
+
+impl ConstructorProvider<UiNode, UserInterface> for Button {
+    fn constructor() -> GraphNodeConstructor<UiNode, UserInterface> {
+        GraphNodeConstructor::new::<Self>()
+            .with_variant("Button", |ui| {
+                ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_width(100.0)
+                        .with_height(20.0)
+                        .with_name("Button"),
+                )
+                .build(&mut ui.build_ctx())
+                .into()
+            })
+            .with_group("Input")
+    }
 }
 
 crate::define_widget_deref!(Button);
@@ -243,8 +277,8 @@ pub enum ButtonContent {
         text: String,
         /// Optional font of the button. If [`None`], the default font will be used.
         font: Option<FontResource>,
-        /// Font size of the text. Default is 14.0
-        size: f32,
+        /// Font size of the text. Default is 14.0 (defined by default style of the crate).
+        size: Option<StyledProperty<f32>>,
     },
     /// Arbitrary widget handle. It could be any widget handle, for example a handle of [`crate::image::Image`]
     /// widget.
@@ -257,7 +291,7 @@ impl ButtonContent {
         Self::Text {
             text: s.as_ref().to_owned(),
             font: None,
-            size: 14.0,
+            size: None,
         }
     }
 
@@ -266,16 +300,20 @@ impl ButtonContent {
         Self::Text {
             text: s.as_ref().to_owned(),
             font: Some(font),
-            size: 14.0,
+            size: None,
         }
     }
 
     /// Creates [`ButtonContent::Text`] with custom font and size.
-    pub fn text_with_font_size<S: AsRef<str>>(s: S, font: FontResource, size: f32) -> Self {
+    pub fn text_with_font_size<S: AsRef<str>>(
+        s: S,
+        font: FontResource,
+        size: StyledProperty<f32>,
+    ) -> Self {
         Self::Text {
             text: s.as_ref().to_owned(),
             font: Some(font),
-            size,
+            size: Some(size),
         }
     }
 
@@ -291,7 +329,10 @@ impl ButtonContent {
                 .with_horizontal_text_alignment(HorizontalAlignment::Center)
                 .with_vertical_text_alignment(VerticalAlignment::Center)
                 .with_font(font.clone().unwrap_or_else(|| ctx.default_font()))
-                .with_font_size(*size)
+                .with_font_size(
+                    size.clone()
+                        .unwrap_or_else(|| ctx.style.property(Style::FONT_SIZE)),
+                )
                 .build(ctx),
             Self::Node(node) => *node,
         }
@@ -332,7 +373,12 @@ impl ButtonBuilder {
     }
 
     /// Sets the content of the button to be [`ButtonContent::Text`] (text with a custom font and size).
-    pub fn with_text_and_font_size(mut self, text: &str, font: FontResource, size: f32) -> Self {
+    pub fn with_text_and_font_size(
+        mut self,
+        text: &str,
+        font: FontResource,
+        size: StyledProperty<f32>,
+    ) -> Self {
         self.content = Some(ButtonContent::text_with_font_size(text, font, size));
         self
     }
@@ -367,21 +413,20 @@ impl ButtonBuilder {
     /// Finishes building a button.
     pub fn build_node(self, ctx: &mut BuildContext) -> UiNode {
         let content = self.content.map(|c| c.build(ctx)).unwrap_or_default();
-
         let back = self.back.unwrap_or_else(|| {
             DecoratorBuilder::new(
                 BorderBuilder::new(
                     WidgetBuilder::new()
-                        .with_foreground(BRUSH_DARKER)
+                        .with_foreground(ctx.style.property(Style::BRUSH_DARKER))
                         .with_child(content),
                 )
                 .with_pad_by_corner_radius(false)
-                .with_corner_radius(4.0)
-                .with_stroke_thickness(Thickness::uniform(1.0)),
+                .with_corner_radius(ctx.style.property(Button::CORNER_RADIUS))
+                .with_stroke_thickness(ctx.style.property(Button::BORDER_THICKNESS)),
             )
-            .with_normal_brush(BRUSH_LIGHT)
-            .with_hover_brush(BRUSH_LIGHTER)
-            .with_pressed_brush(BRUSH_LIGHTEST)
+            .with_normal_brush(ctx.style.property(Style::BRUSH_LIGHT))
+            .with_hover_brush(ctx.style.property(Style::BRUSH_LIGHTER))
+            .with_pressed_brush(ctx.style.property(Style::BRUSH_LIGHTEST))
             .build(ctx)
         });
 
@@ -395,7 +440,7 @@ impl ButtonBuilder {
                 .with_accepts_input(true)
                 .with_need_update(true)
                 .with_child(back)
-                .build(),
+                .build(ctx),
             decorator: back.into(),
             content: content.into(),
             repeat_interval: self.repeat_interval.into(),
@@ -408,5 +453,16 @@ impl ButtonBuilder {
     pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
         let node = self.build_node(ctx);
         ctx.add_node(node)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::button::ButtonBuilder;
+    use crate::{test::test_widget_deletion, widget::WidgetBuilder};
+
+    #[test]
+    fn test_deletion() {
+        test_widget_deletion(|ctx| ButtonBuilder::new(WidgetBuilder::new()).build(ctx));
     }
 }

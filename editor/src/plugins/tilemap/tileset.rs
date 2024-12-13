@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::plugins::inspector::EditorEnvironment;
 use crate::{
     asset::item::AssetItem,
     command::{make_command, Command, CommandGroup},
@@ -55,7 +56,6 @@ use crate::{
         resource::texture::Texture,
         scene::tilemap::tileset::{TileDefinition, TileSet, TileSetResource},
     },
-    inspector::EditorEnvironment,
     message::MessageSender,
     plugins::tilemap::{
         commands::{AddTileCommand, RemoveTileCommand},
@@ -64,6 +64,7 @@ use crate::{
     },
     Message,
 };
+use fyrox::core::algebra::Vector2;
 use fyrox::graph::SceneGraph;
 use fyrox::scene::tilemap::tileset::TileDefinitionHandle;
 use std::{
@@ -266,7 +267,7 @@ impl TileSetEditor {
                 if let Err(sync_errors) = ctx.sync(tile_definition, ui, 0, true, Default::default())
                 {
                     for error in sync_errors {
-                        Log::err(format!("Failed to sync property. Reason: {:?}", error))
+                        Log::err(format!("Failed to sync property. Reason: {error:?}"))
                     }
                 }
             }
@@ -322,6 +323,10 @@ impl TileSetEditor {
         } else if let Some(WidgetMessage::Drop(dropped)) = message.data() {
             if message.destination() == self.tiles {
                 if let Some(item) = ui.node(*dropped).cast::<AssetItem>() {
+                    let position = self
+                        .tile_set
+                        .data_ref()
+                        .find_free_location(Vector2::repeat(0));
                     if let Some(material) = item.resource::<Material>() {
                         sender.do_command(AddTileCommand {
                             tile_set: self.tile_set.clone(),
@@ -330,13 +335,15 @@ impl TileSetEditor {
                                 uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
                                 collider: Default::default(),
                                 color: Default::default(),
+                                position,
+                                properties: Default::default(),
                             }),
                             handle: Default::default(),
                         });
                         self.need_save = true;
                     } else if let Some(texture) = item.resource::<Texture>() {
                         let mut material = Material::standard_2d();
-                        material.set_property("diffuseTexture", texture).unwrap();
+                        material.bind("diffuseTexture", texture);
 
                         let material = MaterialResource::new_ok(ResourceKind::Embedded, material);
 
@@ -347,6 +354,8 @@ impl TileSetEditor {
                                 uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
                                 collider: Default::default(),
                                 color: Default::default(),
+                                position,
+                                properties: Default::default(),
                             }),
                             handle: Default::default(),
                         });
@@ -447,21 +456,25 @@ impl TileSetEditor {
                 }
             }
         } else if let Some(InspectorMessage::PropertyChanged(args)) = message.data() {
-            if let Some(selection) = self.selection {
-                let tile_set = self.tile_set.clone();
-                sender.send(Message::DoCommand(
-                    make_command(args, move |_| {
-                        // FIXME: HACK!
-                        let tile_set = unsafe {
-                            std::mem::transmute::<&'_ mut TileSet, &'static mut TileSet>(
-                                &mut *tile_set.data_ref(),
-                            )
-                        };
+            if message.destination() == self.inspector
+                && message.direction() == MessageDirection::FromWidget
+            {
+                if let Some(selection) = self.selection {
+                    let tile_set = self.tile_set.clone();
+                    sender.send(Message::DoCommand(
+                        make_command(args, move |_| {
+                            // FIXME: HACK!
+                            let tile_set = unsafe {
+                                std::mem::transmute::<&'_ mut TileSet, &'static mut TileSet>(
+                                    &mut *tile_set.data_ref(),
+                                )
+                            };
 
-                        &mut tile_set.tiles[selection]
-                    })
-                    .unwrap(),
-                ));
+                            &mut tile_set.tiles[selection]
+                        })
+                        .unwrap(),
+                    ));
+                }
             }
         }
 
@@ -533,7 +546,7 @@ impl TileSetTileViewBuilder {
 
         let decorator =
             DecoratorBuilder::new(BorderBuilder::new(WidgetBuilder::new().with_child(image)))
-                .with_selected_brush(Brush::Solid(Color::RED))
+                .with_selected_brush(Brush::Solid(Color::RED).into())
                 .build(ctx);
 
         ctx.add_node(UiNode::new(TileSetTileView {
@@ -541,7 +554,7 @@ impl TileSetTileViewBuilder {
                 .widget_builder
                 .with_allow_drag(true)
                 .with_child(decorator)
-                .build(),
+                .build(ctx),
             definition_handle: tile_handle,
             image,
         }))

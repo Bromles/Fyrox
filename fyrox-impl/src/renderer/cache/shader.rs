@@ -18,20 +18,20 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::cache::TemporaryCache;
-use crate::renderer::framework::error::FrameworkError;
 use crate::{
-    core::sstorage::ImmutableString,
+    core::{log::Log, sstorage::ImmutableString},
     material::shader::{Shader, ShaderResource},
-    renderer::framework::{
-        framebuffer::DrawParameters, gpu_program::GpuProgram, state::PipelineState,
+    renderer::{
+        cache::TemporaryCache,
+        framework::{
+            error::FrameworkError, gpu_program::GpuProgram, server::GraphicsServer, DrawParameters,
+        },
     },
 };
 use fxhash::FxHashMap;
-use fyrox_core::log::Log;
 
 pub struct RenderPassData {
-    pub program: GpuProgram,
+    pub program: Box<dyn GpuProgram>,
     pub draw_params: DrawParameters,
 }
 
@@ -40,15 +40,15 @@ pub struct ShaderSet {
 }
 
 impl ShaderSet {
-    pub fn new(state: &PipelineState, shader: &Shader) -> Result<Self, FrameworkError> {
+    pub fn new(server: &dyn GraphicsServer, shader: &Shader) -> Result<Self, FrameworkError> {
         let mut map = FxHashMap::default();
         for render_pass in shader.definition.passes.iter() {
             let program_name = format!("{}_{}", shader.definition.name, render_pass.name);
-            match GpuProgram::from_source(
-                state,
+            match server.create_program_with_properties(
                 &program_name,
                 &render_pass.vertex_shader,
                 &render_pass.fragment_shader,
+                &shader.definition.resources,
             ) {
                 Ok(gpu_program) => {
                     map.insert(
@@ -61,8 +61,7 @@ impl ShaderSet {
                 }
                 Err(e) => {
                     return Err(FrameworkError::Custom(format!(
-                        "Failed to create {} shader' GPU program. Reason: {:?}",
-                        program_name, e
+                        "Failed to create {program_name} shader' GPU program. Reason: {e:?}"
                     )));
                 }
             };
@@ -87,7 +86,7 @@ impl ShaderCache {
 
     pub fn get(
         &mut self,
-        pipeline_state: &PipelineState,
+        server: &dyn GraphicsServer,
         shader: &ShaderResource,
     ) -> Option<&ShaderSet> {
         let mut shader_state = shader.state();
@@ -96,11 +95,11 @@ impl ShaderCache {
             match self.cache.get_or_insert_with(
                 &shader_state.cache_index,
                 Default::default(),
-                || ShaderSet::new(pipeline_state, shader_state),
+                || ShaderSet::new(server, shader_state),
             ) {
                 Ok(shader_set) => Some(shader_set),
                 Err(error) => {
-                    Log::err(format!("{}", error));
+                    Log::err(format!("{error}"));
                     None
                 }
             }

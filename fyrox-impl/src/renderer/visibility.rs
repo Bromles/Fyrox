@@ -26,7 +26,7 @@ use crate::{
     renderer::framework::{
         error::FrameworkError,
         query::{Query, QueryKind, QueryResult},
-        state::PipelineState,
+        server::GraphicsServer,
     },
     scene::{graph::Graph, node::Node},
 };
@@ -34,7 +34,7 @@ use fxhash::FxHashMap;
 
 #[derive(Debug)]
 struct PendingQuery {
-    query: Query,
+    query: Box<dyn Query>,
     observer_position: Vector3<f32>,
     node: Handle<Node>,
 }
@@ -160,11 +160,11 @@ impl ObserverVisibilityCache {
     /// the given observer position.
     pub fn begin_query(
         &mut self,
-        pipeline_state: &PipelineState,
+        server: &dyn GraphicsServer,
         observer_position: Vector3<f32>,
         node: Handle<Node>,
     ) -> Result<(), FrameworkError> {
-        let query = Query::new(pipeline_state)?;
+        let query = server.create_query()?;
         query.begin(QueryKind::AnySamplesPassed);
         self.pending_queries.push(PendingQuery {
             query,
@@ -200,12 +200,13 @@ impl ObserverVisibilityCache {
                 let grid_position =
                     world_to_grid(pending_query.observer_position, self.granularity);
 
-                let visibility = self
-                    .cells
-                    .get_mut(&grid_position)
-                    .expect("grid cell must exist!")
-                    .get_mut(&pending_query.node)
-                    .expect("object visibility must be predefined!");
+                let Some(cell) = self.cells.get_mut(&grid_position) else {
+                    return false;
+                };
+
+                let Some(visibility) = cell.get_mut(&pending_query.node) else {
+                    return false;
+                };
 
                 match visibility {
                     Visibility::Undefined => match query_result {

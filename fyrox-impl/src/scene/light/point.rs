@@ -37,16 +37,18 @@
 //! can easily ruin performance of your game, especially on low-end hardware. Light
 //! scattering is relatively heavy too.
 
+use crate::scene::base::BaseBuilder;
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         color::Color,
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
-        TypeUuidProvider,
     },
     scene::{
         base::Base,
@@ -56,12 +58,14 @@ use crate::{
         node::{Node, NodeTrait},
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// See module docs.
-#[derive(Debug, Reflect, Clone, Visit)]
+#[derive(Debug, Reflect, Clone, Visit, ComponentProvider)]
 pub struct PointLight {
+    #[component(include)]
     base_light: BaseLight,
 
     #[reflect(min_value = 0.0, step = 0.001)]
@@ -129,16 +133,30 @@ impl PointLight {
     }
 }
 
-impl NodeTrait for PointLight {
-    crate::impl_query_component!(base_light: BaseLight);
+impl ConstructorProvider<Node, Graph> for PointLight {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Point Light", |_| {
+                PointLightBuilder::new(BaseLightBuilder::new(
+                    BaseBuilder::new().with_name("PointLight"),
+                ))
+                .with_radius(10.0)
+                .build_node()
+                .into()
+            })
+            .with_group("Light")
+    }
+}
 
+impl NodeTrait for PointLight {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
-        AxisAlignedBoundingBox::unit()
+        AxisAlignedBoundingBox::from_radius(*self.radius)
     }
 
     fn world_bounding_box(&self) -> AxisAlignedBoundingBox {
+        // Discard scaling part, light emission distance does not affected by scaling.
         self.local_bounding_box()
-            .transform(&self.global_transform())
+            .transform(&self.global_transform_without_scaling())
     }
 
     fn id(&self) -> Uuid {

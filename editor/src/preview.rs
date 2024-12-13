@@ -26,7 +26,6 @@ use crate::fyrox::{
         color::Color,
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
-        scope_profile,
     },
     gui::{
         button::{ButtonBuilder, ButtonMessage},
@@ -163,19 +162,18 @@ impl PreviewPanel {
 
         scene.graph.link_nodes(hinge, camera_pivot);
 
-        DirectionalLightBuilder::new(
-            BaseLightBuilder::new(
-                BaseBuilder::new().with_local_transform(
+        DirectionalLightBuilder::new(BaseLightBuilder::new(
+            BaseBuilder::new()
+                .with_local_transform(
                     TransformBuilder::new()
                         .with_local_rotation(UnitQuaternion::from_axis_angle(
                             &Vector3::y_axis(),
                             45.0f32.to_radians(),
                         ))
                         .build(),
-                ),
-            )
-            .cast_shadows(false),
-        )
+                )
+                .with_cast_shadows(false),
+        ))
         .build(&mut scene.graph);
 
         scene.rendering_options.ambient_lighting_color = Color::opaque(80, 80, 80);
@@ -219,9 +217,9 @@ impl PreviewPanel {
                                                         .with_height(18.0)
                                                         .with_margin(Thickness::uniform(2.0)),
                                                 )
-                                                .with_opt_texture(load_image(include_bytes!(
+                                                .with_opt_texture(load_image!(
                                                     "../resources/fit.png"
-                                                )))
+                                                ))
                                                 .build(ctx),
                                             )
                                             .build(ctx);
@@ -284,8 +282,6 @@ impl PreviewPanel {
     }
 
     pub fn handle_message(&mut self, message: &UiMessage, engine: &mut Engine) {
-        scope_profile!();
-
         let scene = &mut engine.scenes[self.scene];
 
         if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {

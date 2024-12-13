@@ -23,7 +23,7 @@
 //!
 //! See [`Rectangle`] docs for more info.
 
-use crate::scene::node::RdcControlFlow;
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Point3, Vector2, Vector3},
@@ -31,10 +31,10 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, Rect, TriangleDefinition},
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     material::{self, Material, MaterialResource},
     renderer::{self, bundle::RenderContext},
@@ -45,11 +45,12 @@ use crate::{
             VertexAttributeDataType, VertexAttributeDescriptor, VertexAttributeUsage, VertexTrait,
         },
         mesh::RenderPath,
-        node::{Node, NodeTrait},
+        node::{Node, NodeTrait, RdcControlFlow},
     },
 };
 use bytemuck::{Pod, Zeroable};
 use fyrox_core::value_as_u8_slice;
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::{
     hash::{Hash, Hasher},
@@ -137,7 +138,7 @@ impl Hash for RectangleVertex {
 /// ```rust
 /// # use fyrox_impl::{
 /// #     core::sstorage::ImmutableString,
-/// #     material::{shader::SamplerFallback, PropertyValue},
+/// #     material::{shader::SamplerFallback, MaterialProperty},
 /// #     resource::texture::TextureResource,
 /// #     scene::dim2::rectangle::Rectangle,
 /// # };
@@ -145,10 +146,7 @@ impl Hash for RectangleVertex {
 /// fn set_texture(rect: &mut Rectangle, texture: Option<TextureResource>) {
 ///     rect.material()
 ///         .data_ref()
-///         .set_property("diffuseTexture", texture)
-///         // This could fail, if you have a custom material without diffuseTexture property.
-///         // Otherwise, it is safe to just unwrap.
-///         .unwrap();
+///         .bind("diffuseTexture", texture);
 /// }
 /// ```
 ///
@@ -166,7 +164,7 @@ impl Hash for RectangleVertex {
 /// image, but just changing portion for rendering. Keep in mind that the coordinates are normalized
 /// which means `[0; 0]` corresponds to top-left corner of the texture and `[1; 1]` corresponds to
 /// right-bottom corner.
-#[derive(Reflect, Debug, Clone)]
+#[derive(Reflect, Debug, Clone, ComponentProvider)]
 pub struct Rectangle {
     base: Base,
 
@@ -278,9 +276,19 @@ impl Rectangle {
     }
 }
 
-impl NodeTrait for Rectangle {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Rectangle {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Rectangle (2D Sprite)", |_| {
+                RectangleBuilder::new(BaseBuilder::new().with_name("Sprite (2D)"))
+                    .build_node()
+                    .into()
+            })
+            .with_group("2D")
+    }
+}
 
+impl NodeTrait for Rectangle {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         AxisAlignedBoundingBox::unit()
     }
@@ -347,7 +355,7 @@ impl NodeTrait for Rectangle {
             &self.material,
             RenderPath::Forward,
             sort_index,
-            self.self_handle,
+            self.handle(),
             &mut move |mut vertex_buffer, mut triangle_buffer| {
                 let start_vertex_index = vertex_buffer.vertex_count();
 

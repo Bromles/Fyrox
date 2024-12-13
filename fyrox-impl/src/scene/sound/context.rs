@@ -49,7 +49,7 @@ pub struct SoundContextGuard<'a> {
     guard: MutexGuard<'a, fyrox_sound::context::State>,
 }
 
-impl<'a> SoundContextGuard<'a> {
+impl SoundContextGuard<'_> {
     /// Returns a reference to the audio bus graph.
     pub fn bus_graph_ref(&self) -> &AudioBusGraph {
         self.guard.bus_graph_ref()
@@ -152,10 +152,7 @@ impl SoundContext {
         if state.is_valid_handle(sound) {
             state.remove_source(sound);
 
-            Log::info(format!(
-                "Native sound source was removed for node: {}",
-                name
-            ));
+            Log::info(format!("Native sound source was removed for node: {name}"));
         }
     }
 

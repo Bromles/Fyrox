@@ -22,20 +22,20 @@
 //! of a mesh. Ragdolls are used mostly for body physics. See [`Ragdoll`] docs for more info and
 //! usage examples.
 
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Matrix4, UnitQuaternion, Vector3},
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext},
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         uuid_provider,
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     graph::BaseSceneGraph,
-    impl_query_component,
     scene::{
         base::{Base, BaseBuilder},
         collider::Collider,
@@ -44,6 +44,8 @@ use crate::{
         rigidbody::{RigidBody, RigidBodyType},
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
+use fyrox_graph::SceneGraphNode;
 use std::{
     any::{type_name, Any, TypeId},
     ops::{Deref, DerefMut},
@@ -227,7 +229,7 @@ impl Limb {
 /// to create a ragdoll is to use the editor, and the ragdoll wizard in particular. However, if
 /// you're brave enough you can read this code <https://github.com/FyroxEngine/Fyrox/blob/master/editor/src/utils/ragdoll.rs> -
 /// it creates a ragdoll using a humanoid skeleton.  
-#[derive(Clone, Reflect, Visit, Debug, Default)]
+#[derive(Clone, Reflect, Visit, Debug, Default, ComponentProvider)]
 #[visit(optional)]
 pub struct Ragdoll {
     base: Base,
@@ -267,9 +269,19 @@ impl TypeUuidProvider for Ragdoll {
     }
 }
 
-impl NodeTrait for Ragdoll {
-    impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Ragdoll {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>()
+            .with_variant("Ragdoll", |_| {
+                RagdollBuilder::new(BaseBuilder::new().with_name("Ragdoll"))
+                    .build_node()
+                    .into()
+            })
+            .with_group("Physics")
+    }
+}
 
+impl NodeTrait for Ragdoll {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         self.base.local_bounding_box()
     }
@@ -290,7 +302,7 @@ impl NodeTrait for Ragdoll {
             if let Some(character_rigid_body) = ctx
                 .nodes
                 .try_borrow_mut(*self.character_rigid_body)
-                .and_then(|n| n.query_component_mut::<RigidBody>())
+                .and_then(|n| n.component_mut::<RigidBody>())
             {
                 new_lin_vel = Some(character_rigid_body.lin_vel());
                 new_ang_vel = Some(character_rigid_body.ang_vel());
@@ -416,7 +428,7 @@ impl NodeTrait for Ragdoll {
             if let Some(character_rigid_body) = ctx
                 .nodes
                 .try_borrow_mut(*self.character_rigid_body)
-                .and_then(|n| n.query_component_mut::<RigidBody>())
+                .and_then(|n| n.component_mut::<RigidBody>())
             {
                 if *self.is_active {
                     character_rigid_body.set_lin_vel(Default::default());

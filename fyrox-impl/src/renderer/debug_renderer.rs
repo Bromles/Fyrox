@@ -24,25 +24,33 @@
 //! on. It contains implementations to draw most common shapes (line, box, oob, frustum, etc).
 
 use crate::{
-    core::{algebra::Vector3, math::Rect, scope_profile, sstorage::ImmutableString},
+    core::color::Color,
+    core::{
+        algebra::{Matrix4, Vector3},
+        math::Rect,
+        sstorage::ImmutableString,
+    },
     renderer::{
+        cache::uniform::UniformBufferCache,
         framework::{
+            buffer::BufferUsage,
             error::FrameworkError,
-            framebuffer::{DrawParameters, FrameBuffer},
+            framebuffer::{FrameBuffer, ResourceBindGroup, ResourceBinding},
             geometry_buffer::{
-                AttributeDefinition, AttributeKind, BufferBuilder, ElementKind, ElementRange,
-                GeometryBuffer, GeometryBufferBuilder, GeometryBufferKind,
+                AttributeDefinition, AttributeKind, GeometryBuffer, GeometryBufferDescriptor,
+                VertexBufferData, VertexBufferDescriptor,
             },
-            gpu_program::{GpuProgram, UniformLocation},
-            state::PipelineState,
+            gpu_program::GpuProgram,
+            server::GraphicsServer,
+            uniform::StaticUniformBuffer,
+            CompareFunc, DrawParameters, ElementKind, ElementRange,
         },
         RenderPassStatistics,
     },
     scene::debug::Line,
 };
 use bytemuck::{Pod, Zeroable};
-use fyrox_core::color::Color;
-use rapier2d::na::Matrix4;
+use fyrox_graphics::framebuffer::BufferLocation;
 
 #[repr(C)]
 #[derive(Copy, Pod, Zeroable, Clone)]
@@ -53,15 +61,15 @@ struct Vertex {
 
 /// See module docs.
 pub struct DebugRenderer {
-    geometry: GeometryBuffer,
+    geometry: Box<dyn GeometryBuffer>,
     vertices: Vec<Vertex>,
     line_indices: Vec<[u32; 2]>,
     shader: DebugShader,
 }
 
 pub(crate) struct DebugShader {
-    program: GpuProgram,
-    wvp_matrix: UniformLocation,
+    program: Box<dyn GpuProgram>,
+    pub uniform_buffer_binding: usize,
 }
 
 /// "Draws" a rectangle into a list of lines.
@@ -81,49 +89,54 @@ pub fn draw_rect(rect: &Rect<f32>, lines: &mut Vec<Line>, color: Color) {
 }
 
 impl DebugShader {
-    fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("shaders/debug_fs.glsl");
         let vertex_source = include_str!("shaders/debug_vs.glsl");
-        let program =
-            GpuProgram::from_source(state, "DebugShader", vertex_source, fragment_source)?;
+        let program = server.create_program("DebugShader", vertex_source, fragment_source)?;
         Ok(Self {
-            wvp_matrix: program
-                .uniform_location(state, &ImmutableString::new("worldViewProjection"))?,
+            uniform_buffer_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
             program,
         })
     }
 }
 
 impl DebugRenderer {
-    pub(crate) fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
-        let geometry = GeometryBufferBuilder::new(ElementKind::Line)
-            .with_buffer_builder(
-                BufferBuilder::new::<Vertex>(GeometryBufferKind::DynamicDraw, None)
-                    .with_attribute(AttributeDefinition {
+    pub(crate) fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
+        let desc = GeometryBufferDescriptor {
+            element_kind: ElementKind::Line,
+            buffers: &[VertexBufferDescriptor {
+                usage: BufferUsage::DynamicDraw,
+                attributes: &[
+                    AttributeDefinition {
                         location: 0,
                         divisor: 0,
-                        kind: AttributeKind::Float3,
+                        kind: AttributeKind::Float,
+                        component_count: 3,
                         normalized: false,
-                    })
-                    .with_attribute(AttributeDefinition {
+                    },
+                    AttributeDefinition {
                         location: 1,
-                        kind: AttributeKind::UnsignedByte4,
+                        kind: AttributeKind::UnsignedByte,
+                        component_count: 4,
                         normalized: true,
                         divisor: 0,
-                    }),
-            )
-            .build(state)?;
+                    },
+                ],
+                data: VertexBufferData::new::<Vertex>(None),
+            }],
+        };
 
         Ok(Self {
-            geometry,
-            shader: DebugShader::new(state)?,
+            geometry: server.create_geometry_buffer(desc)?,
+            shader: DebugShader::new(server)?,
             vertices: Default::default(),
             line_indices: Default::default(),
         })
     }
 
     /// Uploads the new set of lines to GPU.
-    pub fn set_lines(&mut self, state: &PipelineState, lines: &[Line]) {
+    pub fn set_lines(&mut self, lines: &[Line]) {
         self.vertices.clear();
         self.line_indices.clear();
 
@@ -141,39 +154,46 @@ impl DebugRenderer {
             self.line_indices.push([i, i + 1]);
             i += 2;
         }
-        self.geometry.set_buffer_data(state, 0, &self.vertices);
-        self.geometry.bind(state).set_lines(&self.line_indices);
+        self.geometry.set_buffer_data_of_type(0, &self.vertices);
+        self.geometry.set_lines(&self.line_indices);
     }
 
     pub(crate) fn render(
         &mut self,
-        state: &PipelineState,
+        uniform_buffer_cache: &mut UniformBufferCache,
         viewport: Rect<i32>,
-        framebuffer: &mut FrameBuffer,
+        framebuffer: &mut dyn FrameBuffer,
         view_projection: Matrix4<f32>,
     ) -> Result<RenderPassStatistics, FrameworkError> {
-        scope_profile!();
-
         let mut statistics = RenderPassStatistics::default();
 
+        let uniform_buffer =
+            uniform_buffer_cache.write(StaticUniformBuffer::<256>::new().with(&view_projection))?;
+
         statistics += framebuffer.draw(
-            &self.geometry,
-            state,
+            &*self.geometry,
             viewport,
-            &self.shader.program,
+            &*self.shader.program,
             &DrawParameters {
                 cull_face: None,
                 color_write: Default::default(),
                 depth_write: false,
                 stencil_test: None,
-                depth_test: true,
+                depth_test: Some(CompareFunc::Less),
                 blend: None,
                 stencil_op: Default::default(),
+                scissor_box: None,
             },
+            &[ResourceBindGroup {
+                bindings: &[ResourceBinding::Buffer {
+                    buffer: uniform_buffer,
+                    binding: BufferLocation::Auto {
+                        shader_location: self.shader.uniform_buffer_binding,
+                    },
+                    data_usage: Default::default(),
+                }],
+            }],
             ElementRange::Full,
-            |mut program_binding| {
-                program_binding.set_matrix4(&self.shader.wvp_matrix, &view_projection);
-            },
         )?;
 
         statistics.draw_calls += 1;

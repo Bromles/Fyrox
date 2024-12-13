@@ -23,13 +23,11 @@ use crate::{
     command::{Command, CommandGroup, SetPropertyCommand},
     fyrox::{
         asset::untyped::UntypedResource,
-        core::color::Color,
-        core::{algebra::Vector2, pool::Handle, TypeUuidProvider, Uuid},
+        core::{pool::Handle, TypeUuidProvider, Uuid},
         fxhash::FxHashSet,
         graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
         gui::{
             border::BorderBuilder,
-            brush::Brush,
             button::{Button, ButtonBuilder, ButtonMessage},
             decorator::{DecoratorBuilder, DecoratorMessage},
             dropdown_list::{DropdownListBuilder, DropdownListMessage},
@@ -41,8 +39,7 @@ use crate::{
             window::{WindowBuilder, WindowMessage, WindowTitle},
             wrap_panel::WrapPanelBuilder,
             BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
-            VerticalAlignment, BRUSH_BRIGHT_BLUE, BRUSH_DARKER, BRUSH_LIGHT, BRUSH_LIGHTER,
-            BRUSH_LIGHTEST,
+            VerticalAlignment,
         },
         scene::{
             node::Node,
@@ -53,7 +50,6 @@ use crate::{
             },
         },
     },
-    gui::make_dropdown_list_option,
     load_image,
     message::MessageSender,
     plugins::tilemap::{
@@ -70,6 +66,9 @@ use crate::{
     scene::{commands::GameSceneContext, container::EditorSceneEntry},
     Message,
 };
+use fyrox::gui::style::resource::StyleResourceExt;
+use fyrox::gui::style::Style;
+use fyrox::gui::utils::make_dropdown_list_option;
 
 pub struct TileMapPanel {
     pub window: Handle<UiNode>,
@@ -138,21 +137,23 @@ fn make_drawing_mode_button(
     )
     .with_back(
         DecoratorBuilder::new(
-            BorderBuilder::new(WidgetBuilder::new().with_foreground(BRUSH_DARKER))
-                .with_pad_by_corner_radius(false)
-                .with_corner_radius(4.0)
-                .with_stroke_thickness(Thickness::uniform(1.0)),
+            BorderBuilder::new(
+                WidgetBuilder::new().with_foreground(ctx.style.property(Style::BRUSH_DARKER)),
+            )
+            .with_pad_by_corner_radius(false)
+            .with_corner_radius(4.0f32.into())
+            .with_stroke_thickness(Thickness::uniform(1.0).into()),
         )
-        .with_selected_brush(BRUSH_BRIGHT_BLUE)
-        .with_normal_brush(BRUSH_LIGHT)
-        .with_hover_brush(BRUSH_LIGHTER)
-        .with_pressed_brush(BRUSH_LIGHTEST)
+        .with_selected_brush(ctx.style.property(Style::BRUSH_BRIGHT_BLUE))
+        .with_normal_brush(ctx.style.property(Style::BRUSH_LIGHT))
+        .with_hover_brush(ctx.style.property(Style::BRUSH_LIGHTER))
+        .with_pressed_brush(ctx.style.property(Style::BRUSH_LIGHTEST))
         .build(ctx),
     )
     .with_content(
         ImageBuilder::new(
             WidgetBuilder::new()
-                .with_background(Brush::Solid(Color::opaque(180, 180, 180)))
+                .with_background(ctx.style.property(Style::BRUSH_BRIGHTEST))
                 .with_margin(Thickness::uniform(2.0))
                 .with_width(width)
                 .with_height(height),
@@ -194,7 +195,7 @@ impl TileMapPanel {
             ctx,
             width,
             height,
-            load_image(include_bytes!("../../../resources/brush.png")),
+            load_image!("../../../resources/brush.png"),
             "Draw with active brush.",
             Some(0),
         );
@@ -202,7 +203,7 @@ impl TileMapPanel {
             ctx,
             width,
             height,
-            load_image(include_bytes!("../../../resources/eraser.png")),
+            load_image!("../../../resources/eraser.png"),
             "Erase with active brush.",
             Some(1),
         );
@@ -210,7 +211,7 @@ impl TileMapPanel {
             ctx,
             width,
             height,
-            load_image(include_bytes!("../../../resources/fill.png")),
+            load_image!("../../../resources/fill.png"),
             "Flood fill with random tiles from current brush.",
             Some(2),
         );
@@ -218,7 +219,7 @@ impl TileMapPanel {
             ctx,
             width,
             height,
-            load_image(include_bytes!("../../../resources/pipette.png")),
+            load_image!("../../../resources/pipette.png"),
             "Pick tiles for drawing from the tile map.",
             Some(3),
         );
@@ -226,7 +227,7 @@ impl TileMapPanel {
             ctx,
             width,
             height,
-            load_image(include_bytes!("../../../resources/rect_fill.png")),
+            load_image!("../../../resources/rect_fill.png"),
             "Fill the rectangle using the current brush.",
             Some(4),
         );
@@ -234,7 +235,7 @@ impl TileMapPanel {
             ctx,
             width,
             height,
-            load_image(include_bytes!("../../../resources/nine_slice.png")),
+            load_image!("../../../resources/nine_slice.png"),
             "Draw rectangles with fixed corners, but stretchable sides.",
             Some(5),
         );
@@ -242,7 +243,7 @@ impl TileMapPanel {
             ctx,
             width,
             height,
-            load_image(include_bytes!("../../../resources/line.png")),
+            load_image!("../../../resources/line.png"),
             "Draw a line using random tiles from the given brush.",
             Some(6),
         );
@@ -345,18 +346,10 @@ impl TileMapPanel {
                                 let tiles = tile_set
                                     .tiles
                                     .pair_iter()
-                                    .enumerate()
-                                    .map(|(index, (tile_handle, _))| {
-                                        let side_size = 11;
-
-                                        BrushTile {
-                                            definition_handle: tile_handle,
-                                            local_position: Vector2::new(
-                                                index as i32 % side_size,
-                                                index as i32 / side_size,
-                                            ),
-                                            id: Uuid::new_v4(),
-                                        }
+                                    .map(|(tile_handle, tile)| BrushTile {
+                                        definition_handle: tile_handle,
+                                        local_position: tile.position,
+                                        id: Uuid::new_v4(),
                                     })
                                     .collect::<Vec<_>>();
 

@@ -22,6 +22,8 @@
 
 //! Graph utilities and common algorithms.
 
+pub mod constructor;
+
 use fxhash::FxHashMap;
 use fyrox_core::pool::ErasedHandle;
 use fyrox_core::{
@@ -102,7 +104,6 @@ where
 
     /// Maps each handle in the slice to a handle of its origin, or sets it to [Handle::NONE] if there is no such node.
     /// It should be used when you are sure that respective origin exists.
-
     #[inline]
     pub fn map_slice<T>(&self, handles: &mut [T]) -> &Self
     where
@@ -254,6 +255,21 @@ where
             return;
         }
 
+        entity.as_hash_map_mut(&mut |hash_map| {
+            if let Some(hash_map) = hash_map {
+                for i in 0..hash_map.reflect_len() {
+                    if let Some(item) = hash_map.reflect_get_nth_value_mut(i) {
+                        self.remap_handles_internal(item, node_name, ignored_types);
+                    }
+                }
+                mapped = true;
+            }
+        });
+
+        if mapped {
+            return;
+        }
+
         // Continue remapping recursively for every compound field.
         entity.fields_mut(&mut |fields| {
             for field in fields {
@@ -348,6 +364,28 @@ where
                 for i in 0..array.reflect_len() {
                     // Sparse arrays (like Pool) could have empty entries.
                     if let Some(item) = array.reflect_index_mut(i) {
+                        self.remap_inheritable_handles_internal(
+                            item,
+                            node_name,
+                            // Propagate mapping flag - it means that we're inside inheritable variable. In this
+                            // case we will map handles.
+                            do_map,
+                            ignored_types,
+                        );
+                    }
+                }
+                mapped = true;
+            }
+        });
+
+        if mapped {
+            return;
+        }
+
+        entity.as_hash_map_mut(&mut |result| {
+            if let Some(hash_map) = result {
+                for i in 0..hash_map.reflect_len() {
+                    if let Some(item) = hash_map.reflect_get_nth_value_mut(i) {
                         self.remap_inheritable_handles_internal(
                             item,
                             node_name,
@@ -497,8 +535,7 @@ pub trait SceneGraphNode: AbstractSceneNode + Clone + 'static {
                         }
                     }),
                     Err(e) => Log::err(format!(
-                        "Failed to resolve parent path {}. Reason: {:?}",
-                        path, e
+                        "Failed to resolve parent path {path}. Reason: {e:?}"
                     )),
                 })
             });
@@ -513,13 +550,12 @@ pub trait SceneGraphNode: AbstractSceneNode + Clone + 'static {
                             if let Some(child_inheritable) = child_inheritable {
                                 need_revert = child_inheritable.is_modified();
                             } else {
-                                Log::err(format!("Property {} is not inheritable!", path))
+                                Log::err(format!("Property {path} is not inheritable!"))
                             }
                         })
                     }
                     Err(e) => Log::err(format!(
-                        "Failed to resolve child path {}. Reason: {:?}",
-                        path, e
+                        "Failed to resolve child path {path}. Reason: {e:?}"
                     )),
                 });
             });
@@ -541,8 +577,7 @@ pub trait SceneGraphNode: AbstractSceneNode + Clone + 'static {
                                     was_set = true;
                                 }
                                 Err(_) => Log::err(format!(
-                                    "Failed to revert property {}. Reason: no such property!",
-                                    path
+                                    "Failed to revert property {path}. Reason: no such property!"
                                 )),
                             },
                         );
@@ -571,6 +606,12 @@ pub trait SceneGraphNode: AbstractSceneNode + Clone + 'static {
     fn component_mut<T: Any>(&mut self) -> Option<&mut T> {
         ComponentProvider::query_component_mut(self, TypeId::of::<T>())
             .and_then(|c| c.downcast_mut())
+    }
+
+    /// Checks if the node has a component of given type.
+    #[inline]
+    fn has_component<T: Any>(&self) -> bool {
+        self.component_ref::<T>().is_some()
     }
 }
 
@@ -770,6 +811,16 @@ pub trait SceneGraph: BaseSceneGraph {
         self.try_get_mut(handle)
             .and_then(|n| n.query_component_mut(TypeId::of::<T>()))
             .and_then(|c| c.downcast_mut())
+    }
+
+    /// Tries to borrow a node by the given handle and checks if it has a component of the specified
+    /// type.
+    #[inline]
+    fn has_component<T>(&self, handle: Handle<Self::Node>) -> bool
+    where
+        T: 'static,
+    {
+        self.try_get_of_type::<T>(handle).is_some()
     }
 
     /// Searches for a node down the tree starting from the specified node using the specified closure. Returns a tuple
@@ -984,7 +1035,7 @@ pub trait SceneGraph: BaseSceneGraph {
     fn traverse_iter(
         &self,
         from: Handle<Self::Node>,
-    ) -> GraphTraverseIterator<'_, Self, Self::Node> {
+    ) -> impl Iterator<Item = (Handle<Self::Node>, &Self::Node)> {
         GraphTraverseIterator {
             graph: self,
             stack: vec![from],
@@ -996,11 +1047,8 @@ pub trait SceneGraph: BaseSceneGraph {
     fn traverse_handle_iter(
         &self,
         from: Handle<Self::Node>,
-    ) -> GraphHandleTraverseIterator<'_, Self, Self::Node> {
-        GraphHandleTraverseIterator {
-            graph: self,
-            stack: vec![from],
-        }
+    ) -> impl Iterator<Item = Handle<Self::Node>> {
+        self.traverse_iter(from).map(|(handle, _)| handle)
     }
 
     /// This method checks integrity of the graph and restores it if needed. For example, if a node
@@ -1037,7 +1085,7 @@ pub trait SceneGraph: BaseSceneGraph {
         for (instance_root, resource) in instances.iter().cloned() {
             // Step 1. Find and remove orphaned nodes.
             let mut nodes_to_delete = Vec::new();
-            for node in self.traverse_iter(instance_root) {
+            for (_, node) in self.traverse_iter(instance_root) {
                 if let Some(resource) = node.resource() {
                     let kind = resource.kind().clone();
                     if let Some(model) = resource.state().data() {
@@ -1150,8 +1198,7 @@ pub trait SceneGraph: BaseSceneGraph {
         Log::writeln(
             MessageKind::Information,
             format!(
-                "Integrity restored for {} instances! {} new nodes were added!",
-                instance_count, restored_count
+                "Integrity restored for {instance_count} instances! {restored_count} new nodes were added!"
             ),
         );
 
@@ -1322,7 +1369,7 @@ where
     G: SceneGraph<Node = N>,
     N: SceneGraphNode,
 {
-    type Item = &'a N;
+    type Item = (Handle<N>, &'a N);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -1333,35 +1380,9 @@ where
                 self.stack.push(*child_handle);
             }
 
-            return Some(node);
+            return Some((handle, node));
         }
 
-        None
-    }
-}
-
-/// Iterator that traverses tree in depth and returns handles to nodes.
-pub struct GraphHandleTraverseIterator<'a, G: ?Sized, N> {
-    graph: &'a G,
-    stack: Vec<Handle<N>>,
-}
-
-impl<'a, G, N> Iterator for GraphHandleTraverseIterator<'a, G, N>
-where
-    G: SceneGraph<Node = N>,
-    N: SceneGraphNode,
-{
-    type Item = Handle<N>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(handle) = self.stack.pop() {
-            for child_handle in self.graph.node(handle).children() {
-                self.stack.push(*child_handle);
-            }
-
-            return Some(handle);
-        }
         None
     }
 }

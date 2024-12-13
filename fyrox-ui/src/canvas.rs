@@ -26,13 +26,14 @@
 
 use crate::{
     core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, scope_profile,
-        type_traits::prelude::*, visitor::prelude::*,
+        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
+        visitor::prelude::*,
     },
     message::UiMessage,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
 };
+use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut};
 
 /// Canvas widget allows its children to have an arbitrary position on an imaginable infinite plane, it also
@@ -75,12 +76,22 @@ pub struct Canvas {
     pub widget: Widget,
 }
 
+impl ConstructorProvider<UiNode, UserInterface> for Canvas {
+    fn constructor() -> GraphNodeConstructor<UiNode, UserInterface> {
+        GraphNodeConstructor::new::<Self>()
+            .with_variant("Canvas", |ui| {
+                CanvasBuilder::new(WidgetBuilder::new().with_name("Canvas"))
+                    .build(&mut ui.build_ctx())
+                    .into()
+            })
+            .with_group("Layout")
+    }
+}
+
 crate::define_widget_deref!(Canvas);
 
 impl Control for Canvas {
     fn measure_override(&self, ui: &UserInterface, _available_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
-
         let size_for_child = Vector2::new(f32::INFINITY, f32::INFINITY);
 
         for child_handle in self.widget.children() {
@@ -91,8 +102,6 @@ impl Control for Canvas {
     }
 
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
-        scope_profile!();
-
         for &child_handle in self.widget.children() {
             let child = ui.nodes.borrow(child_handle);
             ui.arrange_node(
@@ -126,10 +135,21 @@ impl CanvasBuilder {
     }
 
     /// Finishes canvas widget building and adds the instance to the user interface and returns its handle.
-    pub fn build(self, ui: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
         let canvas = Canvas {
-            widget: self.widget_builder.build(),
+            widget: self.widget_builder.build(ctx),
         };
-        ui.add_node(UiNode::new(canvas))
+        ctx.add_node(UiNode::new(canvas))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::canvas::CanvasBuilder;
+    use crate::{test::test_widget_deletion, widget::WidgetBuilder};
+
+    #[test]
+    fn test_deletion() {
+        test_widget_deletion(|ctx| CanvasBuilder::new(WidgetBuilder::new()).build(ctx));
     }
 }

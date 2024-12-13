@@ -19,14 +19,15 @@
 // SOFTWARE.
 
 //! A simplest possible node which represents point in space.
+use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     scene::{
         base::{Base, BaseBuilder},
@@ -34,11 +35,12 @@ use crate::{
         node::{Node, NodeTrait},
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// A simplest possible node which represents point in space.
-#[derive(Clone, Reflect, Default, Debug)]
+#[derive(Clone, Reflect, Default, Debug, ComponentProvider)]
 pub struct Pivot {
     base: Base,
 }
@@ -69,9 +71,17 @@ impl DerefMut for Pivot {
     }
 }
 
-impl NodeTrait for Pivot {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Pivot {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>().with_variant("Pivot", |_| {
+            PivotBuilder::new(BaseBuilder::new().with_name("Pivot"))
+                .build_node()
+                .into()
+        })
+    }
+}
 
+impl NodeTrait for Pivot {
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
         self.base.local_bounding_box()
     }

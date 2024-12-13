@@ -21,15 +21,14 @@
 use crate::{
     fyrox::{
         core::{
-            color::Color,
             log::{Log, LogMessage, MessageKind},
             pool::Handle,
             reflect::prelude::*,
         },
         graph::BaseSceneGraph,
+        graph::SceneGraph,
         gui::{
             border::BorderBuilder,
-            brush::Brush,
             button::{ButtonBuilder, ButtonMessage},
             decorator::DecoratorBuilder,
             dropdown_list::{DropdownListBuilder, DropdownListMessage},
@@ -43,20 +42,21 @@ use crate::{
             message::{MessageDirection, UiMessage},
             scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
             stack_panel::StackPanelBuilder,
+            style::resource::StyleResourceExt,
+            style::Style,
             text::TextBuilder,
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowMessage, WindowTitle},
             wrap_panel::WrapPanelBuilder,
             BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
-            VerticalAlignment, BRUSH_DARKER, BRUSH_LIGHT,
+            VerticalAlignment,
         },
     },
-    gui::make_dropdown_list_option,
     message::MessageSender,
     Message,
 };
 use cargo_metadata::{camino::Utf8Path, Metadata};
-use fyrox::graph::SceneGraph;
+use fyrox::gui::utils::make_dropdown_list_option;
 use std::{
     ffi::OsStr,
     fmt::{Display, Formatter},
@@ -184,7 +184,7 @@ fn make_command(program: &str) -> std::process::Command {
 }
 
 fn read_metadata() -> Result<Metadata, String> {
-    return match make_command("cargo")
+    match make_command("cargo")
         .arg("metadata")
         .stdout(Stdio::piped())
         .spawn()
@@ -193,20 +193,13 @@ fn read_metadata() -> Result<Metadata, String> {
             Ok(output) => match serde_json::from_slice::<Metadata>(&output.stdout) {
                 Ok(metadata) => Ok(metadata),
                 Err(err) => Err(format!(
-                    "Unable to parse workspace metadata. Reason {:?}",
-                    err
+                    "Unable to parse workspace metadata. Reason {err:?}"
                 )),
             },
-            Err(err) => Err(format!(
-                "Unable to fetch project metadata. Reason {:?}",
-                err
-            )),
+            Err(err) => Err(format!("Unable to fetch project metadata. Reason {err:?}")),
         },
-        Err(err) => Err(format!(
-            "Unable to fetch project metadata. Reason {:?}",
-            err
-        )),
-    };
+        Err(err) => Err(format!("Unable to fetch project metadata. Reason {err:?}")),
+    }
 }
 
 fn prepare_build_dir(path: &Path) -> Result<(), String> {
@@ -215,8 +208,7 @@ fn prepare_build_dir(path: &Path) -> Result<(), String> {
 
         if let Err(err) = fs::remove_dir_all(path) {
             return Err(format!(
-                "Unable to remove previous build at destination path! Reason: {:?}",
-                err
+                "Unable to remove previous build at destination path! Reason: {err:?}"
             ));
         }
     }
@@ -224,8 +216,7 @@ fn prepare_build_dir(path: &Path) -> Result<(), String> {
     // Create the new clean folder.
     if let Err(err) = fs::create_dir_all(path) {
         return Err(format!(
-            "Unable to create build directory at destination path! Reason: {:?}",
-            err
+            "Unable to create build directory at destination path! Reason: {err:?}"
         ));
     }
 
@@ -268,14 +259,14 @@ fn cargo_install(crate_name: &str) -> Result<(), String> {
                     Err(String::from_utf8_lossy(&output.stderr).to_string())
                 }
             }
-            Err(err) => Err(format!("Unable to install {crate_name}. Reason: {:?}", err)),
+            Err(err) => Err(format!("Unable to install {crate_name}. Reason: {err:?}")),
         },
-        Err(err) => Err(format!("Unable to install {crate_name}. Reason: {:?}", err)),
+        Err(err) => Err(format!("Unable to install {crate_name}. Reason: {err:?}")),
     }
 }
 
 fn install_build_target(target: &str) -> Result<(), String> {
-    Log::info(format!("Trying to install {} build target...", target));
+    Log::info(format!("Trying to install {target} build target..."));
 
     let mut process = make_command("rustup");
     match process
@@ -288,7 +279,7 @@ fn install_build_target(target: &str) -> Result<(), String> {
         Ok(handle) => match handle.wait_with_output() {
             Ok(output) => {
                 if output.status.code().unwrap_or(1) == 0 {
-                    Log::info(format!("{} target installed successfully!", target));
+                    Log::info(format!("{target} target installed successfully!"));
 
                     Ok(())
                 } else {
@@ -296,13 +287,11 @@ fn install_build_target(target: &str) -> Result<(), String> {
                 }
             }
             Err(err) => Err(format!(
-                "Unable to install {} target. Reason: {:?}",
-                target, err
+                "Unable to install {target} target. Reason: {err:?}"
             )),
         },
         Err(err) => Err(format!(
-            "Unable to install {} target. Reason: {:?}",
-            target, err
+            "Unable to install {target} target. Reason: {err:?}"
         )),
     }
 }
@@ -380,7 +369,7 @@ fn build_package(
     let mut handle = match process.spawn() {
         Ok(handle) => handle,
         Err(err) => {
-            return Err(format!("Failed to build the game. Reason: {:?}", err));
+            return Err(format!("Failed to build the game. Reason: {err:?}"));
         }
     };
 
@@ -411,7 +400,7 @@ fn build_package(
                 }
             }
             Err(err) => {
-                return Err(format!("Failed to build the game. Reason: {:?}", err));
+                return Err(format!("Failed to build the game. Reason: {err:?}"));
             }
         }
 
@@ -547,8 +536,7 @@ fn export(export_options: ExportOptions, cancel_flag: Arc<AtomicBool>) -> Result
 
     let Some(package) = metadata.packages.iter().find(|p| p.name == package_name) else {
         return Err(format!(
-            "The project does not have `{}` package.",
-            package_name
+            "The project does not have `{package_name}` package."
         ));
     };
 
@@ -713,7 +701,7 @@ fn export(export_options: ExportOptions, cancel_flag: Arc<AtomicBool>) -> Result
                                         .spawn(),
                                 );
                             }
-                            Err(err) => Log::err(format!("ADB error: {:?}", err)),
+                            Err(err) => Log::err(format!("ADB error: {err:?}")),
                         }
                     }
                 }
@@ -732,15 +720,16 @@ fn make_title_text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<UiN
     TextBuilder::new(
         WidgetBuilder::new()
             .on_row(row)
-            .with_foreground(Brush::Solid(Color::CORN_SILK))
+            .with_foreground(ctx.style.property(ExportWindow::TITLE_BRUSH))
             .with_margin(Thickness::uniform(2.0)),
     )
-    .with_font_size(14.0)
     .with_text(text)
     .build(ctx)
 }
 
 impl ExportWindow {
+    pub const TITLE_BRUSH: &'static str = "ExportWindow.TitleBrush";
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let instructions =
             "Select the target directory in which you want to export the current project. You can \
@@ -788,7 +777,6 @@ impl ExportWindow {
                                                     HorizontalAlignment::Center,
                                                 )
                                                 .with_text(p)
-                                                .with_font_size(14.0)
                                                 .build(ctx),
                                         ),
                                 ))
@@ -838,7 +826,7 @@ impl ExportWindow {
             WidgetBuilder::new()
                 .on_row(3)
                 .with_margin(Thickness::uniform(2.0))
-                .with_background(BRUSH_LIGHT)
+                .with_background(ctx.style.property(Style::BRUSH_LIGHT))
                 .with_child(
                     ScrollViewerBuilder::new(
                         WidgetBuilder::new().with_margin(Thickness::uniform(2.0)),
@@ -874,7 +862,7 @@ impl ExportWindow {
                     BorderBuilder::new(
                         WidgetBuilder::new()
                             .on_row(1)
-                            .with_background(BRUSH_DARKER)
+                            .with_background(ctx.style.property(Style::BRUSH_DARKER))
                             .with_margin(Thickness::uniform(2.0))
                             .with_child({
                                 log_scroll_viewer = ScrollViewerBuilder::new(
@@ -1113,7 +1101,7 @@ impl ExportWindow {
                 ctx.sync(&self.export_options, ui, 0, true, Default::default())
             {
                 for error in sync_errors {
-                    Log::err(format!("Failed to sync property. Reason: {:?}", error))
+                    Log::err(format!("Failed to sync property. Reason: {error:?}"))
                 }
             }
         }
@@ -1123,15 +1111,15 @@ impl ExportWindow {
         if let Some(log_message_receiver) = self.log_message_receiver.as_mut() {
             while let Ok(message) = log_message_receiver.try_recv() {
                 let ctx = &mut ui.build_ctx();
-                let color = match message.kind {
-                    MessageKind::Information => Color::ANTIQUE_WHITE,
-                    MessageKind::Warning => Color::ORANGE,
-                    MessageKind::Error => Color::RED,
+                let foreground = match message.kind {
+                    MessageKind::Information => ctx.style.property(Style::BRUSH_INFORMATION),
+                    MessageKind::Warning => ctx.style.property(Style::BRUSH_WARNING),
+                    MessageKind::Error => ctx.style.property(Style::BRUSH_ERROR),
                 };
                 let entry = TextBuilder::new(
                     WidgetBuilder::new()
                         .with_margin(Thickness::uniform(1.0))
-                        .with_foreground(Brush::Solid(color)),
+                        .with_foreground(foreground),
                 )
                 .with_wrap(WrapMode::Letter)
                 .with_text(format!("> {}", message.content))
@@ -1156,7 +1144,7 @@ impl ExportWindow {
                     Ok(_) => {
                         Log::info("Build finished!");
                     }
-                    Err(err) => Log::err(format!("Build failed! Reason: {}", err)),
+                    Err(err) => Log::err(format!("Build failed! Reason: {err}")),
                 }
 
                 ui.send_message(WidgetMessage::enabled(

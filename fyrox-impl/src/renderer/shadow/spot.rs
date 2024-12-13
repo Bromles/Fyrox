@@ -22,24 +22,23 @@ use crate::{
     core::{
         algebra::{Matrix4, Vector3},
         color::Color,
-        math::{Matrix4Ext, Rect},
-        scope_profile,
+        math::Rect,
     },
     renderer::{
-        bundle::{BundleRenderContext, ObserverInfo, RenderDataBundleStorage},
-        cache::{shader::ShaderCache, texture::TextureCache},
+        bundle::{
+            BundleRenderContext, ObserverInfo, RenderDataBundleStorage,
+            RenderDataBundleStorageOptions,
+        },
+        cache::{shader::ShaderCache, texture::TextureCache, uniform::UniformMemoryAllocator},
         framework::{
             error::FrameworkError,
             framebuffer::{Attachment, AttachmentKind, FrameBuffer},
-            gpu_texture::{
-                Coordinate, GpuTexture, GpuTextureKind, MagnificationFilter, MinificationFilter,
-                PixelKind, WrapMode,
-            },
-            state::PipelineState,
+            gpu_texture::{GpuTexture, PixelKind},
+            server::GraphicsServer,
         },
         shadow::cascade_size,
-        storage::MatrixStorageCache,
-        GeometryCache, RenderPassStatistics, ShadowMapPrecision, SPOT_SHADOW_PASS_NAME,
+        FallbackResources, GeometryCache, RenderPassStatistics, ShadowMapPrecision,
+        SPOT_SHADOW_PASS_NAME,
     },
     scene::graph::Graph,
 };
@@ -51,51 +50,34 @@ pub struct SpotShadowMapRenderer {
     //  0 - largest, for lights close to camera.
     //  1 - medium, for lights with medium distance to camera.
     //  2 - small, for farthest lights.
-    cascades: [FrameBuffer; 3],
+    cascades: [Box<dyn FrameBuffer>; 3],
     size: usize,
 }
 
 impl SpotShadowMapRenderer {
     pub fn new(
-        state: &PipelineState,
+        server: &dyn GraphicsServer,
         size: usize,
         precision: ShadowMapPrecision,
     ) -> Result<Self, FrameworkError> {
         fn make_cascade(
-            state: &PipelineState,
+            server: &dyn GraphicsServer,
             size: usize,
             precision: ShadowMapPrecision,
-        ) -> Result<FrameBuffer, FrameworkError> {
-            let depth = {
-                let kind = GpuTextureKind::Rectangle {
-                    width: size,
-                    height: size,
-                };
-                let mut texture = GpuTexture::new(
-                    state,
-                    kind,
-                    match precision {
-                        ShadowMapPrecision::Full => PixelKind::D32F,
-                        ShadowMapPrecision::Half => PixelKind::D16,
-                    },
-                    MinificationFilter::Nearest,
-                    MagnificationFilter::Nearest,
-                    1,
-                    None,
-                )?;
-                texture
-                    .bind_mut(state, 0)
-                    .set_wrap(Coordinate::T, WrapMode::ClampToEdge)
-                    .set_wrap(Coordinate::S, WrapMode::ClampToEdge)
-                    .set_border_color(Color::WHITE);
-                texture
-            };
+        ) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
+            let depth = server.create_2d_render_target(
+                match precision {
+                    ShadowMapPrecision::Full => PixelKind::D32F,
+                    ShadowMapPrecision::Half => PixelKind::D16,
+                },
+                size,
+                size,
+            )?;
 
-            FrameBuffer::new(
-                state,
+            server.create_frame_buffer(
                 Some(Attachment {
                     kind: AttachmentKind::Depth,
-                    texture: Rc::new(RefCell::new(depth)),
+                    texture: depth,
                 }),
                 vec![],
             )
@@ -105,9 +87,9 @@ impl SpotShadowMapRenderer {
             precision,
             size,
             cascades: [
-                make_cascade(state, cascade_size(size, 0), precision)?,
-                make_cascade(state, cascade_size(size, 1), precision)?,
-                make_cascade(state, cascade_size(size, 2), precision)?,
+                make_cascade(server, cascade_size(size, 0), precision)?,
+                make_cascade(server, cascade_size(size, 1), precision)?,
+                make_cascade(server, cascade_size(size, 2), precision)?,
             ],
         })
     }
@@ -120,7 +102,7 @@ impl SpotShadowMapRenderer {
         self.precision
     }
 
-    pub fn cascade_texture(&self, cascade: usize) -> Rc<RefCell<GpuTexture>> {
+    pub fn cascade_texture(&self, cascade: usize) -> Rc<RefCell<dyn GpuTexture>> {
         self.cascades[cascade]
             .depth_attachment()
             .unwrap()
@@ -135,7 +117,7 @@ impl SpotShadowMapRenderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &mut self,
-        state: &PipelineState,
+        server: &dyn GraphicsServer,
         graph: &Graph,
         light_position: Vector3<f32>,
         light_view_matrix: Matrix4<f32>,
@@ -146,24 +128,18 @@ impl SpotShadowMapRenderer {
         cascade: usize,
         shader_cache: &mut ShaderCache,
         texture_cache: &mut TextureCache,
-        normal_dummy: Rc<RefCell<GpuTexture>>,
-        white_dummy: Rc<RefCell<GpuTexture>>,
-        black_dummy: Rc<RefCell<GpuTexture>>,
-        volume_dummy: Rc<RefCell<GpuTexture>>,
-        matrix_storage: &mut MatrixStorageCache,
+        fallback_resources: &FallbackResources,
+        uniform_memory_allocator: &mut UniformMemoryAllocator,
     ) -> Result<RenderPassStatistics, FrameworkError> {
-        scope_profile!();
-
         let mut statistics = RenderPassStatistics::default();
 
-        let framebuffer = &mut self.cascades[cascade];
+        let framebuffer = &mut *self.cascades[cascade];
         let cascade_size = cascade_size(self.size, cascade);
 
         let viewport = Rect::new(0, 0, cascade_size as i32, cascade_size as i32);
 
-        framebuffer.clear(state, viewport, None, Some(1.0), None);
+        framebuffer.clear(viewport, None, Some(1.0), None);
 
-        let light_view_projection = light_projection_matrix * light_view_matrix;
         let bundle_storage = RenderDataBundleStorage::from_graph(
             graph,
             ObserverInfo {
@@ -174,42 +150,30 @@ impl SpotShadowMapRenderer {
                 projection_matrix: light_projection_matrix,
             },
             SPOT_SHADOW_PASS_NAME.clone(),
+            RenderDataBundleStorageOptions {
+                collect_lights: false,
+            },
         );
 
-        let inv_view = light_view_matrix.try_inverse().unwrap();
-        let camera_up = inv_view.up();
-        let camera_side = inv_view.side();
-
-        for bundle in bundle_storage.bundles.iter() {
-            statistics += bundle.render_to_frame_buffer(
-                state,
-                geom_cache,
-                shader_cache,
-                |_| true,
-                BundleRenderContext {
-                    texture_cache,
-                    render_pass_name: &SPOT_SHADOW_PASS_NAME,
-                    frame_buffer: framebuffer,
-                    viewport,
-                    matrix_storage,
-                    view_projection_matrix: &light_view_projection,
-                    camera_position: &Default::default(),
-                    camera_up_vector: &camera_up,
-                    camera_side_vector: &camera_side,
-                    z_near,
-                    use_pom: false,
-                    light_position: &Default::default(),
-                    normal_dummy: &normal_dummy,
-                    white_dummy: &white_dummy,
-                    black_dummy: &black_dummy,
-                    volume_dummy: &volume_dummy,
-                    light_data: None,            // TODO
-                    ambient_light: Color::WHITE, // TODO
-                    scene_depth: None,
-                    z_far,
-                },
-            )?;
-        }
+        statistics += bundle_storage.render_to_frame_buffer(
+            server,
+            geom_cache,
+            shader_cache,
+            |_| true,
+            |_| true,
+            BundleRenderContext {
+                texture_cache,
+                render_pass_name: &SPOT_SHADOW_PASS_NAME,
+                frame_buffer: framebuffer,
+                viewport,
+                uniform_memory_allocator,
+                use_pom: false,
+                light_position: &Default::default(),
+                fallback_resources,
+                ambient_light: Color::WHITE, // TODO
+                scene_depth: None,
+            },
+        )?;
 
         Ok(statistics)
     }

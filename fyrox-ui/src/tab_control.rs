@@ -23,6 +23,8 @@
 
 #![warn(missing_docs)]
 
+use crate::style::resource::StyleResourceExt;
+use crate::style::{Style, StyledProperty};
 use crate::{
     border::BorderBuilder,
     brush::Brush,
@@ -40,10 +42,13 @@ use crate::{
     vector_image::VectorImageBuilder,
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
-    VerticalAlignment, BRUSH_BRIGHTEST, BRUSH_DARK, BRUSH_LIGHT, BRUSH_LIGHTEST,
+    VerticalAlignment,
 };
+use fyrox_core::variable::InheritableVariable;
+use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::{
     any::Any,
+    cmp::Ordering,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -54,13 +59,24 @@ use std::{
 pub enum TabControlMessage {
     /// Used to change the active tab of a [`TabControl`] widget (with [`MessageDirection::ToWidget`]) or to fetch if the active
     /// tab has changed (with [`MessageDirection::FromWidget`]).
+    /// When the active tab changes, `ActiveTabUuid` will also be sent from the widget.
+    /// When the active tab changes, `ActiveTabUuid` will also be sent from the widget.
     ActiveTab(Option<usize>),
-    /// Emitted by a tab, that needs to be closed (and removed). Does **not** remove the tab, its main usage is to catch the moment
+    /// Used to change the active tab of a [`TabControl`] widget (with [`MessageDirection::ToWidget`]) or to fetch if the active
+    /// tab has changed (with [`MessageDirection::FromWidget`]).
+    /// When teh active tab changes, `ActiveTab` will also be sent from the widget.
+    ActiveTabUuid(Option<Uuid>),
+    /// Emitted by a tab that needs to be closed (and removed). Does **not** remove the tab, its main usage is to catch the moment
     /// when the tab wants to be closed. To remove the tab use [`TabControlMessage::RemoveTab`] message.
     CloseTab(usize),
-    /// Used to remove a particular tab.
+    /// Emitted by a tab that needs to be closed (and removed). Does **not** remove the tab, its main usage is to catch the moment
+    /// when the tab wants to be closed. To remove the tab use [`TabControlMessage::RemoveTab`] message.
+    CloseTabByUuid(Uuid),
+    /// Used to remove a particular tab by its position in the tab list.
     RemoveTab(usize),
-    /// Adds a new tab using its definition.
+    /// Used to remove a particular tab by its UUID.
+    RemoveTabByUuid(Uuid),
+    /// Adds a new tab using its definition and activates the tab.
     AddTab(TabDefinition),
 }
 
@@ -70,12 +86,24 @@ impl TabControlMessage {
         TabControlMessage:ActiveTab => fn active_tab(Option<usize>), layout: false
     );
     define_constructor!(
+        /// Creates [`TabControlMessage::ActiveTabUuid`] message.
+        TabControlMessage:ActiveTabUuid => fn active_tab_uuid(Option<Uuid>), layout: false
+    );
+    define_constructor!(
         /// Creates [`TabControlMessage::CloseTab`] message.
         TabControlMessage:CloseTab => fn close_tab(usize), layout: false
     );
     define_constructor!(
+        /// Creates [`TabControlMessage::CloseTabByUuid`] message.
+        TabControlMessage:CloseTabByUuid => fn close_tab_by_uuid(Uuid), layout: false
+    );
+    define_constructor!(
         /// Creates [`TabControlMessage::RemoveTab`] message.
         TabControlMessage:RemoveTab => fn remove_tab(usize), layout: false
+    );
+    define_constructor!(
+        /// Creates [`TabControlMessage::RemoveTabByUuid`] message.
+        TabControlMessage:RemoveTabByUuid => fn remove_tab_by_uuid(Uuid), layout: false
     );
     define_constructor!(
         /// Creates [`TabControlMessage::AddTab`] message.
@@ -115,6 +143,8 @@ impl Debug for TabUserData {
 /// Tab of the [`TabControl`] widget. It stores important tab data, that is widely used at runtime.
 #[derive(Default, Clone, PartialEq, Visit, Reflect, Debug)]
 pub struct Tab {
+    /// Unique identifier of this tab.
+    pub uuid: Uuid,
     /// A handle of the header button, that is used to switch tabs.
     pub header_button: Handle<UiNode>,
     /// Tab's content.
@@ -153,7 +183,7 @@ pub struct Tab {
 ///                 header: TextBuilder::new(WidgetBuilder::new())
 ///                             .with_text("First")
 ///                             .build(ctx),
-///                             
+///
 ///                 content: TextBuilder::new(WidgetBuilder::new())
 ///                             .with_text("First tab's contents!")
 ///                             .build(ctx),
@@ -166,7 +196,7 @@ pub struct Tab {
 ///                 header: TextBuilder::new(WidgetBuilder::new())
 ///                             .with_text("Second")
 ///                             .build(ctx),
-///                             
+///
 ///                 content: TextBuilder::new(WidgetBuilder::new())
 ///                             .with_text("Second tab's contents!")
 ///                             .build(ctx),
@@ -233,12 +263,113 @@ pub struct TabControl {
     /// A handle of a widget, that holds headers of every tab.
     pub headers_container: Handle<UiNode>,
     /// A brush, that will be used to highlight active tab.
-    pub active_tab_brush: Brush,
+    pub active_tab_brush: InheritableVariable<StyledProperty<Brush>>,
+}
+
+impl ConstructorProvider<UiNode, UserInterface> for TabControl {
+    fn constructor() -> GraphNodeConstructor<UiNode, UserInterface> {
+        GraphNodeConstructor::new::<Self>()
+            .with_variant("Tab Control", |ui| {
+                TabControlBuilder::new(WidgetBuilder::new().with_name("Tab Control"))
+                    .build(&mut ui.build_ctx())
+                    .into()
+            })
+            .with_group("Layout")
+    }
 }
 
 crate::define_widget_deref!(TabControl);
 
 uuid_provider!(TabControl = "d54cfac3-0afc-464b-838a-158b3a2253f5");
+
+impl TabControl {
+    /// Use a tab's UUID to look up the tab.
+    pub fn get_tab_by_uuid(&self, uuid: Uuid) -> Option<&Tab> {
+        self.tabs.iter().find(|t| t.uuid == uuid)
+    }
+    /// Send the necessary messages to activate the tab at the given index, or deactivate all tabs if no index is given.
+    /// Do nothing if the given index does not refer to any existing tab.
+    /// If the index was valid, send FromWidget messages to notify listeners of the change, using messages with the given flags.
+    fn set_active_tab(&mut self, active_tab: Option<usize>, ui: &mut UserInterface, flags: u64) {
+        if let Some(index) = active_tab {
+            if self.tabs.len() <= index {
+                return;
+            }
+        }
+        // Send messages to update the state of each tab.
+        for (existing_tab_index, tab) in self.tabs.iter().enumerate() {
+            ui.send_message(WidgetMessage::visibility(
+                tab.content,
+                MessageDirection::ToWidget,
+                active_tab.map_or(false, |active_tab_index| {
+                    existing_tab_index == active_tab_index
+                }),
+            ));
+            ui.send_message(DecoratorMessage::select(
+                tab.decorator,
+                MessageDirection::ToWidget,
+                active_tab.map_or(false, |active_tab_index| {
+                    existing_tab_index == active_tab_index
+                }),
+            ))
+        }
+
+        self.active_tab = active_tab;
+
+        // Notify potential listeners that the active tab has changed.
+        // First we notify by tab index.
+        let mut msg =
+            TabControlMessage::active_tab(self.handle, MessageDirection::FromWidget, active_tab);
+        msg.flags = flags;
+        ui.send_message(msg);
+        // Next we notify by the tab's uuid, which does not change even as the tab moves.
+        let tab_id = active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.uuid);
+        let mut msg =
+            TabControlMessage::active_tab_uuid(self.handle, MessageDirection::FromWidget, tab_id);
+        msg.flags = flags;
+        ui.send_message(msg);
+    }
+    /// Send the messages necessary to remove the tab at the given index and update the currently active tab.
+    /// This does not include sending FromWidget messages to notify listeners.
+    /// If the given index does not refer to any tab, do nothing and return false.
+    /// Otherwise, return true to indicate that some tab was removed.
+    fn remove_tab(&mut self, index: usize, ui: &mut UserInterface) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        ui.send_message(WidgetMessage::remove(
+            tab.header_container,
+            MessageDirection::ToWidget,
+        ));
+        ui.send_message(WidgetMessage::remove(
+            tab.content,
+            MessageDirection::ToWidget,
+        ));
+
+        self.tabs.remove(index);
+
+        if let Some(active_tab) = &self.active_tab {
+            match index.cmp(active_tab) {
+                Ordering::Less => self.active_tab = Some(active_tab - 1), // Just the index needs to change, not the actual tab.
+                Ordering::Equal => {
+                    // The active tab was removed, so we need to change the active tab.
+                    if self.tabs.is_empty() {
+                        self.set_active_tab(None, ui, 0);
+                    } else if *active_tab == 0 {
+                        // The index has not changed, but this is actually a different tab,
+                        // so we need to activate it.
+                        self.set_active_tab(Some(0), ui, 0);
+                    } else {
+                        self.set_active_tab(Some(active_tab - 1), ui, 0);
+                    }
+                }
+                Ordering::Greater => (), // Do nothing, since removed tab was to the right of active tab.
+            }
+        }
+
+        true
+    }
+}
 
 impl Control for TabControl {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -247,17 +378,24 @@ impl Control for TabControl {
         if let Some(ButtonMessage::Click) = message.data() {
             for (tab_index, tab) in self.tabs.iter().enumerate() {
                 if message.destination() == tab.header_button && tab.header_button.is_some() {
-                    ui.send_message(TabControlMessage::active_tab(
+                    ui.send_message(TabControlMessage::active_tab_uuid(
                         self.handle,
                         MessageDirection::ToWidget,
-                        Some(tab_index),
+                        Some(tab.uuid),
                     ));
                     break;
                 } else if message.destination() == tab.close_button {
+                    // Send two messages, one containing the index, one containing the UUID,
+                    // to allow listeners their choice of which system they prefer.
                     ui.send_message(TabControlMessage::close_tab(
                         self.handle,
                         MessageDirection::FromWidget,
                         tab_index,
+                    ));
+                    ui.send_message(TabControlMessage::close_tab_by_uuid(
+                        self.handle,
+                        MessageDirection::FromWidget,
+                        tab.uuid,
                     ));
                 }
             }
@@ -270,6 +408,11 @@ impl Control for TabControl {
                             MessageDirection::FromWidget,
                             tab_index,
                         ));
+                        ui.send_message(TabControlMessage::close_tab_by_uuid(
+                            self.handle,
+                            MessageDirection::FromWidget,
+                            tab.uuid,
+                        ));
                     }
                 }
             }
@@ -280,49 +423,52 @@ impl Control for TabControl {
                 match msg {
                     TabControlMessage::ActiveTab(active_tab) => {
                         if self.active_tab != *active_tab {
-                            for (existing_tab_index, tab) in self.tabs.iter().enumerate() {
-                                ui.send_message(WidgetMessage::visibility(
-                                    tab.content,
-                                    MessageDirection::ToWidget,
-                                    active_tab.map_or(false, |active_tab_index| {
-                                        existing_tab_index == active_tab_index
-                                    }),
-                                ));
-                                ui.send_message(DecoratorMessage::select(
-                                    tab.decorator,
-                                    MessageDirection::ToWidget,
-                                    active_tab.map_or(false, |active_tab_index| {
-                                        existing_tab_index == active_tab_index
-                                    }),
-                                ))
-                            }
-
-                            self.active_tab = *active_tab;
-                            // Notify potential listeners, that the active tab has changed.
-                            ui.send_message(message.reverse());
+                            self.set_active_tab(*active_tab, ui, message.flags);
                         }
                     }
-                    TabControlMessage::CloseTab(_) => {
+                    TabControlMessage::ActiveTabUuid(uuid) => match uuid {
+                        Some(uuid) => {
+                            if let Some(active_tab) = self.tabs.iter().position(|t| t.uuid == *uuid)
+                            {
+                                if self.active_tab != Some(active_tab) {
+                                    self.set_active_tab(Some(active_tab), ui, message.flags);
+                                }
+                            }
+                        }
+                        None if self.active_tab.is_some() => {
+                            self.set_active_tab(None, ui, message.flags)
+                        }
+                        _ => (),
+                    },
+                    TabControlMessage::CloseTab(_) | TabControlMessage::CloseTabByUuid(_) => {
                         // Nothing to do.
                     }
                     TabControlMessage::RemoveTab(index) => {
-                        if let Some(tab) = self.tabs.get(*index) {
-                            ui.send_message(WidgetMessage::remove(
-                                tab.header_container,
-                                MessageDirection::ToWidget,
-                            ));
-                            ui.send_message(WidgetMessage::remove(
-                                tab.content,
-                                MessageDirection::ToWidget,
-                            ));
-
-                            self.tabs.remove(*index);
-
+                        // If a tab was removed, then resend the message.
+                        // Users that remove tabs using the index-based message only get the index-based message in reponse,
+                        // since presumably their application is not using UUIDs.
+                        if self.remove_tab(*index, ui) {
                             ui.send_message(message.reverse());
                         }
                     }
+                    TabControlMessage::RemoveTabByUuid(uuid) => {
+                        // Find the tab that has the given uuid.
+                        let index = self.tabs.iter().position(|t| t.uuid == *uuid);
+                        // Users that remove tabs using the UUID-based message only get the UUID-based message in reponse,
+                        // since presumably their application is not using tab indices.
+                        if let Some(index) = index {
+                            if self.remove_tab(index, ui) {
+                                ui.send_message(message.reverse());
+                            }
+                        }
+                    }
                     TabControlMessage::AddTab(definition) => {
-                        let header = Header::build(definition, None, &mut ui.build_ctx());
+                        let header = Header::build(
+                            definition,
+                            false,
+                            (*self.active_tab_brush).clone(),
+                            &mut ui.build_ctx(),
+                        );
 
                         ui.send_message(WidgetMessage::link(
                             header.button,
@@ -339,6 +485,7 @@ impl Control for TabControl {
                         ui.send_message(message.reverse());
 
                         self.tabs.push(Tab {
+                            uuid: Uuid::new_v4(),
                             header_button: header.button,
                             content: definition.content,
                             close_button: header.close_button,
@@ -346,7 +493,9 @@ impl Control for TabControl {
                             user_data: definition.user_data.clone(),
                             decorator: header.decorator,
                             header_content: header.content,
-                        })
+                        });
+
+                        self.set_active_tab(Some(self.tabs.len() - 1), ui, 0);
                     }
                 }
             }
@@ -358,7 +507,8 @@ impl Control for TabControl {
 pub struct TabControlBuilder {
     widget_builder: WidgetBuilder,
     tabs: Vec<TabDefinition>,
-    active_tab_brush: Brush,
+    active_tab_brush: Option<StyledProperty<Brush>>,
+    initial_tab: usize,
 }
 
 /// Tab definition is used to describe content of each tab for the [`TabControlBuilder`] builder.
@@ -384,7 +534,8 @@ struct Header {
 impl Header {
     fn build(
         tab_definition: &TabDefinition,
-        normal_brush: Option<&Brush>,
+        selected: bool,
+        active_tab_brush: StyledProperty<Brush>,
         ctx: &mut BuildContext,
     ) -> Self {
         let close_button;
@@ -394,12 +545,13 @@ impl Header {
             .with_back({
                 decorator = DecoratorBuilder::new(
                     BorderBuilder::new(WidgetBuilder::new())
-                        .with_stroke_thickness(Thickness::uniform(0.0)),
+                        .with_stroke_thickness(Thickness::uniform(0.0).into()),
                 )
-                .with_normal_brush(normal_brush.cloned().unwrap_or(BRUSH_DARK))
-                .with_selected_brush(BRUSH_LIGHTEST)
-                .with_pressed_brush(BRUSH_LIGHTEST)
-                .with_hover_brush(BRUSH_LIGHT)
+                .with_normal_brush(ctx.style.property(Style::BRUSH_DARK))
+                .with_selected_brush(active_tab_brush)
+                .with_pressed_brush(ctx.style.property(Style::BRUSH_LIGHTEST))
+                .with_hover_brush(ctx.style.property(Style::BRUSH_LIGHT))
+                .with_selected(selected)
                 .build(ctx);
                 decorator
             })
@@ -420,26 +572,24 @@ impl Header {
                                 .with_back(
                                     DecoratorBuilder::new(
                                         BorderBuilder::new(WidgetBuilder::new())
-                                            .with_corner_radius(5.0)
+                                            .with_corner_radius(5.0f32.into())
                                             .with_pad_by_corner_radius(false)
-                                            .with_stroke_thickness(Thickness::uniform(0.0)),
+                                            .with_stroke_thickness(Thickness::uniform(0.0).into()),
                                     )
-                                    .with_normal_brush(Brush::Solid(Color::TRANSPARENT))
-                                    .with_hover_brush(BRUSH_DARK)
+                                    .with_normal_brush(Brush::Solid(Color::TRANSPARENT).into())
+                                    .with_hover_brush(ctx.style.property(Style::BRUSH_DARK))
                                     .build(ctx),
                                 )
                                 .with_content(
                                     VectorImageBuilder::new(
                                         WidgetBuilder::new()
-                                            .with_margin(Thickness {
-                                                left: 2.0,
-                                                top: 2.0,
-                                                right: 0.0,
-                                                bottom: 0.0,
-                                            })
                                             .with_horizontal_alignment(HorizontalAlignment::Center)
                                             .with_vertical_alignment(VerticalAlignment::Center)
-                                            .with_foreground(BRUSH_BRIGHTEST),
+                                            .with_width(8.0)
+                                            .with_height(8.0)
+                                            .with_foreground(
+                                                ctx.style.property(Style::BRUSH_BRIGHTEST),
+                                            ),
                                     )
                                     .with_primitives(make_cross_primitive(8.0, 2.0))
                                     .build(ctx),
@@ -471,15 +621,22 @@ impl TabControlBuilder {
     /// Creates new tab control builder.
     pub fn new(widget_builder: WidgetBuilder) -> Self {
         Self {
-            widget_builder,
             tabs: Default::default(),
-            active_tab_brush: BRUSH_LIGHTEST,
+            active_tab_brush: None,
+            initial_tab: 0,
+            widget_builder,
         }
     }
 
     /// Adds a new tab to the builder.
     pub fn with_tab(mut self, tab: TabDefinition) -> Self {
         self.tabs.push(tab);
+        self
+    }
+
+    /// Sets a desired brush for active tab.
+    pub fn with_active_tab_brush(mut self, brush: StyledProperty<Brush>) -> Self {
+        self.active_tab_brush = Some(brush);
         self
     }
 
@@ -493,6 +650,10 @@ impl TabControlBuilder {
             }
         }
 
+        let active_tab_brush = self
+            .active_tab_brush
+            .unwrap_or_else(|| ctx.style.property::<Brush>(Style::BRUSH_LIGHTEST));
+
         let tab_headers = self
             .tabs
             .iter()
@@ -500,11 +661,8 @@ impl TabControlBuilder {
             .map(|(i, tab_definition)| {
                 Header::build(
                     tab_definition,
-                    if i == 0 {
-                        Some(&self.active_tab_brush)
-                    } else {
-                        None
-                    },
+                    i == self.initial_tab,
+                    active_tab_brush.clone(),
                     ctx,
                 )
             })
@@ -532,28 +690,30 @@ impl TabControlBuilder {
                 .with_child(headers_container)
                 .with_child(content_container),
         )
-        .add_column(Column::auto())
+        .add_column(Column::stretch())
         .add_row(Row::auto())
-        .add_row(Row::auto())
+        .add_row(Row::stretch())
+        .build(ctx);
+
+        let border = BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_background(ctx.style.property(Style::BRUSH_DARK))
+                .with_child(grid),
+        )
         .build(ctx);
 
         let tc = TabControl {
-            widget: self
-                .widget_builder
-                .with_child(
-                    BorderBuilder::new(
-                        WidgetBuilder::new()
-                            .with_background(BRUSH_DARK)
-                            .with_child(grid),
-                    )
-                    .build(ctx),
-                )
-                .build(),
-            active_tab: if tab_count == 0 { None } else { Some(0) },
+            widget: self.widget_builder.with_child(border).build(ctx),
+            active_tab: if tab_count == 0 {
+                None
+            } else {
+                Some(self.initial_tab)
+            },
             tabs: tab_headers
                 .iter()
                 .zip(self.tabs)
                 .map(|(header, tab)| Tab {
+                    uuid: Uuid::new_v4(),
                     header_button: header.button,
                     content: tab.content,
                     close_button: header.close_button,
@@ -565,9 +725,20 @@ impl TabControlBuilder {
                 .collect(),
             content_container,
             headers_container,
-            active_tab_brush: self.active_tab_brush,
+            active_tab_brush: active_tab_brush.into(),
         };
 
         ctx.add_node(UiNode::new(tc))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tab_control::TabControlBuilder;
+    use crate::{test::test_widget_deletion, widget::WidgetBuilder};
+
+    #[test]
+    fn test_deletion() {
+        test_widget_deletion(|ctx| TabControlBuilder::new(WidgetBuilder::new()).build(ctx));
     }
 }

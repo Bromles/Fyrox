@@ -28,18 +28,20 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
+        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
-        TypeUuidProvider,
     },
     resource::texture::TextureResource,
+    scene::node::constructor::NodeConstructor,
     scene::{
         base::{Base, BaseBuilder},
         graph::Graph,
         node::{Node, NodeTrait},
     },
 };
+use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
@@ -104,7 +106,7 @@ use std::ops::{Deref, DerefMut};
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Visit, Default, Clone, Reflect)]
+#[derive(Debug, Visit, Default, Clone, Reflect, ComponentProvider)]
 pub struct Decal {
     base: Base,
 
@@ -210,9 +212,17 @@ impl Decal {
     }
 }
 
-impl NodeTrait for Decal {
-    crate::impl_query_component!();
+impl ConstructorProvider<Node, Graph> for Decal {
+    fn constructor() -> NodeConstructor {
+        NodeConstructor::new::<Self>().with_variant("Decal", |_| {
+            DecalBuilder::new(BaseBuilder::new().with_name("Decal"))
+                .build_node()
+                .into()
+        })
+    }
+}
 
+impl NodeTrait for Decal {
     /// Returns current **local-space** bounding box.
     #[inline]
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox {

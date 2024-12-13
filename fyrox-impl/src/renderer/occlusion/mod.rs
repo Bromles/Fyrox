@@ -23,82 +23,77 @@
 mod grid;
 mod optimizer;
 
-use crate::renderer::occlusion::grid::{GridCache, Visibility};
 use crate::{
     core::{
-        algebra::{Matrix4, Vector2, Vector3, Vector4},
+        algebra::{Matrix4, Vector2, Vector3},
         array_as_u8_slice,
         color::Color,
-        math::{aabb::AxisAlignedBoundingBox, OptionRect, Rect, Vector3Ext},
+        math::{aabb::AxisAlignedBoundingBox, Rect, Vector3Ext},
         pool::Handle,
         ImmutableString,
     },
     graph::BaseSceneGraph,
     renderer::{
-        debug_renderer,
-        debug_renderer::DebugRenderer,
+        cache::uniform::UniformBufferCache,
+        debug_renderer::{self, DebugRenderer},
         framework::{
+            buffer::BufferUsage,
             error::FrameworkError,
             framebuffer::{
-                Attachment, AttachmentKind, BlendParameters, CullFace, DrawParameters, FrameBuffer,
+                Attachment, AttachmentKind, FrameBuffer, ResourceBindGroup, ResourceBinding,
             },
-            geometry_buffer::{GeometryBuffer, GeometryBufferKind},
+            geometry_buffer::GeometryBuffer,
             gpu_program::{GpuProgram, UniformLocation},
-            gpu_texture::{
-                Coordinate, GpuTexture, GpuTextureKind, MagnificationFilter, MinificationFilter,
-                PixelKind, WrapMode,
-            },
-            state::{
-                BlendEquation, BlendFactor, BlendFunc, BlendMode, ColorMask, CompareFunc,
-                PipelineState,
-            },
+            gpu_texture::{GpuTexture, GpuTextureKind, PixelKind},
+            server::GraphicsServer,
+            uniform::StaticUniformBuffer,
+            BlendEquation, BlendFactor, BlendFunc, BlendMode, BlendParameters, ColorMask,
+            CompareFunc, CullFace, DrawParameters, GeometryBufferExt,
         },
-        occlusion::optimizer::VisibilityBufferOptimizer,
+        occlusion::{
+            grid::{GridCache, Visibility},
+            optimizer::VisibilityBufferOptimizer,
+        },
         storage::MatrixStorage,
     },
     scene::{graph::Graph, mesh::surface::SurfaceData, node::Node},
 };
 use bytemuck::{Pod, Zeroable};
+use fyrox_graphics::framebuffer::BufferLocation;
 use std::{cell::RefCell, rc::Rc};
 
 struct Shader {
-    program: GpuProgram,
-    view_projection: UniformLocation,
-    tile_size: UniformLocation,
+    program: Box<dyn GpuProgram>,
     tile_buffer: UniformLocation,
-    frame_buffer_height: UniformLocation,
     matrices: UniformLocation,
+    uniform_buffer_binding: usize,
 }
 
 impl Shader {
-    fn new(state: &PipelineState) -> Result<Self, FrameworkError> {
+    fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let fragment_source = include_str!("../shaders/visibility_fs.glsl");
         let vertex_source = include_str!("../shaders/visibility_vs.glsl");
-        let program =
-            GpuProgram::from_source(state, "VisibilityShader", vertex_source, fragment_source)?;
+        let program = server.create_program("VisibilityShader", vertex_source, fragment_source)?;
         Ok(Self {
-            view_projection: program
-                .uniform_location(state, &ImmutableString::new("viewProjection"))?,
-            tile_size: program.uniform_location(state, &ImmutableString::new("tileSize"))?,
-            frame_buffer_height: program
-                .uniform_location(state, &ImmutableString::new("frameBufferHeight"))?,
-            tile_buffer: program.uniform_location(state, &ImmutableString::new("tileBuffer"))?,
-            matrices: program.uniform_location(state, &ImmutableString::new("matrices"))?,
+            uniform_buffer_binding: program
+                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
+            tile_buffer: program.uniform_location(&ImmutableString::new("tileBuffer"))?,
+            matrices: program.uniform_location(&ImmutableString::new("matrices"))?,
             program,
         })
     }
 }
 
 pub struct OcclusionTester {
-    framebuffer: FrameBuffer,
-    visibility_mask: Rc<RefCell<GpuTexture>>,
-    tile_buffer: Rc<RefCell<GpuTexture>>,
+    framebuffer: Box<dyn FrameBuffer>,
+    visibility_mask: Rc<RefCell<dyn GpuTexture>>,
+    tile_buffer: Rc<RefCell<dyn GpuTexture>>,
     frame_size: Vector2<usize>,
     shader: Shader,
     tile_size: usize,
     w_tiles: usize,
     h_tiles: usize,
-    cube: GeometryBuffer,
+    cube: Box<dyn GeometryBuffer>,
     visibility_buffer_optimizer: VisibilityBufferOptimizer,
     matrix_storage: MatrixStorage,
     objects_to_test: Vec<Handle<Node>>,
@@ -146,29 +141,6 @@ impl TileBuffer {
     }
 }
 
-fn screen_space_rect(
-    aabb: AxisAlignedBoundingBox,
-    view_projection: &Matrix4<f32>,
-    viewport: &Rect<i32>,
-) -> Rect<f32> {
-    let mut rect_builder = OptionRect::default();
-    for corner in aabb.corners() {
-        let clip_space = view_projection * Vector4::new(corner.x, corner.y, corner.z, 1.0);
-        let ndc_space = clip_space.xyz() / clip_space.w.abs();
-        let mut normalized_screen_space =
-            Vector2::new((ndc_space.x + 1.0) / 2.0, (1.0 - ndc_space.y) / 2.0);
-        normalized_screen_space.x = normalized_screen_space.x.clamp(0.0, 1.0);
-        normalized_screen_space.y = normalized_screen_space.y.clamp(0.0, 1.0);
-        let screen_space_corner = Vector2::new(
-            (normalized_screen_space.x * viewport.size.x as f32) + viewport.position.x as f32,
-            (normalized_screen_space.y * viewport.size.y as f32) + viewport.position.y as f32,
-        );
-
-        rect_builder.push(screen_space_corner);
-    }
-    rect_builder.unwrap()
-}
-
 fn inflated_world_aabb(graph: &Graph, object: Handle<Node>) -> Option<AxisAlignedBoundingBox> {
     let mut aabb = graph
         .try_get(object)
@@ -179,57 +151,20 @@ fn inflated_world_aabb(graph: &Graph, object: Handle<Node>) -> Option<AxisAligne
 
 impl OcclusionTester {
     pub fn new(
-        state: &PipelineState,
+        server: &dyn GraphicsServer,
         width: usize,
         height: usize,
         tile_size: usize,
     ) -> Result<Self, FrameworkError> {
-        let mut depth_stencil_texture = GpuTexture::new(
-            state,
-            GpuTextureKind::Rectangle { width, height },
-            PixelKind::D24S8,
-            MinificationFilter::Nearest,
-            MagnificationFilter::Nearest,
-            1,
-            None,
-        )?;
-        depth_stencil_texture
-            .bind_mut(state, 0)
-            .set_wrap(Coordinate::S, WrapMode::ClampToEdge)
-            .set_wrap(Coordinate::T, WrapMode::ClampToEdge);
-
-        let visibility_mask = GpuTexture::new(
-            state,
-            GpuTextureKind::Rectangle { width, height },
-            PixelKind::RGBA8,
-            MinificationFilter::Nearest,
-            MagnificationFilter::Nearest,
-            1,
-            None,
-        )?;
-
+        let depth_stencil = server.create_2d_render_target(PixelKind::D24S8, width, height)?;
+        let visibility_mask = server.create_2d_render_target(PixelKind::RGBA8, width, height)?;
         let w_tiles = width / tile_size + 1;
         let h_tiles = height / tile_size + 1;
-        let tile_buffer = GpuTexture::new(
-            state,
-            GpuTextureKind::Rectangle {
-                width: w_tiles * (MAX_BITS + 1),
-                height: h_tiles,
-            },
-            PixelKind::R32UI,
-            MinificationFilter::Nearest,
-            MagnificationFilter::Nearest,
-            1,
-            None,
-        )?;
-
-        let depth_stencil = Rc::new(RefCell::new(depth_stencil_texture));
-        let visibility_mask = Rc::new(RefCell::new(visibility_mask));
-        let tile_buffer = Rc::new(RefCell::new(tile_buffer));
+        let tile_buffer =
+            server.create_2d_render_target(PixelKind::R32UI, w_tiles * (MAX_BITS + 1), h_tiles)?;
 
         Ok(Self {
-            framebuffer: FrameBuffer::new(
-                state,
+            framebuffer: server.create_frame_buffer(
                 Some(Attachment {
                     kind: AttachmentKind::DepthStencil,
                     texture: depth_stencil,
@@ -241,18 +176,18 @@ impl OcclusionTester {
             )?,
             visibility_mask,
             frame_size: Vector2::new(width, height),
-            shader: Shader::new(state)?,
+            shader: Shader::new(server)?,
             tile_size,
             w_tiles,
             tile_buffer,
             h_tiles,
-            cube: GeometryBuffer::from_surface_data(
+            cube: <dyn GeometryBuffer>::from_surface_data(
                 &SurfaceData::make_cube(Matrix4::identity()),
-                GeometryBufferKind::StaticDraw,
-                state,
+                BufferUsage::StaticDraw,
+                server,
             )?,
-            visibility_buffer_optimizer: VisibilityBufferOptimizer::new(state, w_tiles, h_tiles)?,
-            matrix_storage: MatrixStorage::new(state)?,
+            visibility_buffer_optimizer: VisibilityBufferOptimizer::new(server, w_tiles, h_tiles)?,
+            matrix_storage: MatrixStorage::new(server)?,
             objects_to_test: Default::default(),
             view_projection: Default::default(),
             observer_position: Default::default(),
@@ -261,8 +196,8 @@ impl OcclusionTester {
         })
     }
 
-    pub fn try_query_visibility_results(&mut self, state: &PipelineState, graph: &Graph) {
-        let Some(visibility_buffer) = self.visibility_buffer_optimizer.read_visibility_mask(state)
+    pub fn try_query_visibility_results(&mut self, graph: &Graph) {
+        let Some(visibility_buffer) = self.visibility_buffer_optimizer.read_visibility_mask()
         else {
             return;
         };
@@ -311,7 +246,6 @@ impl OcclusionTester {
 
     fn prepare_tiles(
         &mut self,
-        state: &PipelineState,
         graph: &Graph,
         viewport: &Rect<i32>,
         debug_renderer: Option<&mut DebugRenderer>,
@@ -326,7 +260,7 @@ impl OcclusionTester {
             };
 
             let aabb = node_ref.world_bounding_box();
-            let rect = screen_space_rect(aabb, &self.view_projection, viewport);
+            let rect = aabb.project(&self.view_projection, viewport);
 
             if debug_renderer.is_some() {
                 debug_renderer::draw_rect(&rect, &mut lines, Color::WHITE);
@@ -360,10 +294,10 @@ impl OcclusionTester {
                 );
             }
 
-            debug_renderer.set_lines(state, &lines);
+            debug_renderer.set_lines(&lines);
         }
 
-        self.tile_buffer.borrow_mut().bind_mut(state, 0).set_data(
+        self.tile_buffer.borrow_mut().set_data(
             GpuTextureKind::Rectangle {
                 width: self.w_tiles * (MAX_BITS + 1),
                 height: self.h_tiles,
@@ -378,10 +312,9 @@ impl OcclusionTester {
 
     fn upload_data<'a>(
         &mut self,
-        state: &PipelineState,
         graph: &Graph,
         objects_to_test: impl Iterator<Item = &'a Handle<Node>>,
-        prev_framebuffer: &FrameBuffer,
+        prev_framebuffer: &dyn FrameBuffer,
         observer_position: Vector3<f32>,
         view_projection: Matrix4<f32>,
     ) {
@@ -389,9 +322,8 @@ impl OcclusionTester {
         self.observer_position = observer_position;
         let w = self.frame_size.x as i32;
         let h = self.frame_size.y as i32;
-        state.blit_framebuffer(
-            prev_framebuffer.id(),
-            self.framebuffer.id(),
+        prev_framebuffer.blit_to(
+            &*self.framebuffer,
             0,
             0,
             w,
@@ -421,21 +353,20 @@ impl OcclusionTester {
 
     pub fn try_run_visibility_test<'a>(
         &mut self,
-        state: &PipelineState,
         graph: &Graph,
         debug_renderer: Option<&mut DebugRenderer>,
-        unit_quad: &GeometryBuffer,
+        unit_quad: &dyn GeometryBuffer,
         objects_to_test: impl Iterator<Item = &'a Handle<Node>>,
-        prev_framebuffer: &FrameBuffer,
+        prev_framebuffer: &dyn FrameBuffer,
         observer_position: Vector3<f32>,
         view_projection: Matrix4<f32>,
+        uniform_buffer_cache: &mut UniformBufferCache,
     ) -> Result<(), FrameworkError> {
         if self.visibility_buffer_optimizer.is_reading_from_gpu() {
             return Ok(());
         }
 
         self.upload_data(
-            state,
             graph,
             objects_to_test,
             prev_framebuffer,
@@ -448,34 +379,29 @@ impl OcclusionTester {
         let viewport = Rect::new(0, 0, w, h);
 
         self.framebuffer
-            .clear(state, viewport, Some(Color::TRANSPARENT), None, None);
+            .clear(viewport, Some(Color::TRANSPARENT), None, None);
 
-        self.prepare_tiles(state, graph, &viewport, debug_renderer)?;
+        self.prepare_tiles(graph, &viewport, debug_renderer)?;
 
-        self.matrix_storage.upload(
-            state,
-            self.objects_to_test.iter().filter_map(|h| {
+        self.matrix_storage
+            .upload(self.objects_to_test.iter().filter_map(|h| {
                 let aabb = inflated_world_aabb(graph, *h)?;
                 let s = aabb.max - aabb.min;
                 Some(Matrix4::new_translation(&aabb.center()) * Matrix4::new_nonuniform_scaling(&s))
-            }),
-            0,
-        )?;
+            }))?;
 
-        state.set_depth_func(CompareFunc::LessOrEqual);
         let shader = &self.shader;
         self.framebuffer.draw_instances(
             self.objects_to_test.len(),
-            &self.cube,
-            state,
+            &*self.cube,
             viewport,
-            &self.shader.program,
+            &*self.shader.program,
             &DrawParameters {
                 cull_face: Some(CullFace::Back),
                 color_write: ColorMask::all(true),
                 depth_write: false,
                 stencil_test: None,
-                depth_test: true,
+                depth_test: Some(CompareFunc::LessOrEqual),
                 blend: Some(BlendParameters {
                     func: BlendFunc::new(BlendFactor::One, BlendFactor::One),
                     equation: BlendEquation {
@@ -484,22 +410,33 @@ impl OcclusionTester {
                     },
                 }),
                 stencil_op: Default::default(),
+                scissor_box: None,
             },
-            |mut program_binding| {
-                program_binding
-                    .set_texture(&shader.tile_buffer, &self.tile_buffer)
-                    .set_texture(&shader.matrices, self.matrix_storage.texture())
-                    .set_i32(&shader.tile_size, self.tile_size as i32)
-                    .set_f32(&shader.frame_buffer_height, self.frame_size.y as f32)
-                    .set_matrix4(&shader.view_projection, &self.view_projection);
-            },
+            &[ResourceBindGroup {
+                bindings: &[
+                    ResourceBinding::texture(&self.tile_buffer, &shader.tile_buffer),
+                    ResourceBinding::texture(self.matrix_storage.texture(), &shader.matrices),
+                    ResourceBinding::Buffer {
+                        buffer: uniform_buffer_cache.write(
+                            StaticUniformBuffer::<256>::new()
+                                .with(&self.view_projection)
+                                .with(&(self.tile_size as i32))
+                                .with(&(self.frame_size.y as f32)),
+                        )?,
+                        binding: BufferLocation::Auto {
+                            shader_location: self.shader.uniform_buffer_binding,
+                        },
+                        data_usage: Default::default(),
+                    },
+                ],
+            }],
         );
 
         self.visibility_buffer_optimizer.optimize(
-            state,
             &self.visibility_mask,
             unit_quad,
             self.tile_size as i32,
+            uniform_buffer_cache,
         )?;
 
         Ok(())

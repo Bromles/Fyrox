@@ -64,6 +64,8 @@ use crate::{
     },
 };
 use fxhash::FxHashMap;
+use fyrox_core::algebra::Point3;
+use fyrox_core::math;
 use fyrox_ui::{UiNode, UserInterface};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -181,8 +183,7 @@ impl<'a> InstantiationContext<'a> {
                         node.instance_id = *id;
                     } else {
                         Log::warn(format!(
-                            "No id specified for node {}! Random id will be used.",
-                            original_handle
+                            "No id specified for node {original_handle}! Random id will be used."
                         ))
                     }
                 }
@@ -248,17 +249,30 @@ pub trait AnimationSource {
                     // Remap animation track nodes from resource to instance. This is required
                     // because we've made a plain copy and it has tracks with node handles mapped
                     // to nodes of internal scene.
-                    for (i, ref_track) in src_anim.tracks().iter().enumerate() {
-                        let ref_node = &model_graph.node(ref_track.target());
-                        let track = &mut anim_copy.tracks_mut()[i];
+                    let src_anim_track_data = src_anim.tracks_data().state();
+                    let Some(src_anim_track_data) = src_anim_track_data.data_ref() else {
+                        continue;
+                    };
+
+                    for ref_track in src_anim_track_data.tracks.iter() {
+                        let Some(ref_track_binding) =
+                            src_anim.track_bindings().get(&ref_track.id())
+                        else {
+                            continue;
+                        };
+
+                        let ref_node = &model_graph.node(ref_track_binding.target);
+                        let track_binding = anim_copy
+                            .track_bindings_mut()
+                            .get_mut(&ref_track.id())
+                            .unwrap();
                         // Find instantiated node that corresponds to node in resource
                         match graph.find_by_name(root, ref_node.name()) {
                             Some((instance_node, _)) => {
-                                // One-to-one track mapping so there is [i] indexing.
-                                track.set_target(instance_node);
+                                track_binding.set_target(instance_node);
                             }
                             None => {
-                                track.set_target(Default::default());
+                                track_binding.set_target(Default::default());
                                 Log::writeln(
                                     MessageKind::Error,
                                     format!(
@@ -362,6 +376,20 @@ pub trait ModelResourceExtension: Sized {
         scene: &mut Scene,
         position: Vector3<f32>,
         orientation: UnitQuaternion<f32>,
+    ) -> Handle<Node>;
+
+    /// Instantiates a prefab and places it at specified position, orientation, scale in global
+    /// coordinates and attaches it to the specified parent. This method automatically calculates
+    /// required local position, rotation, scaling for the instance so it will remain at the same
+    /// place in world space after attachment. This method could be useful if you need to instantiate
+    /// an object at some other object.
+    fn instantiate_and_attach(
+        &self,
+        scene: &mut Scene,
+        parent: Handle<Node>,
+        position: Vector3<f32>,
+        face_towards: Vector3<f32>,
+        scale: Vector3<f32>,
     ) -> Handle<Node>;
 
     /// Tries to retarget animations from given model resource to a node hierarchy starting
@@ -485,6 +513,43 @@ impl ModelResourceExtension for ModelResource {
             .with_rotation(orientation)
             .with_position(position)
             .finish()
+    }
+
+    fn instantiate_and_attach(
+        &self,
+        scene: &mut Scene,
+        parent: Handle<Node>,
+        position: Vector3<f32>,
+        face_towards: Vector3<f32>,
+        scale: Vector3<f32>,
+    ) -> Handle<Node> {
+        let parent_scale = scene.graph.global_scale(parent);
+
+        let parent_inv_transform = scene.graph[parent]
+            .global_transform()
+            .try_inverse()
+            .unwrap_or_default();
+
+        let local_position = parent_inv_transform
+            .transform_point(&Point3::from(position))
+            .coords;
+
+        let local_rotation =
+            math::vector_to_quat(parent_inv_transform.transform_vector(&face_towards));
+
+        // Discard parent's scale.
+        let local_scale = scale.component_div(&parent_scale);
+
+        let instance = self
+            .begin_instantiation(scene)
+            .with_position(local_position)
+            .with_rotation(local_rotation)
+            .with_scale(local_scale)
+            .finish();
+
+        scene.graph.link_nodes(instance, parent);
+
+        instance
     }
 
     fn retarget_animations_directly(&self, root: Handle<Node>, graph: &Graph) -> Vec<Animation> {
@@ -754,15 +819,14 @@ impl Model {
                 )
                 .await?
                 .0
-                .finish(&resource_manager)
+                .finish()
                 .await,
                 NodeMapping::UseHandles,
             ),
             // TODO: Add more formats.
             _ => {
                 return Err(ModelLoadError::NotSupported(format!(
-                    "Unsupported model resource format: {}",
-                    extension
+                    "Unsupported model resource format: {extension}"
                 )))
             }
         };

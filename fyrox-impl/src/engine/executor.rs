@@ -32,12 +32,12 @@ use crate::{
     },
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
-    gui::constructor::WidgetConstructorContainer,
     plugin::Plugin,
     utils::translate_event,
     window::WindowAttributes,
 };
 use clap::Parser;
+use fyrox_ui::constructor::new_widget_constructor_container;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -58,6 +58,7 @@ pub struct Executor {
     headless: bool,
     throttle_threshold: f32,
     throttle_frame_interval: usize,
+    resource_hot_reloading: bool,
 }
 
 impl Deref for Executor {
@@ -99,7 +100,7 @@ impl Executor {
             resource_manager: ResourceManager::new(task_pool.clone()),
             serialization_context,
             task_pool,
-            widget_constructors: Arc::new(WidgetConstructorContainer::new()),
+            widget_constructors: Arc::new(new_widget_constructor_container()),
         })
         .unwrap();
 
@@ -110,6 +111,7 @@ impl Executor {
             headless: false,
             throttle_threshold: 2.0 * Self::DEFAULT_TIME_STEP,
             throttle_frame_interval: 5,
+            resource_hot_reloading: true,
         }
     }
 
@@ -128,6 +130,22 @@ impl Executor {
                 msaa_sample_count: None,
             },
         )
+    }
+
+    /// Enables or disables hot reloading of changed resources (such as textures, shaders, scenes, etc.).
+    /// Enabled by default.
+    ///
+    /// # Platform-specific
+    ///
+    /// Does nothing on Android and WebAssembly, because these OSes does not have rich file system
+    /// as PC.
+    pub fn set_resource_hot_reloading_enabled(&mut self, enabled: bool) {
+        self.resource_hot_reloading = enabled;
+    }
+
+    /// Returns `true` if hot reloading of changed resources is enabled, `false` - otherwise.
+    pub fn is_resource_hot_reloading_enabled(&self) -> bool {
+        self.resource_hot_reloading
     }
 
     /// Defines whether the executor should initialize graphics context or not. Headless mode could
@@ -202,6 +220,22 @@ impl Executor {
         let headless = self.headless;
         let throttle_threshold = self.throttle_threshold;
         let throttle_frame_interval = self.throttle_frame_interval;
+
+        if self.resource_hot_reloading {
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            {
+                use crate::core::watcher::FileSystemWatcher;
+                use std::time::Duration;
+                match FileSystemWatcher::new(".", Duration::from_secs(1)) {
+                    Ok(watcher) => {
+                        engine.resource_manager.state().set_watcher(Some(watcher));
+                    }
+                    Err(e) => {
+                        Log::err(format!("Unable to create resource watcher. Reason {e:?}"));
+                    }
+                }
+            }
+        }
 
         let args = Args::try_parse().unwrap_or_default();
 
@@ -302,7 +336,7 @@ impl Executor {
                             if let Err(e) = engine.set_frame_size(size.into()) {
                                 Log::writeln(
                                     MessageKind::Error,
-                                    format!("Unable to set frame size: {:?}", e),
+                                    format!("Unable to set frame size: {e:?}"),
                                 );
                             }
                         }

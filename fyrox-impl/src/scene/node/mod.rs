@@ -134,44 +134,6 @@ pub struct UpdateContext<'a> {
     pub sound_context: &'a mut SoundContext,
 }
 
-/// Implements [`NodeTrait::query_component_ref`] and [`NodeTrait::query_component_mut`] in a much
-/// shorter way.
-#[macro_export]
-macro_rules! impl_query_component {
-    ($($comp_field:ident: $comp_type:ty),*) => {
-        fn query_component_ref(&self, type_id: std::any::TypeId) -> Option<&dyn std::any::Any> {
-            if type_id == std::any::TypeId::of::<Self>() {
-                return Some(self);
-            }
-
-            $(
-                if type_id == std::any::TypeId::of::<$comp_type>() {
-                    return Some(&self.$comp_field)
-                }
-            )*
-
-            None
-        }
-
-        fn query_component_mut(
-            &mut self,
-            type_id: std::any::TypeId,
-        ) -> Option<&mut dyn std::any::Any> {
-            if type_id == std::any::TypeId::of::<Self>() {
-                return Some(self);
-            }
-
-            $(
-                if type_id == std::any::TypeId::of::<$comp_type>() {
-                    return Some(&mut self.$comp_field)
-                }
-            )*
-
-            None
-        }
-    };
-}
-
 /// An enumeration, that contains all possible render data collection strategies.
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub enum RdcControlFlow {
@@ -182,13 +144,7 @@ pub enum RdcControlFlow {
 }
 
 /// A main trait for any scene graph node.
-pub trait NodeTrait: BaseNodeTrait + Reflect + Visit {
-    /// Allows a node to provide access to inner components.
-    fn query_component_ref(&self, type_id: TypeId) -> Option<&dyn Any>;
-
-    /// Allows a node to provide access to inner components.
-    fn query_component_mut(&mut self, type_id: TypeId) -> Option<&mut dyn Any>;
-
+pub trait NodeTrait: BaseNodeTrait + Reflect + Visit + ComponentProvider {
     /// Returns axis-aligned bounding box in **local space** of the node.
     fn local_bounding_box(&self) -> AxisAlignedBoundingBox;
 
@@ -225,12 +181,15 @@ pub trait NodeTrait: BaseNodeTrait + Reflect + Visit {
     }
 
     /// Called when node's global transform changes.
-    fn sync_transform(
+    fn on_global_transform_changed(
         &self,
         #[allow(unused_variables)] new_global_transform: &Matrix4<f32>,
-        _context: &mut SyncContext,
+        #[allow(unused_variables)] context: &mut SyncContext,
     ) {
     }
+
+    /// Called when node's local transform changed.
+    fn on_local_transform_changed(&self, #[allow(unused_variables)] context: &mut SyncContext) {}
 
     /// The methods is used to manage lifetime of scene nodes, depending on their internal logic.
     fn is_alive(&self) -> bool {
@@ -367,6 +326,12 @@ pub trait NodeTrait: BaseNodeTrait + Reflect + Visit {
 #[derive(Debug)]
 pub struct Node(Box<dyn NodeTrait>);
 
+impl<T: NodeTrait> From<T> for Node {
+    fn from(value: T) -> Self {
+        Self(Box::new(value))
+    }
+}
+
 impl Clone for Node {
     fn clone(&self) -> Self {
         self.0.clone_box()
@@ -403,7 +368,7 @@ impl SceneGraphNode for Node {
     }
 
     fn self_handle(&self) -> Handle<Self> {
-        self.self_handle
+        self.handle()
     }
 
     fn parent(&self) -> Handle<Self> {
@@ -518,62 +483,6 @@ impl Node {
     #[inline]
     pub fn cast_mut<T: NodeTrait>(&mut self) -> Option<&mut T> {
         self.0.as_any_ref_mut().downcast_mut::<T>()
-    }
-
-    /// Allows a node to provide access to a component of specified type.
-    ///
-    /// # Example
-    ///
-    /// A good example is a light source node, it gives access to internal `BaseLight`:
-    ///
-    /// ```rust
-    /// # use fyrox_impl::scene::light::BaseLight;
-    /// # use fyrox_impl::scene::light::directional::DirectionalLight;
-    /// # use fyrox_impl::scene::node::{Node};
-    ///
-    /// fn base_light_ref(directional_light: &Node) -> &BaseLight {
-    ///     directional_light.query_component_ref::<BaseLight>().expect("Must have base light")
-    /// }
-    ///
-    /// ```
-    ///
-    /// Some nodes could also provide access to inner components, check documentation of a node.
-    #[inline]
-    pub fn query_component_ref<T>(&self) -> Option<&T>
-    where
-        T: 'static,
-    {
-        self.0
-            .query_component_ref(TypeId::of::<T>())
-            .and_then(|c| c.downcast_ref::<T>())
-    }
-
-    /// Allows a node to provide access to a component of specified type.
-    ///
-    /// # Example
-    ///
-    /// A good example is a light source node, it gives access to internal `BaseLight`:
-    ///
-    /// ```rust
-    /// # use fyrox_impl::scene::light::BaseLight;
-    /// # use fyrox_impl::scene::light::directional::DirectionalLight;
-    /// # use fyrox_impl::scene::node::{Node};
-    ///
-    /// fn base_light_mut(directional_light: &mut Node) -> &mut BaseLight {
-    ///     directional_light.query_component_mut::<BaseLight>().expect("Must have base light")
-    /// }
-    ///
-    /// ```
-    ///
-    /// Some nodes could also provide access to inner components, check documentation of a node.
-    #[inline]
-    pub fn query_component_mut<T>(&mut self) -> Option<&mut T>
-    where
-        T: 'static,
-    {
-        self.0
-            .query_component_mut(TypeId::of::<T>())
-            .and_then(|c| c.downcast_mut::<T>())
     }
 
     pub(crate) fn mark_inheritable_variables_as_modified(&mut self) {
