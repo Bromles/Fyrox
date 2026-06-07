@@ -23,10 +23,7 @@
 
 use crate::{
     animation::{AnimationPlayer, AnimationPoseExt},
-    core::{
-        pool::Handle, reflect::prelude::*, type_traits::prelude::*, variable::InheritableVariable,
-        visitor::prelude::*,
-    },
+    core::{pool::Handle, reflect::prelude::*, variable::InheritableVariable, visitor::prelude::*},
     define_widget_deref,
     message::{KeyCode, MouseButton, UiMessage},
     widget::{Widget, WidgetBuilder, WidgetMessage},
@@ -34,8 +31,7 @@ use crate::{
 };
 use fyrox_animation::machine::Parameter;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::{SceneGraph, SceneGraphNode};
-use std::ops::{Deref, DerefMut};
+use fyrox_graph::SceneGraph;
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 /// UI-specific root motion settings.
@@ -98,7 +94,7 @@ pub type LayerAnimationEventsCollection =
 pub type AnimationEventsSource =
     crate::generic_animation::machine::layer::AnimationEventsSource<Handle<UiNode>>;
 
-/// Standard prelude for animation blending state machine, that contains all most commonly used types and traits.
+/// Standard prelude for animation blending state machine, that contains all the most commonly used types and traits.
 pub mod prelude {
     pub use super::{
         AndNode, AnimationBlendingStateMachine, AnimationBlendingStateMachineBuilder,
@@ -122,14 +118,12 @@ pub mod prelude {
 ///
 /// The node does **not** contain any animations, instead it just takes animations from an animation
 /// player node and mixes them.
-#[derive(Visit, Reflect, Clone, Debug, Default, ComponentProvider, TypeUuidProvider)]
-#[type_uuid(id = "4b08c753-2a10-41e3-8fb2-4fd0517e86bc")]
+#[derive(Visit, Reflect, Clone, Debug, Default)]
+#[reflect(type_uuid = "4b08c753-2a10-41e3-8fb2-4fd0517e86bc")]
 #[reflect(derived_type = "UiNode")]
 pub struct AnimationBlendingStateMachine {
     widget: Widget,
-    #[component(include)]
     machine: InheritableVariable<Machine>,
-    #[component(include)]
     animation_player: InheritableVariable<Handle<UiNode>>,
 }
 
@@ -141,6 +135,7 @@ impl ConstructorProvider<UiNode, UserInterface> for AnimationBlendingStateMachin
                     WidgetBuilder::new().with_name("Animation Blending State Machine"),
                 )
                 .build(&mut ui.build_ctx())
+                .to_base()
                 .into()
             })
             .with_group("Animation")
@@ -180,10 +175,9 @@ define_widget_deref!(AnimationBlendingStateMachine);
 
 impl Control for AnimationBlendingStateMachine {
     fn update(&mut self, dt: f32, ui: &mut UserInterface) {
-        if let Some(animation_player) = ui
+        if let Ok(animation_player) = ui
             .nodes
-            .try_borrow_mut(*self.animation_player)
-            .and_then(|n| n.component_mut::<AnimationPlayer>())
+            .try_get_or_field_mut::<AnimationPlayer>(*self.animation_player)
         {
             // Prevent animation player to apply animation to scene nodes. The animation will
             // do than instead.
@@ -203,7 +197,7 @@ impl Control for AnimationBlendingStateMachine {
     }
 }
 
-/// Animation blending state machine builder allows you to create state machines in declarative manner.
+/// Animation blending state machine builder allows you to create state machines in a declarative manner.
 pub struct AnimationBlendingStateMachineBuilder {
     widget_builder: WidgetBuilder,
     machine: Machine,
@@ -233,33 +227,27 @@ impl AnimationBlendingStateMachineBuilder {
     }
 
     /// Creates new node.
-    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
-        UiNode::new(AnimationBlendingStateMachine {
+    pub fn build_absm(self, ctx: &BuildContext) -> AnimationBlendingStateMachine {
+        AnimationBlendingStateMachine {
             widget: self.widget_builder.with_need_update(true).build(ctx),
             machine: self.machine.into(),
             animation_player: self.animation_player.into(),
-        })
+        }
     }
 
-    /// Creates new node and adds it to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(self.build_node(ctx))
+    /// Creates new node.
+    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
+        UiNode::new(self.build_absm(ctx))
+    }
+
+    /// Creates a new node and adds it to the user interface.
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<AnimationBlendingStateMachine> {
+        ctx.add(self.build_absm(ctx))
     }
 }
 
-#[derive(
-    Visit,
-    Reflect,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    TypeUuidProvider,
-    AsRefStr,
-    EnumString,
-    VariantNames,
-)]
-#[type_uuid(id = "291e8734-47df-408e-8b2c-57bfb941d8ec")]
+#[derive(Visit, Reflect, Clone, Debug, Default, PartialEq, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "291e8734-47df-408e-8b2c-57bfb941d8ec")]
 pub enum EventKind {
     #[default]
     MouseEnter,
@@ -279,8 +267,8 @@ pub enum EventKind {
     DoubleTap,
 }
 
-#[derive(Visit, Reflect, Clone, Debug, Default, PartialEq, TypeUuidProvider)]
-#[type_uuid(id = "15f306b8-3bb8-4b35-87bd-6e9e5d748454")]
+#[derive(Visit, Reflect, Clone, Debug, Default, PartialEq)]
+#[reflect(type_uuid = "15f306b8-3bb8-4b35-87bd-6e9e5d748454")]
 pub struct EventAction {
     kind: EventKind,
     parameter_name: String,
@@ -288,13 +276,13 @@ pub struct EventAction {
 }
 
 /// A widget that listens for particular events and sets parameters in an ABSM accordingly.
-#[derive(Visit, Reflect, Clone, Debug, Default, ComponentProvider, TypeUuidProvider)]
-#[type_uuid(id = "15f306b8-3bb8-4b35-87bd-6e9e5d748455")]
+#[derive(Visit, Reflect, Clone, Debug, Default)]
+#[reflect(type_uuid = "15f306b8-3bb8-4b35-87bd-6e9e5d748455")]
 #[reflect(derived_type = "UiNode")]
 pub struct AbsmEventProvider {
     widget: Widget,
     actions: InheritableVariable<Vec<EventAction>>,
-    absm: InheritableVariable<Handle<UiNode>>,
+    absm: InheritableVariable<Handle<AnimationBlendingStateMachine>>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for AbsmEventProvider {
@@ -303,6 +291,7 @@ impl ConstructorProvider<UiNode, UserInterface> for AbsmEventProvider {
             .with_variant("Absm Event Provider", |ui| {
                 AbsmEventProviderBuilder::new(WidgetBuilder::new().with_name("Absm Event Provider"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Animation")
@@ -317,7 +306,7 @@ impl AbsmEventProvider {
             return;
         };
 
-        let Some(absm) = ui.try_get_mut_of_type::<AnimationBlendingStateMachine>(*self.absm) else {
+        let Ok(absm) = ui.try_get_mut(*self.absm) else {
             return;
         };
 
@@ -359,7 +348,7 @@ impl Control for AbsmEventProvider {
 pub struct AbsmEventProviderBuilder {
     widget_builder: WidgetBuilder,
     actions: Vec<EventAction>,
-    absm: Handle<UiNode>,
+    absm: Handle<AnimationBlendingStateMachine>,
 }
 
 impl AbsmEventProviderBuilder {
@@ -376,19 +365,19 @@ impl AbsmEventProviderBuilder {
         self
     }
 
-    pub fn with_absm(mut self, absm: Handle<UiNode>) -> Self {
+    pub fn with_absm(mut self, absm: Handle<AnimationBlendingStateMachine>) -> Self {
         self.absm = absm;
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<AbsmEventProvider> {
         let provider = AbsmEventProvider {
             widget: self.widget_builder.build(ctx),
             actions: self.actions.into(),
             absm: self.absm.into(),
         };
 
-        ctx.add_node(UiNode::new(provider))
+        ctx.add(provider)
     }
 }
 

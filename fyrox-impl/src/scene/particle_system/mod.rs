@@ -21,9 +21,7 @@
 //! Contains all structures and methods to create and manage particle systems. See [`ParticleSystem`] docs for more
 //! info and usage examples.
 
-use crate::scene::node::constructor::NodeConstructor;
-use crate::scene::particle_system::emitter::base::BaseEmitterBuilder;
-use crate::scene::particle_system::emitter::sphere::SphereEmitterBuilder;
+use crate::rand::Error;
 use crate::{
     core::{
         algebra::{Point3, Vector2, Vector3},
@@ -32,29 +30,27 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, TriangleDefinition},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         value_as_u8_slice,
         variable::InheritableVariable,
         visitor::prelude::*,
     },
-    material::{self, Material, MaterialResource},
-    rand::{prelude::StdRng, Error, RngCore, SeedableRng},
+    material::{Material, MaterialResource},
+    rand::{prelude::StdRng, RngCore, SeedableRng},
     renderer::{self, bundle::RenderContext},
     scene::{
         base::{Base, BaseBuilder},
         graph::Graph,
         mesh::{buffer::VertexTrait, RenderPath},
-        node::{Node, NodeTrait, RdcControlFlow, UpdateContext},
+        node::{constructor::NodeConstructor, Node, NodeTrait, RdcControlFlow, UpdateContext},
         particle_system::{
             draw::Vertex,
-            emitter::{Emit, Emitter},
+            emitter::{base::BaseEmitterBuilder, sphere::SphereEmitterBuilder, Emit, Emitter},
             particle::Particle,
         },
     },
 };
-use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::{constructor::ConstructorProvider, SceneGraph};
 use std::{
     cmp::Ordering,
     fmt::Debug,
@@ -68,6 +64,7 @@ pub mod particle;
 
 /// Pseudo-random numbers generator for particle systems.
 #[derive(Debug, Clone, Reflect)]
+#[reflect(type_uuid = "13d58184-e65c-41a3-9986-fc8d31231636")]
 pub struct ParticleSystemRng {
     rng_seed: u64,
 
@@ -221,8 +218,11 @@ impl Visit for ParticleSystemRng {
 ///     .build(graph);
 /// }
 /// ```
-#[derive(Debug, Clone, Reflect, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Clone, Reflect)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "8b210eff-97a4-494f-ba7a-a581d3f4a442"
+)]
 pub struct ParticleSystem {
     base: Base,
 
@@ -247,20 +247,20 @@ pub struct ParticleSystem {
     #[reflect(hidden)]
     free_particles: Vec<u32>,
 
-    #[reflect(
-        description = "The maximum distance (in meters) from an observer to the particle system at \
-        which the particle system remains visible. If the distance is larger, then the particle \
-        system will fade out and eventually will be excluded from the rendering. Use this value to \
-        tweak performance. Default is 30.0"
-    )]
+    /// The maximum distance (in meters) from an observer to the particle system at which the
+    /// particle system remains visible. If the distance is larger, then the particle system will
+    /// fade out and eventually will be excluded from the rendering. Use this value to tweak
+    /// performance. Default is 30.0
     visible_distance: InheritableVariable<f32>,
 
-    #[reflect(
-        description = "Defines a coordinate system for particles. Local coordinate space could \
-    be used for particles that must move with the particle system (sparks), world space - for \
-    particles that must be detached from the particle system (smoke trails)"
-    )]
+    /// Defines a coordinate system for particles. Local coordinate space could be used for particles
+    /// that must move with the particle system (sparks), world space - for particles that must be
+    /// detached from the particle system (smoke trails)
     coordinate_system: InheritableVariable<CoordinateSystem>,
+
+    /// A margin value in which the distance fading will occur.
+    #[reflect(min_value = 0.0)]
+    fadeout_margin: InheritableVariable<f32>,
 
     rng: ParticleSystemRng,
 }
@@ -281,9 +281,8 @@ pub struct ParticleSystem {
     AsRefStr,
     EnumString,
     VariantNames,
-    TypeUuidProvider,
 )]
-#[type_uuid(id = "d19e13ec-03d5-4c88-b0b2-d161d1912632")]
+#[reflect(type_uuid = "d19e13ec-03d5-4c88-b0b2-d161d1912632")]
 pub enum CoordinateSystem {
     /// Local coordinate system moves particles together with the particle system itself. For example
     /// if a particle system is moved, rotated, scaled, etc. then the particle will be moved, rotated,
@@ -312,36 +311,13 @@ impl Visit for ParticleSystem {
         self.is_playing.visit("Enabled", &mut region)?;
         self.particles.visit("Particles", &mut region)?;
         self.free_particles.visit("FreeParticles", &mut region)?;
-        let _ = self.rng.visit("Rng", &mut region);
-        let _ = self.visible_distance.visit("VisibleDistance", &mut region);
-        let _ = self
-            .coordinate_system
-            .visit("CoordinateSystem", &mut region);
-
-        // Backward compatibility.
-        if region.is_reading() {
-            if let Some(material) = material::visit_old_texture_as_material(
-                &mut region,
-                Material::standard_particle_system,
-            ) {
-                self.material = material.into();
-            } else {
-                self.material.visit("Material", &mut region)?;
-            }
-        } else {
-            self.material.visit("Material", &mut region)?;
-        }
-
-        let mut soft_boundary_sharpness_factor = 100.0;
-        if soft_boundary_sharpness_factor
-            .visit("SoftBoundarySharpnessFactor", &mut region)
-            .is_ok()
-        {
-            self.material.data_ref().set_property(
-                "softBoundarySharpnessFactor",
-                soft_boundary_sharpness_factor,
-            );
-        }
+        self.rng.visit("Rng", &mut region)?;
+        self.visible_distance
+            .visit("VisibleDistance", &mut region)?;
+        self.coordinate_system
+            .visit("CoordinateSystem", &mut region)?;
+        self.fadeout_margin.visit("FadeoutMargin", &mut region)?;
+        self.material.visit("Material", &mut region)?;
 
         Ok(())
     }
@@ -361,15 +337,7 @@ impl DerefMut for ParticleSystem {
     }
 }
 
-impl TypeUuidProvider for ParticleSystem {
-    fn type_uuid() -> Uuid {
-        uuid!("8b210eff-97a4-494f-ba7a-a581d3f4a442")
-    }
-}
-
 impl ParticleSystem {
-    const FADEOUT_MARGIN: f32 = 1.5;
-
     /// Returns current acceleration for particles in particle system.
     pub fn acceleration(&self) -> Vector3<f32> {
         *self.acceleration
@@ -537,7 +505,7 @@ impl ParticleSystem {
 
     fn is_distance_clipped(&self, point: &Vector3<f32>) -> bool {
         point.metric_distance(&self.global_position())
-            > (*self.visible_distance + Self::FADEOUT_MARGIN)
+            > (*self.visible_distance + *self.fadeout_margin)
     }
 }
 
@@ -575,7 +543,7 @@ impl NodeTrait for ParticleSystem {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn update(&mut self, context: &mut UpdateContext) {
@@ -603,7 +571,7 @@ impl NodeTrait for ParticleSystem {
             .metric_distance(&self.global_position());
 
         let particle_alpha_factor = if distance_to_observer >= self.visible_distance() {
-            1.0 - (distance_to_observer - self.visible_distance()) / Self::FADEOUT_MARGIN
+            1.0 - (distance_to_observer - self.visible_distance()) / *self.fadeout_margin
         } else {
             1.0
         };
@@ -735,6 +703,7 @@ pub struct ParticleSystemBuilder {
     rng: ParticleSystemRng,
     visible_distance: f32,
     coordinate_system: CoordinateSystem,
+    fadeout_margin: f32,
 }
 
 impl ParticleSystemBuilder {
@@ -755,6 +724,7 @@ impl ParticleSystemBuilder {
             rng: ParticleSystemRng::default(),
             visible_distance: 30.0,
             coordinate_system: Default::default(),
+            fadeout_margin: 1.5,
         }
     }
 
@@ -814,6 +784,12 @@ impl ParticleSystemBuilder {
         self
     }
 
+    /// Sets a margin value in which the distance fading will occur.
+    pub fn with_fadeout_margin(mut self, margin: f32) -> Self {
+        self.fadeout_margin = margin;
+        self
+    }
+
     fn build_particle_system(self) -> ParticleSystem {
         ParticleSystem {
             base: self.base_builder.build_base(),
@@ -827,6 +803,7 @@ impl ParticleSystemBuilder {
             rng: self.rng,
             visible_distance: self.visible_distance.into(),
             coordinate_system: self.coordinate_system.into(),
+            fadeout_margin: self.fadeout_margin.into(),
         }
     }
 
@@ -836,7 +813,7 @@ impl ParticleSystemBuilder {
     }
 
     /// Creates new instance of particle system and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<ParticleSystem> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

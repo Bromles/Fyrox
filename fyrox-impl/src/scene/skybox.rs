@@ -20,15 +20,17 @@
 
 //! Skybox is a huge box around a camera. See [`SkyBox`] docs for more info.
 
+use std::{fmt::Display, sync::LazyLock};
+
 use crate::{
     asset::{builtin::BuiltInResource, embedded_data_source, untyped::ResourceKind},
-    core::{log::Log, reflect::prelude::*, uuid_provider, visitor::prelude::*},
+    core::{log::Log, reflect::prelude::*, visitor::prelude::*},
 };
+use fyrox_core::color::Color;
 use fyrox_texture::{
     CompressionOptions, Texture, TextureImportOptions, TextureKind, TextureMinificationFilter,
     TexturePixelKind, TextureResource, TextureResourceExtension, TextureWrapMode,
 };
-use lazy_static::lazy_static;
 use uuid::{uuid, Uuid};
 
 /// Skybox is a huge box around a camera. Each face has its own texture, when textures are
@@ -37,6 +39,7 @@ use uuid::{uuid, Uuid};
 /// in outdoor scenes, however real use of it limited only by your imagination. Skybox
 /// will be drawn first, none of objects could be drawn before skybox.
 #[derive(Debug, Clone, Default, PartialEq, Reflect, Visit, Eq)]
+#[reflect(type_uuid = "45f359f1-e26f-4ace-81df-097f63474c72")]
 pub struct SkyBox {
     /// Texture for front face.
     #[reflect(setter = "set_front")]
@@ -68,9 +71,26 @@ pub struct SkyBox {
     pub(crate) cubemap: Option<TextureResource>,
 }
 
-uuid_provider!(SkyBox = "45f359f1-e26f-4ace-81df-097f63474c72");
-
 impl SkyBox {
+    /// Creates a new sky box from a single color.
+    pub fn from_single_color(color: Color) -> Self {
+        let dark_gray_texture = TextureResource::from_bytes(
+            Uuid::new_v4(),
+            TextureKind::Rectangle {
+                width: 1,
+                height: 1,
+            },
+            TexturePixelKind::RGBA8,
+            vec![color.r, color.g, color.b, color.a],
+            ResourceKind::Embedded,
+        )
+        .unwrap();
+
+        SkyBoxBuilder::from_texture(&dark_gray_texture)
+            .build()
+            .unwrap()
+    }
+
     /// Returns cubemap texture
     pub fn cubemap(&self) -> Option<TextureResource> {
         self.cubemap.clone()
@@ -357,6 +377,39 @@ pub enum SkyBoxError {
     },
 }
 
+impl std::error::Error for SkyBoxError {}
+
+impl Display for SkyBoxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkyBoxError::UnsupportedTextureKind(texture_kind) => {
+                write!(f, "Unsupported texture kind: {texture_kind:?}")
+            }
+            SkyBoxError::UnableToBuildCubeMap => f.write_str("Cube map was failed to build."),
+            SkyBoxError::NonSquareTexture {
+                index,
+                width,
+                height,
+            } => write!(
+                f,
+                "Input texture is not square. Index: {index}, width: {width}, height: {height}"
+            ),
+            SkyBoxError::DifferentTexture {
+                expected_width,
+                expected_height,
+                expected_pixel_kind,
+                index,
+                actual_width,
+                actual_height,
+                actual_pixel_kind,
+            } => write!(f, "Some input texture differs in size or pixel kind. Index: {index}. \
+            Expected width: {expected_width}, height: {expected_height}, kind: {expected_pixel_kind:?}. \
+            Actual width: {actual_width}, height: {actual_height}, kind: {actual_pixel_kind:?}."),
+            SkyBoxError::TextureIsNotReady { index } => write!(f, "Input texture is not loaded. Index: {index}"),
+        }
+    }
+}
+
 /// SkyBox builder is used to create new skybox in declarative manner.
 pub struct SkyBoxBuilder {
     /// Texture for front face.
@@ -374,6 +427,18 @@ pub struct SkyBoxBuilder {
 }
 
 impl SkyBoxBuilder {
+    /// Creates a new builder, where each texture for each side of the sky box is the same.
+    pub fn from_texture(texture: &TextureResource) -> Self {
+        Self {
+            front: Some(texture.clone()),
+            back: Some(texture.clone()),
+            left: Some(texture.clone()),
+            right: Some(texture.clone()),
+            top: Some(texture.clone()),
+            bottom: Some(texture.clone()),
+        }
+    }
+
     /// Sets desired front face of cubemap.
     pub fn with_front(mut self, texture: TextureResource) -> Self {
         self.front = Some(texture);
@@ -441,39 +506,55 @@ fn load_texture(id: Uuid, data: &[u8]) -> TextureResource {
     .unwrap()
 }
 
-lazy_static! {
-    static ref BUILT_IN_SKYBOX_FRONT: BuiltInResource<Texture> = BuiltInResource::new(
-        "__BUILT_IN_SKYBOX_FRONT",
+static BUILT_IN_SKYBOX_FRONT: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Skybox Front Face",
         embedded_data_source!("skybox/front.png"),
-        |data| { load_texture(uuid!("f8d4519b-2947-4c83-9aa5-800a70ae918e"), data) }
-    );
-    static ref BUILT_IN_SKYBOX_BACK: BuiltInResource<Texture> = BuiltInResource::new(
-        "__BUILT_IN_SKYBOX_BACK",
+        |data| load_texture(uuid!("f8d4519b-2947-4c83-9aa5-800a70ae918e"), data),
+    )
+});
+
+static BUILT_IN_SKYBOX_BACK: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Skybox Back Face",
         embedded_data_source!("skybox/back.png"),
-        |data| { load_texture(uuid!("28676705-58bd-440f-b0aa-ce42cf95be79"), data) }
-    );
-    static ref BUILT_IN_SKYBOX_TOP: BuiltInResource<Texture> = BuiltInResource::new(
-        "__BUILT_IN_SKYBOX_TOP",
+        |data| load_texture(uuid!("28676705-58bd-440f-b0aa-ce42cf95be79"), data),
+    )
+});
+
+static BUILT_IN_SKYBOX_TOP: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Skybox Top Face",
         embedded_data_source!("skybox/top.png"),
-        |data| { load_texture(uuid!("03e38da7-53d1-48c0-87f8-2baf9869d61d"), data) }
-    );
-    static ref BUILT_IN_SKYBOX_BOTTOM: BuiltInResource<Texture> = BuiltInResource::new(
-        "__BUILT_IN_SKYBOX_BOTTOM",
+        |data| load_texture(uuid!("03e38da7-53d1-48c0-87f8-2baf9869d61d"), data),
+    )
+});
+
+static BUILT_IN_SKYBOX_BOTTOM: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Skybox Bottom Face",
         embedded_data_source!("skybox/bottom.png"),
-        |data| { load_texture(uuid!("01684dc1-34b2-48b3-b8c2-30a7718cb9e7"), data) }
-    );
-    static ref BUILT_IN_SKYBOX_LEFT: BuiltInResource<Texture> = BuiltInResource::new(
-        "__BUILT_IN_SKYBOX_LEFT",
+        |data| load_texture(uuid!("01684dc1-34b2-48b3-b8c2-30a7718cb9e7"), data),
+    )
+});
+
+static BUILT_IN_SKYBOX_LEFT: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Skybox Left Face",
         embedded_data_source!("skybox/left.png"),
-        |data| { load_texture(uuid!("1725b779-7633-477a-a7b0-995c079c3202"), data) }
-    );
-    static ref BUILT_IN_SKYBOX_RIGHT: BuiltInResource<Texture> = BuiltInResource::new(
-        "__BUILT_IN_SKYBOX_RIGHT",
+        |data| load_texture(uuid!("1725b779-7633-477a-a7b0-995c079c3202"), data),
+    )
+});
+
+static BUILT_IN_SKYBOX_RIGHT: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Skybox Right Face",
         embedded_data_source!("skybox/right.png"),
-        |data| { load_texture(uuid!("5f74865a-3eae-4bff-8743-b9d1f7bb3c59"), data) }
-    );
-    static ref BUILT_IN_SKYBOX: SkyBox = SkyBoxKind::make_built_in_skybox();
-}
+        |data| load_texture(uuid!("5f74865a-3eae-4bff-8743-b9d1f7bb3c59"), data),
+    )
+});
+
+static BUILT_IN_SKYBOX: LazyLock<SkyBox> = LazyLock::new(SkyBoxKind::make_built_in_skybox);
 
 impl SkyBoxKind {
     fn make_built_in_skybox() -> SkyBox {

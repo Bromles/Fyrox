@@ -10,14 +10,11 @@ use fyrox_core::{
     algebra::{Matrix2, Matrix3, Matrix4, Vector2, Vector3, Vector4},
     color::Color,
     io::FileError,
-    parking_lot::Mutex,
     reflect::prelude::*,
     sstorage::ImmutableString,
     uuid::{uuid, Uuid},
-    visitor::{prelude::*, RegionGuard},
-    TypeUuidProvider,
+    visitor::prelude::*,
 };
-use fyrox_graphics::gpu_program::SamplerFallback;
 use fyrox_resource::{
     io::ResourceIo,
     manager::{BuiltInResource, ResourceManager},
@@ -26,13 +23,12 @@ use fyrox_resource::{
     Resource, ResourceData,
 };
 use fyrox_texture::TextureResource;
-use lazy_static::lazy_static;
 use std::{
     any::Any,
     error::Error,
     fmt::{Display, Formatter},
     path::Path,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
@@ -40,8 +36,8 @@ pub mod loader;
 pub mod shader;
 
 /// A texture binding.
-#[derive(Default, Debug, Visit, Clone, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "e1642a47-d372-4840-a8eb-f16350f436f8")]
+#[derive(Default, Debug, Visit, Clone, Reflect)]
+#[reflect(type_uuid = "e1642a47-d372-4840-a8eb-f16350f436f8")]
 pub struct MaterialTextureBinding {
     /// Actual value of the texture binding. Could be [`None`], in this case fallback value of the
     /// shader will be used.
@@ -54,8 +50,8 @@ pub struct MaterialTextureBinding {
 ///
 /// There is a limited set of possible types that can be passed to a shader, most of them are
 /// just simple data types.
-#[derive(Debug, Visit, Clone, Reflect, TypeUuidProvider, AsRefStr, EnumString, VariantNames)]
-#[type_uuid(id = "2df8f1e5-0075-4d0d-9860-70fc27d3e165")]
+#[derive(Debug, Visit, Clone, Reflect, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "2df8f1e5-0075-4d0d-9860-70fc27d3e165")]
 pub enum MaterialResourceBinding {
     /// A texture.
     Texture(MaterialTextureBinding),
@@ -83,6 +79,7 @@ impl MaterialResourceBinding {
 /// Property group stores a bunch of named values of a fixed set of types, that will be used for
 /// rendering with some shader.
 #[derive(Default, Debug, Visit, Clone, Reflect)]
+#[reflect(type_uuid = "f7bfc838-f115-463d-a714-ab48d309058a")]
 pub struct MaterialPropertyGroup {
     properties: FxHashMap<ImmutableString, MaterialProperty>,
 }
@@ -169,8 +166,8 @@ impl MaterialPropertyGroup {
 }
 
 /// A set of possible material property types.
-#[derive(Debug, Visit, Clone, Reflect, AsRefStr, EnumString, VariantNames, TypeUuidProvider)]
-#[type_uuid(id = "1c25018d-ab6e-4dca-99a6-e3d9639bc33c")]
+#[derive(Debug, Visit, Clone, Reflect, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "1c25018d-ab6e-4dca-99a6-e3d9639bc33c")]
 pub enum MaterialProperty {
     /// Real number.
     Float(f32),
@@ -604,43 +601,10 @@ impl Default for MaterialProperty {
 /// that we using resource manager to get shader instance, and then we just use the instance to create
 /// material instance. Then we populate properties as usual.
 #[derive(Debug, Clone, Reflect)]
+#[reflect(type_uuid = "0e54fe44-0c58-4108-a681-d6eefc88c234")]
 pub struct Material {
     shader: ShaderResource,
     resource_bindings: FxHashMap<ImmutableString, MaterialResourceBinding>,
-}
-
-#[derive(Debug, Visit, Clone, Reflect)]
-enum OldMaterialProperty {
-    Float(f32),
-    FloatArray(Vec<f32>),
-    Int(i32),
-    IntArray(Vec<i32>),
-    UInt(u32),
-    UIntArray(Vec<u32>),
-    Vector2(Vector2<f32>),
-    Vector2Array(Vec<Vector2<f32>>),
-    Vector3(Vector3<f32>),
-    Vector3Array(Vec<Vector3<f32>>),
-    Vector4(Vector4<f32>),
-    Vector4Array(Vec<Vector4<f32>>),
-    Matrix2(Matrix2<f32>),
-    Matrix2Array(Vec<Matrix2<f32>>),
-    Matrix3(Matrix3<f32>),
-    Matrix3Array(Vec<Matrix3<f32>>),
-    Matrix4(Matrix4<f32>),
-    Matrix4Array(Vec<Matrix4<f32>>),
-    Bool(bool),
-    Color(Color),
-    Sampler {
-        value: Option<TextureResource>,
-        fallback: SamplerFallback,
-    },
-}
-
-impl Default for OldMaterialProperty {
-    fn default() -> Self {
-        Self::Float(0.0)
-    }
 }
 
 impl Visit for Material {
@@ -659,56 +623,8 @@ impl Visit for Material {
         shader.visit("Shader", &mut region)?;
         self.shader = shader;
 
-        if region.is_reading() {
-            // Backward compatibility.
-            let mut old_properties = FxHashMap::<ImmutableString, OldMaterialProperty>::default();
-            if old_properties.visit("Properties", &mut region).is_ok() {
-                for (name, old_property) in &old_properties {
-                    if let OldMaterialProperty::Sampler { value, .. } = old_property {
-                        self.bind(
-                            name.clone(),
-                            MaterialResourceBinding::Texture(MaterialTextureBinding {
-                                value: value.clone(),
-                            }),
-                        )
-                    }
-                }
-
-                let properties = self.try_get_or_insert_property_group("properties");
-
-                for (name, old_property) in old_properties {
-                    match old_property {
-                        OldMaterialProperty::Float(v) => properties.set_property(name, v),
-                        OldMaterialProperty::FloatArray(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Int(v) => properties.set_property(name, v),
-                        OldMaterialProperty::IntArray(v) => properties.set_property(name, v),
-                        OldMaterialProperty::UInt(v) => properties.set_property(name, v),
-                        OldMaterialProperty::UIntArray(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Vector2(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Vector2Array(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Vector3(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Vector3Array(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Vector4(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Vector4Array(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Matrix2(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Matrix2Array(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Matrix3(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Matrix3Array(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Matrix4(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Matrix4Array(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Bool(v) => properties.set_property(name, v),
-                        OldMaterialProperty::Color(v) => properties.set_property(name, v),
-                        _ => (),
-                    };
-                }
-            } else {
-                self.resource_bindings
-                    .visit("ResourceBindings", &mut region)?;
-            }
-        } else {
-            self.resource_bindings
-                .visit("ResourceBindings", &mut region)?;
-        }
+        self.resource_bindings
+            .visit("ResourceBindings", &mut region)?;
 
         Ok(())
     }
@@ -720,21 +636,11 @@ impl Default for Material {
     }
 }
 
-impl TypeUuidProvider for Material {
-    fn type_uuid() -> Uuid {
-        uuid!("0e54fe44-0c58-4108-a681-d6eefc88c234")
-    }
-}
-
 impl ResourceData for Material {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
         let mut visitor = Visitor::new();
         self.visit("Material", &mut visitor)?;
-        visitor.save_binary_to_file(path)?;
+        visitor.save_ascii_to_file(path)?;
         Ok(())
     }
 
@@ -1143,18 +1049,23 @@ impl MaterialResourceExtension for MaterialResource {
 
     fn deep_copy(&self) -> MaterialResource {
         let material_state = self.header();
-        let kind = material_state.kind;
         match material_state.state {
-            ResourceState::Pending { ref path, .. } => {
-                MaterialResource::new_pending(path.clone(), kind)
+            ResourceState::Unloaded => self.resource_uuid().into(),
+            ResourceState::Pending { .. } => {
+                MaterialResource::new_pending(self.resource_uuid(), ResourceKind::External)
             }
-            ResourceState::LoadError { ref error, .. } => {
-                MaterialResource::new_load_error(kind, error.clone())
-            }
-            ResourceState::Ok { ref data, .. } => MaterialResource::new_ok(
+            ResourceState::LoadError {
+                ref error,
+                ref path,
+            } => MaterialResource::new_load_error(
+                ResourceKind::External,
+                path.clone(),
+                error.clone(),
+            ),
+            ResourceState::Ok { ref data } => MaterialResource::new_ok(
                 Uuid::new_v4(),
-                kind,
-                (&**data as &dyn Any)
+                ResourceKind::Embedded,
+                (data.inner_ref() as &dyn Any)
                     .downcast_ref::<Material>()
                     .unwrap()
                     .clone(),
@@ -1163,117 +1074,93 @@ impl MaterialResourceExtension for MaterialResource {
     }
 }
 
-#[doc(hidden)]
-pub fn visit_old_material(region: &mut RegionGuard) -> Option<MaterialResource> {
-    let mut old_material = Arc::new(Mutex::new(Material::default()));
-    if let Ok(mut inner) = region.enter_region("Material") {
-        if old_material.visit("Value", &mut inner).is_ok() {
-            return Some(MaterialResource::new_ok(
-                Uuid::new_v4(),
-                Default::default(),
-                old_material.lock().clone(),
-            ));
-        }
-    }
-    None
-}
-
-#[doc(hidden)]
-pub fn visit_old_texture_as_material<F>(
-    region: &mut RegionGuard,
-    make_default_material: F,
-) -> Option<MaterialResource>
-where
-    F: FnOnce() -> Material,
-{
-    let mut old_texture: Option<TextureResource> = None;
-    if let Ok(mut inner) = region.enter_region("Texture") {
-        if old_texture.visit("Value", &mut inner).is_ok() {
-            let mut material = make_default_material();
-            material.bind("diffuseTexture", old_texture);
-            return Some(MaterialResource::new_ok(
-                Uuid::new_v4(),
-                Default::default(),
-                material,
-            ));
-        }
-    }
-    None
-}
-
-lazy_static! {
-    /// Standard PBR material. Keep in mind that this material is global, any modification
-    /// of it will reflect on every other usage of it.
-    pub static ref STANDARD: BuiltInResource<Material> = BuiltInResource::new_no_source("__StandardMaterial",
+/// Standard PBR material. Keep in mind that this material is global, any modification
+/// of it will reflect on every other usage of it.
+pub static STANDARD: LazyLock<BuiltInResource<Material>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Default Material",
         MaterialResource::new_ok(
             uuid!("fac37721-d1b8-422e-ae0c-83196ecd0a26"),
             ResourceKind::External,
             Material::from_shader(ShaderResource::standard()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Standard 2D material. Keep in mind that this material is global, any modification
-    /// of it will reflect on every other usage of it.
-    pub static ref STANDARD_2D: BuiltInResource<Material> = BuiltInResource::new_no_source("__Standard2DMaterial",
+/// Standard 2D material. Keep in mind that this material is global, any modification
+/// of it will reflect on every other usage of it.
+pub static STANDARD_2D: LazyLock<BuiltInResource<Material>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "2D Material",
         MaterialResource::new_ok(
             uuid!("fe78a0d0-d059-4156-bc63-c3d2e36ad4b6"),
             ResourceKind::External,
             Material::from_shader(ShaderResource::standard_2d()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Standard particle system material. Keep in mind that this material is global, any modification
-    /// of it will reflect on every other usage of it.
-    pub static ref STANDARD_PARTICLE_SYSTEM: BuiltInResource<Material> = BuiltInResource::new_no_source(
-        "__StandardParticleSystemMaterial",
+/// Standard particle system material. Keep in mind that this material is global, any modification
+/// of it will reflect on every other usage of it.
+pub static STANDARD_PARTICLE_SYSTEM: LazyLock<BuiltInResource<Material>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Particle SystemMaterial",
         MaterialResource::new_ok(
             uuid!("5bebe6e5-4aeb-496f-88f6-abe2b1ac798b"),
             ResourceKind::External,
-            Material::from_shader(ShaderResource::standard_particle_system(),),
-        )
-    );
+            Material::from_shader(ShaderResource::standard_particle_system()),
+        ),
+    )
+});
 
-    /// Standard sprite material. Keep in mind that this material is global, any modification
-    /// of it will reflect on every other usage of it.
-    pub static ref STANDARD_SPRITE: BuiltInResource<Material> = BuiltInResource::new_no_source(
-        "__StandardSpriteMaterial",
+/// Standard sprite material. Keep in mind that this material is global, any modification
+/// of it will reflect on every other usage of it.
+pub static STANDARD_SPRITE: LazyLock<BuiltInResource<Material>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Sprite Material",
         MaterialResource::new_ok(
             uuid!("3e331786-baae-412b-9d99-7370174bca43"),
             ResourceKind::External,
             Material::from_shader(ShaderResource::standard_sprite()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Standard terrain material. Keep in mind that this material is global, any modification
-    /// of it will reflect on every other usage of it.
-    pub static ref STANDARD_TERRAIN: BuiltInResource<Material> = BuiltInResource::new_no_source(
-        "__StandardTerrainMaterial",
+/// Standard terrain material. Keep in mind that this material is global, any modification
+/// of it will reflect on every other usage of it.
+pub static STANDARD_TERRAIN: LazyLock<BuiltInResource<Material>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Terrain Material",
         MaterialResource::new_ok(
             uuid!("0e407e22-41ad-4763-9adb-9d2e86351ece"),
             ResourceKind::External,
             Material::from_shader(ShaderResource::standard_terrain()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Standard two-sided material. Keep in mind that this material is global, any modification
-    /// of it will reflect on every other usage of it.
-    pub static ref STANDARD_TWOSIDES: BuiltInResource<Material> = BuiltInResource::new_no_source(
-        "__StandardTwoSidesMaterial",
+/// Standard two-sided material. Keep in mind that this material is global, any modification
+/// of it will reflect on every other usage of it.
+pub static STANDARD_TWOSIDES: LazyLock<BuiltInResource<Material>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Two Sides Material",
         MaterialResource::new_ok(
             uuid!("24115321-7766-495c-bc3a-75db2f73d26d"),
             ResourceKind::External,
-           Material::from_shader(ShaderResource::standard_twosides()),
-        )
-    );
+            Material::from_shader(ShaderResource::standard_twosides()),
+        ),
+    )
+});
 
-    /// Standard widget material. Keep in mind that this material is global, any modification
-    /// of it will reflect on every other usage of it.
-    pub static ref STANDARD_WIDGET: BuiltInResource<Material> = BuiltInResource::new_no_source(
-        "__StandardWidgetMaterial",
+/// Standard widget material. Keep in mind that this material is global, any modification
+/// of it will reflect on every other usage of it.
+pub static STANDARD_WIDGET: LazyLock<BuiltInResource<Material>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Widget Material",
         MaterialResource::new_ok(
             uuid!("e5d61a6f-5c94-4137-b303-1ae29cfff6e7"),
             ResourceKind::External,
-           Material::from_shader(ShaderResource::standard_widget()),
-        )
-    );
-}
+            Material::from_shader(ShaderResource::standard_widget()),
+        ),
+    )
+});

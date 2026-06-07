@@ -19,12 +19,10 @@
 // SOFTWARE.
 
 use crate::{
-    button::{ButtonBuilder, ButtonMessage},
+    button::{Button, ButtonMessage},
     core::{
-        pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*,
-        PhantomDataSendSync,
+        color::Color, pool::Handle, reflect::prelude::*, visitor::prelude::*, PhantomDataSendSync,
     },
-    define_constructor,
     grid::{Column, GridBuilder, Row},
     inspector::{
         editors::{
@@ -32,17 +30,18 @@ use crate::{
             PropertyEditorDefinitionContainer, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        make_expander_container, make_property_margin, CollectionChanged, FieldKind,
+        make_expander_container, make_property_margin, CollectionAction, FieldAction,
         InspectorEnvironment, InspectorError, ObjectValue, PropertyChanged, PropertyFilter,
     },
-    message::{MessageDirection, UiMessage},
-    stack_panel::StackPanelBuilder,
+    message::{DeliveryMode, MessageData, MessageDirection, UiMessage},
+    resources,
+    stack_panel::{StackPanel, StackPanelBuilder},
+    utils::ImageButtonBuilder,
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
-
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::{
     any::TypeId,
     fmt::Debug,
@@ -52,22 +51,26 @@ use std::{
 };
 
 #[derive(Clone, Debug, PartialEq, Default, Visit, Reflect)]
+#[reflect(type_uuid = "88d3a376-37db-4dbb-bdaf-794f82970690")]
 pub struct Item {
     editor_instance: PropertyEditorInstance,
-    remove: Handle<UiNode>,
+    remove: Handle<Button>,
 }
 
-pub trait CollectionItem: Clone + Reflect + Default + TypeUuidProvider + Send + 'static {}
+pub trait CollectionItem: Clone + Reflect + Default + Send + 'static {}
 
-impl<T> CollectionItem for T where T: Clone + Reflect + Default + TypeUuidProvider + Send + 'static {}
+impl<T> CollectionItem for T where T: Clone + Reflect + Default + Send + 'static {}
 
-#[derive(Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "316b0319-f8ee-4b63-9ed9-3f59a857e2bc"
+)]
 pub struct CollectionEditor<T: CollectionItem> {
     pub widget: Widget,
-    pub add: Handle<UiNode>,
+    pub add: Handle<Button>,
     pub items: Vec<Item>,
-    pub panel: Handle<UiNode>,
+    pub panel: Handle<StackPanel>,
     #[visit(skip)]
     #[reflect(hidden)]
     pub layer_index: usize,
@@ -108,20 +111,7 @@ pub enum CollectionEditorMessage {
     Items(Vec<Item>),
     ItemChanged { index: usize, message: UiMessage },
 }
-
-impl CollectionEditorMessage {
-    define_constructor!(CollectionEditorMessage:Items => fn items(Vec<Item>), layout: false);
-    define_constructor!(CollectionEditorMessage:ItemChanged => fn item_changed(index: usize, message: UiMessage), layout: false);
-}
-
-impl<T: CollectionItem> TypeUuidProvider for CollectionEditor<T> {
-    fn type_uuid() -> Uuid {
-        combine_uuids(
-            uuid!("316b0319-f8ee-4b63-9ed9-3f59a857e2bc"),
-            T::type_uuid(),
-        )
-    }
-}
+impl MessageData for CollectionEditorMessage {}
 
 impl<T: CollectionItem> Control for CollectionEditor<T> {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -131,32 +121,21 @@ impl<T: CollectionItem> Control for CollectionEditor<T> {
             if let Some(index) = self
                 .items
                 .iter()
-                .position(|i| i.remove == message.destination())
+                .position(|i| message.destination() == i.remove)
             {
-                ui.send_message(CollectionChanged::remove(
-                    self.handle,
-                    MessageDirection::FromWidget,
-                    index,
-                ));
+                ui.post(self.handle, CollectionAction::Remove(index));
             }
         } else if let Some(msg) = message.data::<CollectionEditorMessage>() {
             if message.destination == self.handle {
                 if let CollectionEditorMessage::Items(items) = msg {
                     let views = create_item_views(items, &mut ui.build_ctx());
 
-                    for old_item in ui.node(self.panel).children() {
-                        ui.send_message(WidgetMessage::remove(
-                            *old_item,
-                            MessageDirection::ToWidget,
-                        ));
+                    for old_item in ui[self.panel].children() {
+                        ui.send(*old_item, WidgetMessage::Remove);
                     }
 
                     for view in views {
-                        ui.send_message(WidgetMessage::link(
-                            view,
-                            MessageDirection::ToWidget,
-                            self.panel,
-                        ));
+                        ui.send(view, WidgetMessage::link_with(self.panel));
                     }
 
                     self.items.clone_from(items);
@@ -167,25 +146,25 @@ impl<T: CollectionItem> Control for CollectionEditor<T> {
             .iter()
             .position(|i| i.editor_instance.editor() == message.destination())
         {
-            ui.send_message(CollectionEditorMessage::item_changed(
+            ui.post(
                 self.handle,
-                MessageDirection::FromWidget,
-                index,
-                message.clone(),
-            ));
+                CollectionEditorMessage::ItemChanged {
+                    index,
+                    message: message.clone(),
+                },
+            );
         }
     }
 
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
         if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
             if message.destination() == self.add {
-                ui.send_message(CollectionChanged::add(
+                ui.post(
                     self.handle,
-                    MessageDirection::FromWidget,
-                    ObjectValue {
+                    CollectionAction::Add(ObjectValue {
                         value: Box::<T>::default(),
-                    },
-                ))
+                    }),
+                )
             }
         }
     }
@@ -200,7 +179,7 @@ where
     collection: Option<I>,
     environment: Option<Arc<dyn InspectorEnvironment>>,
     definition_container: Option<Arc<PropertyEditorDefinitionContainer>>,
-    add: Handle<UiNode>,
+    add: Handle<Button>,
     layer_index: usize,
     generate_property_string_values: bool,
     filter: PropertyFilter,
@@ -223,6 +202,7 @@ fn create_item_views(items: &[Item], ctx: &mut BuildContext) -> Vec<Handle<UiNod
             .add_column(Column::stretch())
             .add_column(Column::auto())
             .build(ctx)
+            .to_base()
         })
         .collect::<Vec<_>>()
 }
@@ -233,13 +213,14 @@ fn create_items<'a, 'b, T, I>(
     definition_container: Arc<PropertyEditorDefinitionContainer>,
     property_info: &FieldRef<'a, 'b>,
     ctx: &mut BuildContext,
-    sync_flag: u64,
     layer_index: usize,
     generate_property_string_values: bool,
     filter: PropertyFilter,
     immutable_collection: bool,
     name_column_width: f32,
+    hide_name_column: bool,
     base_path: String,
+    has_parent_object: bool,
 ) -> Result<Vec<Item>, InspectorError>
 where
     T: CollectionItem,
@@ -262,7 +243,6 @@ where
                     max_value: property_info.max_value,
                     step: property_info.step,
                     precision: property_info.precision,
-                    description: property_info.description,
                     tag: property_info.tag,
                     doc: property_info.doc,
                 },
@@ -277,30 +257,30 @@ where
                         property_info: &proxy_property_info,
                         environment: environment.clone(),
                         definition_container: definition_container.clone(),
-                        sync_flag,
                         layer_index: layer_index + 1,
                         generate_property_string_values,
                         filter: filter.clone(),
                         name_column_width,
+                        hide_name_column,
                         base_path: format!("{base_path}[{index}]"),
+                        has_parent_object,
                     })?;
 
             if let PropertyEditorInstance::Simple { editor } = editor {
                 ctx[editor].set_margin(make_property_margin(layer_index + 1));
             }
 
-            let remove = ButtonBuilder::new(
-                WidgetBuilder::new()
-                    .with_visibility(!immutable_collection)
-                    .with_margin(Thickness::uniform(1.0))
-                    .with_vertical_alignment(VerticalAlignment::Top)
-                    .with_horizontal_alignment(HorizontalAlignment::Right)
-                    .on_column(1)
-                    .with_width(16.0)
-                    .with_height(16.0),
-            )
-            .with_text("-")
-            .build(ctx);
+            let remove = ImageButtonBuilder::default()
+                .with_tooltip("Remove Item")
+                .with_image_color(Color::opaque(200, 0, 0))
+                .with_visibility(!immutable_collection)
+                .with_vertical_alignment(VerticalAlignment::Top)
+                .with_horizontal_alignment(HorizontalAlignment::Right)
+                .on_column(1)
+                .with_image_size(12.0)
+                .with_size(18.0)
+                .with_image(resources::REMOVE.clone())
+                .build_button(ctx);
 
             items.push(Item {
                 editor_instance: editor,
@@ -346,7 +326,7 @@ where
         self
     }
 
-    pub fn with_add(mut self, add: Handle<UiNode>) -> Self {
+    pub fn with_add(mut self, add: Handle<Button>) -> Self {
         self.add = add;
         self
     }
@@ -386,10 +366,11 @@ where
         self,
         ctx: &mut BuildContext,
         property_info: &FieldRef<'a, '_>,
-        sync_flag: u64,
         name_column_width: f32,
+        hide_name_column: bool,
         base_path: String,
-    ) -> Result<Handle<UiNode>, InspectorError> {
+        has_parent_object: bool,
+    ) -> Result<Handle<CollectionEditor<T>>, InspectorError> {
         let definition_container = self
             .definition_container
             .unwrap_or_else(|| Arc::new(PropertyEditorDefinitionContainer::with_default_editors()));
@@ -402,13 +383,14 @@ where
                 definition_container,
                 property_info,
                 ctx,
-                sync_flag,
                 self.layer_index + 1,
                 self.generate_property_string_values,
                 self.filter,
                 self.immutable_collection,
                 name_column_width,
+                hide_name_column,
                 base_path,
+                has_parent_object,
             )?
         } else {
             Vec::new()
@@ -432,7 +414,7 @@ where
             phantom: PhantomData,
         };
 
-        Ok(ctx.add_node(UiNode::new(ce)))
+        Ok(ctx.add(ce))
     }
 }
 
@@ -479,23 +461,28 @@ where
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Vec<T>>()?;
 
-        let add = ButtonBuilder::new(
-            WidgetBuilder::new()
-                .with_visibility(!ctx.property_info.immutable_collection)
-                .with_horizontal_alignment(HorizontalAlignment::Right)
-                .with_width(16.0)
-                .with_height(16.0)
-                .on_column(1)
-                .with_margin(Thickness::uniform(1.0)),
-        )
-        .with_text("+")
-        .build(ctx.build_context);
+        let add = ImageButtonBuilder::default()
+            .with_margin(Thickness {
+                left: 1.0,
+                top: 1.0,
+                right: 2.0,
+                bottom: 1.0,
+            })
+            .with_tooltip("Add Item")
+            .with_image_color(Color::opaque(0, 200, 0))
+            .with_visibility(!ctx.property_info.immutable_collection)
+            .with_horizontal_alignment(HorizontalAlignment::Right)
+            .on_column(1)
+            .with_image_size(12.0)
+            .with_size(18.0)
+            .with_image(resources::ADD.clone())
+            .build_button(ctx.build_context);
 
         let editor;
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
-            ctx.property_info.description,
+            ctx.property_info.doc,
             add,
             {
                 editor = CollectionEditorBuilder::new(
@@ -512,17 +499,22 @@ where
                 .build(
                     ctx.build_context,
                     ctx.property_info,
-                    ctx.sync_flag,
                     ctx.name_column_width,
+                    ctx.hide_name_column,
                     ctx.base_path.clone(),
+                    ctx.has_parent_object,
                 )?;
                 editor
             },
             ctx.name_column_width,
+            ctx.hide_name_column,
             ctx.build_context,
         );
 
-        Ok(PropertyEditorInstance::Custom { container, editor })
+        Ok(PropertyEditorInstance::Custom {
+            container,
+            editor: editor.to_base(),
+        })
     }
 
     fn create_message(
@@ -530,7 +522,6 @@ where
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let PropertyEditorMessageContext {
-            sync_flag,
             instance,
             ui,
             property_info,
@@ -540,7 +531,9 @@ where
             generate_property_string_values,
             filter,
             name_column_width,
+            hide_name_column,
             base_path,
+            has_parent_object,
         } = ctx;
 
         let instance_ref = if let Some(instance) = ui.node(instance).cast::<CollectionEditor<T>>() {
@@ -561,19 +554,19 @@ where
                 definition_container,
                 property_info,
                 &mut ui.build_ctx(),
-                sync_flag,
                 layer_index + 1,
                 generate_property_string_values,
                 filter,
                 property_info.immutable_collection,
                 name_column_width,
+                hide_name_column,
                 base_path,
+                has_parent_object,
             )?;
 
-            Ok(Some(CollectionEditorMessage::items(
+            Ok(Some(UiMessage::for_widget(
                 instance,
-                MessageDirection::ToWidget,
-                items,
+                CollectionEditorMessage::Items(items),
             )))
         } else {
             if let Some(definition) = definition_container.definitions().get(&TypeId::of::<T>()) {
@@ -597,7 +590,6 @@ where
                             max_value: property_info.max_value,
                             step: property_info.step,
                             precision: property_info.precision,
-                            description: property_info.description,
                             tag: property_info.tag,
                             doc: property_info.doc,
                         },
@@ -611,17 +603,20 @@ where
                                 property_info: &proxy_property_info,
                                 environment: environment.clone(),
                                 definition_container: definition_container.clone(),
-                                sync_flag,
                                 instance: item.editor_instance.editor(),
                                 layer_index: layer_index + 1,
                                 ui,
                                 generate_property_string_values,
                                 filter: filter.clone(),
                                 name_column_width,
+                                hide_name_column,
                                 base_path: format!("{base_path}[{index}]"),
+                                has_parent_object,
                             })?
                     {
-                        ui.send_message(message.with_flags(ctx.sync_flag))
+                        // TODO: Refactor `create_message` into `create_messages` to support multiple
+                        // messages. Otherwise this looks like a hack.
+                        ui.send_message(message.with_delivery_mode(DeliveryMode::SyncOnly))
                     }
                 }
             }
@@ -632,10 +627,10 @@ where
 
     fn translate_message(&self, ctx: PropertyEditorTranslationContext) -> Option<PropertyChanged> {
         if ctx.message.direction() == MessageDirection::FromWidget {
-            if let Some(collection_changed) = ctx.message.data::<CollectionChanged>() {
+            if let Some(collection_changed) = ctx.message.data::<CollectionAction>() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::Collection(Box::new(collection_changed.clone())),
+                    action: FieldAction::CollectionAction(Box::new(collection_changed.clone())),
                 });
             } else if let Some(CollectionEditorMessage::ItemChanged { index, message }) =
                 ctx.message.data()
@@ -648,18 +643,20 @@ where
                     return Some(PropertyChanged {
                         name: ctx.name.to_string(),
 
-                        value: FieldKind::Collection(Box::new(CollectionChanged::ItemChanged {
-                            index: *index,
-                            property: definition
-                                .property_editor
-                                .translate_message(PropertyEditorTranslationContext {
-                                    environment: ctx.environment.clone(),
-                                    name: "",
-                                    message,
-                                    definition_container: ctx.definition_container.clone(),
-                                })?
-                                .value,
-                        })),
+                        action: FieldAction::CollectionAction(Box::new(
+                            CollectionAction::ItemChanged {
+                                index: *index,
+                                action: definition
+                                    .property_editor
+                                    .translate_message(PropertyEditorTranslationContext {
+                                        environment: ctx.environment.clone(),
+                                        name: "",
+                                        message,
+                                        definition_container: ctx.definition_container.clone(),
+                                    })?
+                                    .action,
+                            },
+                        )),
                     });
                 }
             }

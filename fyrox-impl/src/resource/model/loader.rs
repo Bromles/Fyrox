@@ -29,18 +29,14 @@ use crate::{
         manager::ResourceManager,
         options::{try_get_import_settings, try_get_import_settings_opaque, BaseImportOptions},
     },
-    core::{
-        io::FileError,
-        platform::TargetPlatform,
-        uuid::Uuid,
-        visitor::{Format, Visitor},
-        TypeUuidProvider,
-    },
+    core::uuid::Uuid,
     engine::SerializationContext,
     resource::model::{Model, ModelImportOptions},
 };
+use fyrox_core::dyntype::DynTypeConstructorContainer;
+use fyrox_core::reflect::Reflect;
 use fyrox_resource::state::LoadError;
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 /// Default implementation for model loading.
 pub struct ModelLoader {
@@ -49,6 +45,8 @@ pub struct ModelLoader {
     /// Node constructors contains a set of constructors that allows to build a node using its
     /// type UUID.
     pub serialization_context: Arc<SerializationContext>,
+    /// A container for dynamic types. See [`DynTypeConstructorContainer`] docs for more info.
+    pub dyn_type_constructors: Arc<DynTypeConstructorContainer>,
     /// Default import options for model resources.
     pub default_import_options: ModelImportOptions,
 }
@@ -58,13 +56,18 @@ impl ResourceLoader for ModelLoader {
         &["rgs", "fbx"]
     }
 
+    fn is_native_extension(&self, ext: &str) -> bool {
+        fyrox_core::cmp_strings_case_insensitive("rgs", ext)
+    }
+
     fn data_type_uuid(&self) -> Uuid {
-        Model::type_uuid()
+        <Model as Reflect>::type_info().type_uuid
     }
 
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
         let resource_manager = self.resource_manager.clone();
         let node_constructors = self.serialization_context.clone();
+        let dyn_type_constructors = self.dyn_type_constructors.clone();
         let default_import_options = self.default_import_options.clone();
 
         Box::pin(async move {
@@ -78,6 +81,7 @@ impl ResourceLoader for ModelLoader {
                 path,
                 io,
                 node_constructors,
+                dyn_type_constructors,
                 resource_manager,
                 import_options,
             )
@@ -86,49 +90,6 @@ impl ResourceLoader for ModelLoader {
 
             Ok(LoaderPayload::new(model))
         })
-    }
-
-    fn convert(
-        &self,
-        src_path: PathBuf,
-        dest_path: PathBuf,
-        _platform: TargetPlatform,
-        io: Arc<dyn ResourceIo>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), FileError>>>> {
-        if src_path.extension().is_some_and(|ext| {
-            fyrox_core::cmp_strings_case_insensitive(ext.to_string_lossy(), "rgs")
-        }) {
-            // Convert scenes to the binary format where possible.
-            Box::pin(async move {
-                let data = io.load_file(&src_path).await?;
-                match Visitor::detect_format_from_slice(&data) {
-                    Format::Unknown => Err(FileError::Custom("Unknown format!".to_string())),
-                    Format::Binary => {
-                        // Copy the binary format as-is.
-                        Ok(io.copy_file(&src_path, &dest_path).await?)
-                    }
-                    Format::Ascii => {
-                        // Resave the ascii format as binary.
-                        let visitor = Visitor::load_from_memory(&data).map_err(|err| {
-                            FileError::Custom(format!(
-                                "Unable to load {}. Reason: {err}",
-                                src_path.display()
-                            ))
-                        })?;
-                        visitor.save_binary_to_file(dest_path).map_err(|err| {
-                            FileError::Custom(format!(
-                                "Unable to save {}. Reason: {err}",
-                                src_path.display()
-                            ))
-                        })?;
-                        Ok(())
-                    }
-                }
-            })
-        } else {
-            // FBX and other will be copied as is.
-            Box::pin(async move { io.copy_file(&src_path, &dest_path).await })
-        }
     }
 
     fn try_load_import_settings(

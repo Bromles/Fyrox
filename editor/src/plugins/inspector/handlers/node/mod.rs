@@ -18,16 +18,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::command::make_command;
-use crate::fyrox::core::reflect::Reflect;
-use crate::fyrox::{
-    core::pool::Handle,
-    gui::inspector::{CollectionChanged, FieldKind, PropertyChanged},
-    scene::{node::Node, terrain::Terrain},
-};
-use crate::scene::commands::{GameSceneContext, RevertSceneNodePropertyCommand};
 use crate::{
-    scene::commands::terrain::{AddTerrainLayerCommand, DeleteTerrainLayerCommand},
+    command::make_command,
+    fyrox::{
+        core::pool::Handle,
+        graph::{NodeWrapper, SceneGraph},
+        gui::inspector::{CollectionAction, FieldAction, PropertyChanged},
+        scene::{node::Node, terrain::Terrain},
+    },
+    scene::commands::{
+        terrain::{AddTerrainLayerCommand, DeleteTerrainLayerCommand},
+        GameSceneContext, RevertSceneNodePropertyCommand,
+    },
     Command,
 };
 
@@ -42,15 +44,16 @@ impl SceneNodePropertyChangedHandler {
     ) -> Option<Command> {
         // Terrain is special and have its own commands for specific properties.
         if args.path() == Terrain::LAYERS && node.is_terrain() {
-            match args.value {
-                FieldKind::Collection(ref collection_changed) => match **collection_changed {
-                    CollectionChanged::Add(_) => {
+            match args.action {
+                FieldAction::CollectionAction(ref collection_changed) => match **collection_changed
+                {
+                    CollectionAction::Add(_) => {
                         Some(Command::new(AddTerrainLayerCommand::new(handle)))
                     }
-                    CollectionChanged::Remove(index) => {
+                    CollectionAction::Remove(index) => {
                         Some(Command::new(DeleteTerrainLayerCommand::new(handle, index)))
                     }
-                    CollectionChanged::ItemChanged { .. } => None,
+                    CollectionAction::ItemChanged { .. } => None,
                 },
                 _ => None,
             }
@@ -80,7 +83,12 @@ impl SceneNodePropertyChangedHandler {
                 }
             } else {
                 make_command(args, move |ctx| {
-                    &mut ctx.get_mut::<GameSceneContext>().scene.graph[handle] as &mut dyn Reflect
+                    ctx.get_mut::<GameSceneContext>()
+                        .scene
+                        .graph
+                        .try_get_node_mut(handle)
+                        .ok()
+                        .map(|n| n.inner_mut())
                 })
             }
         })

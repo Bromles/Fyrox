@@ -32,6 +32,7 @@ use std::fmt::Debug;
 /// Additionally, the binding could be disabled to temporarily prevent animation from affecting the
 /// target.
 #[derive(Debug, Visit, Reflect, Clone, PartialEq)]
+#[reflect(type_uuid = "967751f6-b1ae-433e-b511-8ee477b49bc8")]
 pub struct TrackBinding<T: EntityId> {
     /// The binding could be disabled to temporarily prevent animation from affecting the target.
     pub enabled: bool,
@@ -88,23 +89,12 @@ impl<T: EntityId> TrackBinding<T> {
 /// Track is responsible in animating a property of a single scene node. The track consists up to 4 parametric curves
 /// that contains the actual property data. Parametric curves allows the engine to perform various interpolations between
 /// key values.
-#[derive(Debug, Reflect, Clone, PartialEq)]
+#[derive(Debug, Reflect, Clone, PartialEq, Visit)]
+#[reflect(type_uuid = "9eb99baa-8d4b-4a93-bad2-32b977032149")]
 pub struct Track {
     pub(super) binding: ValueBinding,
     pub(super) frames: TrackDataContainer,
     pub(super) id: Uuid,
-}
-
-impl Visit for Track {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        let mut region = visitor.enter_region(name)?;
-
-        let _ = self.binding.visit("Binding", &mut region); // Backward compatibility
-        let _ = self.id.visit("Id", &mut region); // Backward compatibility
-        let _ = self.frames.visit("Frames", &mut region); // Backward compatibility
-
-        Ok(())
-    }
 }
 
 impl Default for Track {
@@ -140,7 +130,7 @@ impl Track {
     /// Creates a new track that is responsible in animating a rotation property of a scene node.
     pub fn new_rotation() -> Self {
         Self {
-            frames: TrackDataContainer::new(TrackValueKind::UnitQuaternion),
+            frames: TrackDataContainer::new(TrackValueKind::UnitQuaternionEuler),
             binding: ValueBinding::Rotation,
             ..Default::default()
         }

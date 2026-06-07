@@ -20,22 +20,19 @@
 
 use crate::{
     fyrox::{
-        asset::{untyped::UntypedResource, Resource},
-        core::pool::{ErasedHandle, Handle},
-        gui::{
-            self,
-            font::FontResource,
-            inspector::editors::{
-                bit::BitFieldPropertyEditorDefinition,
-                collection::VecCollectionPropertyEditorDefinition,
-                enumeration::EnumPropertyEditorDefinition,
-                inherit::InheritablePropertyEditorDefinition,
-                inspectable::InspectablePropertyEditorDefinition,
-                PropertyEditorDefinitionContainer,
-            },
-            UiNode, UserInterface,
+        asset::{manager::ResourceManager, untyped::UntypedResource, Resource},
+        core::{
+            pool::{ErasedHandle, Handle},
+            reflect::Reflect,
+        },
+        graphics::{
+            gpu_program::{SamplerKind, ShaderProperty, ShaderPropertyKind},
+            BlendEquation, BlendFactor, BlendFunc, BlendMode, BlendParameters, ColorMask,
+            CompareFunc, CullFace, DrawParameters, PolygonFillMode, ScissorBox, StencilAction,
+            StencilFunc, StencilOp,
         },
         gui::{
+            self,
             border::Border,
             button::Button,
             canvas::Canvas,
@@ -44,8 +41,19 @@ use crate::{
             dropdown_list::DropdownList,
             dropdown_menu::DropdownMenu,
             expander::Expander,
+            font::Font,
+            font::FontResource,
             grid::Grid,
             image::Image,
+            inspector::editors::key::HotKeyPropertyEditorDefinition,
+            inspector::editors::{
+                bit::BitFieldPropertyEditorDefinition,
+                collection::VecCollectionPropertyEditorDefinition,
+                enumeration::EnumPropertyEditorDefinition,
+                inherit::InheritablePropertyEditorDefinition,
+                inspectable::InspectablePropertyEditorDefinition,
+                PropertyEditorDefinitionContainer,
+            },
             key::KeyBindingEditor,
             list_view::{ListView, ListViewItem},
             menu::{ContextMenu, Menu, MenuItem},
@@ -62,6 +70,7 @@ use crate::{
             searchbar::SearchBar,
             selector::Selector,
             stack_panel::StackPanel,
+            style::{resource::StyleResource, Style},
             tab_control::TabControl,
             text::Text,
             text_box::TextBox,
@@ -72,76 +81,84 @@ use crate::{
             vector_image::VectorImage,
             window::Window,
             wrap_panel::WrapPanel,
+            UiNode, UserInterface,
         },
-        material::shader::{Shader, ShaderResource},
-        renderer::framework::PolygonFillMode,
+        material::shader::{
+            RenderPassDefinition, SamplerFallback, Shader, ShaderDefinition, ShaderResource,
+            ShaderResourceDefinition, ShaderResourceKind,
+        },
+        renderer::{BloomSettings, CsmSettings, QualitySettings, ShadowMapPrecision},
+        renderer::{HdrSettings, LuminanceCalculationMethod},
+        resource::texture::TextureKind,
         resource::{
             curve::{CurveResource, CurveResourceState},
             model::{MaterialSearchOptions, Model, ModelResource},
             texture::{
                 CompressionOptions, MipFilter, TextureMagnificationFilter,
-                TextureMinificationFilter, TextureResource, TextureWrapMode,
+                TextureMinificationFilter, TexturePixelKind, TextureResource, TextureWrapMode,
             },
         },
+        scene::base::SceneNodeId,
         scene::{
             self,
-            base::{
-                Base, LevelOfDetail, LodGroup, Mobility, Property, PropertyValue, ScriptRecord,
-            },
+            base::{Base, LevelOfDetail, LodGroup, Property, PropertyValue, ScriptRecord},
             camera::{
-                ColorGradingLut, Exposure, OrthographicProjection, PerspectiveProjection,
+                Camera, ColorGradingLut, Exposure, OrthographicProjection, PerspectiveProjection,
                 Projection,
             },
             collider::{
-                BallShape, BitMask, CapsuleShape, ColliderShape, ConeShape, ConvexPolyhedronShape,
-                CuboidShape, CylinderShape, GeometrySource, HeightfieldShape, InteractionGroups,
-                SegmentShape, TriangleShape, TrimeshShape,
+                BallShape, BitMask, CapsuleShape, Collider, ColliderShape, ConeShape,
+                ConvexPolyhedronShape, CuboidShape, CylinderShape, GeometrySource,
+                HeightfieldShape, InteractionGroups, SegmentShape, TriangleShape, TrimeshShape,
             },
+            decal::Decal,
             dim2,
             graph::physics::CoefficientCombineRule,
             joint::*,
             light::{
-                directional::{CsmOptions, FrustumSplitOptions},
+                directional::{CsmOptions, DirectionalLight, FrustumSplitOptions},
+                point::PointLight,
+                spot::SpotLight,
                 BaseLight,
             },
             mesh::{
                 surface::{BlendShape, Surface, SurfaceResource},
-                BatchingMode, RenderPath,
+                BatchingMode, Mesh, RenderPath,
             },
+            navmesh::NavigationalMesh,
             node::Node,
-            particle_system::CoordinateSystem,
             particle_system::{
                 emitter::{
                     base::BaseEmitter, cuboid::CuboidEmitter, cylinder::CylinderEmitter,
                     sphere::SphereEmitter, Emitter,
                 },
-                ParticleSystemRng,
+                CoordinateSystem, ParticleSystem, ParticleSystemRng,
             },
-            ragdoll::Limb,
-            rigidbody::RigidBodyType,
+            pivot::Pivot,
+            probe::UpdateMode,
+            ragdoll::{Limb, Ragdoll},
+            rigidbody::{RigidBody, RigidBodyMassPropertiesType, RigidBodyType},
+            skybox::SkyBox,
             sound::{
                 self,
                 filter::{
                     AllPassFilterEffect, BandPassFilterEffect, HighPassFilterEffect,
                     HighShelfFilterEffect, LowPassFilterEffect, LowShelfFilterEffect,
                 },
+                listener::Listener,
                 reverb::Reverb,
-                Attenuate, AudioBus, Biquad, DistanceModel, Effect, SoundBuffer,
+                Attenuate, AudioBus, Biquad, DistanceModel, Effect, Sound, SoundBuffer,
                 SoundBufferResource, Status,
             },
-            terrain::{Chunk, Layer},
-            tilemap::brush::{TileMapBrush, TileMapBrushResource},
-            tilemap::TileCollider,
-            tilemap::{tileset::TileSet, Tile},
+            sprite::Sprite,
+            terrain::{Chunk, Layer, Terrain},
+            tilemap::{
+                brush::{TileMapBrush, TileMapBrushResource},
+                tileset::TileSet,
+                Tile, TileCollider, TileDefinitionHandle, TileMap,
+            },
             transform::Transform,
-        },
-        scene::{
-            camera::Camera, collider::Collider, decal::Decal, light::directional::DirectionalLight,
-            light::point::PointLight, light::spot::SpotLight, mesh::Mesh,
-            navmesh::NavigationalMesh, particle_system::ParticleSystem, pivot::Pivot,
-            ragdoll::Ragdoll, rigidbody::RigidBody, rigidbody::RigidBodyMassPropertiesType,
-            sound::listener::Listener, sound::Sound, sprite::Sprite, terrain::Terrain,
-            tilemap::TileDefinitionHandle, tilemap::TileMap,
+            EnvironmentLightingSource,
         },
     },
     message::MessageSender,
@@ -151,33 +168,51 @@ use crate::{
                 AnimationContainerPropertyEditorDefinition, AnimationPropertyEditorDefinition,
                 MachinePropertyEditorDefinition,
             },
+            dyntype::DynTypePropertyEditorDefinition,
             font::FontPropertyEditorDefinition,
             handle::NodeHandlePropertyEditorDefinition,
             resource::ResourceFieldPropertyEditorDefinition,
             script::ScriptPropertyEditorDefinition,
+            shader::field::ShaderSourceCodeEditorDefinition,
             spritesheet::SpriteSheetFramesContainerEditorDefinition,
             surface::SurfaceDataPropertyEditorDefinition,
             texture::TexturePropertyEditorDefinition,
+            triangle_buffer::TriangleBufferPropertyEditorDefinition,
+            vertex_buffer::VertexBufferPropertyEditorDefinition,
         },
         tilemap::{
             OptionTileDefinitionHandlePropertyEditorDefinition,
             TileDefinitionHandlePropertyEditorDefinition,
         },
     },
+    settings::{
+        build::BuildSettings,
+        camera::CameraSettings,
+        debugging::DebuggingSettings,
+        general::{EditorStyle, GeneralSettings, ScriptEditor},
+        graphics::GraphicsSettings,
+        keys::{KeyBindings, TerrainKeyBindings},
+        model::ModelSettings,
+        move_mode::MoveInteractionModeSettings,
+        navmesh::NavmeshSettings,
+        rotate_mode::RotateInteractionModeSettings,
+        selection::SelectionSettings,
+    },
 };
-use fyrox::asset::manager::ResourceManager;
-use fyrox::core::reflect::Reflect;
-use fyrox::scene::probe::UpdateMode;
-use fyrox::scene::skybox::SkyBox;
+use fyrox_build_tools::{BuildProfile, CommandDescriptor, EnvironmentVariable};
 
 pub mod animation;
+pub mod dyntype;
 pub mod font;
 pub mod handle;
 pub mod resource;
 pub mod script;
+pub mod shader;
 pub mod spritesheet;
 pub mod surface;
 pub mod texture;
+mod triangle_buffer;
+mod vertex_buffer;
 
 pub fn make_status_enum_editor_definition() -> EnumPropertyEditorDefinition<Status> {
     EnumPropertyEditorDefinition {
@@ -289,8 +324,10 @@ pub fn make_property_editors_container(
     container.insert(TexturePropertyEditorDefinition { untyped: true });
     container.insert(FontPropertyEditorDefinition { resource_manager });
     container.insert(InheritablePropertyEditorDefinition::<FontResource>::new());
+    container.insert(InheritablePropertyEditorDefinition::<Option<FontResource>>::new());
     container.insert(InheritablePropertyEditorDefinition::<Option<TextureResource>>::new());
     container.insert(InheritablePropertyEditorDefinition::<Option<UntypedResource>>::new());
+    container.register_inheritable_vec_collection::<Option<FontResource>>();
     container.register_inheritable_vec_collection::<Option<TextureResource>>();
     container.register_inheritable_vec_collection::<Option<UntypedResource>>();
 
@@ -319,6 +356,8 @@ pub fn make_property_editors_container(
 
     container.insert(make_status_enum_editor_definition());
 
+    container.insert(InspectablePropertyEditorDefinition::<SceneNodeId>::new());
+
     container.insert(EnumPropertyEditorDefinition::<LodGroup>::new_optional());
     container.insert(InheritablePropertyEditorDefinition::<Option<LodGroup>>::new());
 
@@ -332,6 +371,9 @@ pub fn make_property_editors_container(
         container.register_inheritable_vec_collection::<Signal>();
     }
 
+    container.insert(ResourceFieldPropertyEditorDefinition::<Font>::new(
+        sender.clone(),
+    ));
     container.insert(ResourceFieldPropertyEditorDefinition::<Model>::new(
         sender.clone(),
     ));
@@ -346,6 +388,12 @@ pub fn make_property_editors_container(
     >::new());
     container.register_inheritable_vec_collection::<Option<SoundBufferResource>>();
 
+    container.insert(ResourceFieldPropertyEditorDefinition::<Style>::new(
+        sender.clone(),
+    ));
+    container.insert(InheritablePropertyEditorDefinition::<Option<StyleResource>>::new());
+    container.register_inheritable_vec_collection::<Option<StyleResource>>();
+
     container
         .insert(ResourceFieldPropertyEditorDefinition::<CurveResourceState>::new(sender.clone()));
     container.insert(InheritablePropertyEditorDefinition::<Option<CurveResource>>::new());
@@ -357,7 +405,7 @@ pub fn make_property_editors_container(
     container.insert(InheritablePropertyEditorDefinition::<
         Option<Resource<UserInterface>>,
     >::new());
-    container.register_inheritable_vec_collection::<Option<UserInterface>>();
+    container.register_vec_collection::<Option<UserInterface>>();
 
     container.insert(ResourceFieldPropertyEditorDefinition::<TileSet>::new(
         sender.clone(),
@@ -365,7 +413,7 @@ pub fn make_property_editors_container(
     container.insert(InheritablePropertyEditorDefinition::<
         Option<Resource<TileSet>>,
     >::new());
-    container.register_inheritable_vec_collection::<Option<TileSet>>();
+    container.register_vec_collection::<Option<TileSet>>();
 
     container.insert(ResourceFieldPropertyEditorDefinition::<Shader>::new(
         sender.clone(),
@@ -380,7 +428,7 @@ pub fn make_property_editors_container(
         Option<TileMapBrushResource>,
     >::new());
     container.register_inheritable_vec_collection::<Option<TileMapBrushResource>>();
-    container.register_inheritable_inspectable::<TileMapBrush>();
+    container.register_inspectable::<TileMapBrush>();
 
     container.register_inheritable_inspectable::<ColorGradingLut>();
     container.register_inheritable_inspectable::<InteractionGroups>();
@@ -396,8 +444,8 @@ pub fn make_property_editors_container(
     container.register_inheritable_inspectable::<PrismaticJoint>();
     container.register_inheritable_inspectable::<dim2::joint::PrismaticJoint>();
 
-    container.register_inheritable_inspectable::<Base>();
-    container.register_inheritable_inspectable::<BaseLight>();
+    container.register_inspectable::<Base>();
+    container.register_inspectable::<BaseLight>();
 
     container.insert(EnumPropertyEditorDefinition::<Effect>::new());
     container.insert(VecCollectionPropertyEditorDefinition::<Effect>::new());
@@ -414,15 +462,16 @@ pub fn make_property_editors_container(
     container.register_inheritable_enum::<Emitter, _>();
 
     container.register_inheritable_inspectable::<Biquad>();
-    container.register_inheritable_inspectable::<AudioBus>();
+    container.register_inspectable::<AudioBus>();
     container.register_inheritable_inspectable::<BaseEmitter>();
     container.register_inheritable_inspectable::<SphereEmitter>();
     container.register_inheritable_inspectable::<CylinderEmitter>();
     container.register_inheritable_inspectable::<CuboidEmitter>();
     container.register_inheritable_inspectable::<PerspectiveProjection>();
     container.register_inheritable_inspectable::<OrthographicProjection>();
-    container.register_inheritable_inspectable::<Transform>();
+    container.register_inspectable::<Transform>();
     container.register_inheritable_inspectable::<CsmOptions>();
+    container.register_inheritable_inspectable::<HdrSettings>();
 
     container.register_inheritable_inspectable::<Chunk>();
     container.register_inheritable_vec_collection::<Chunk>();
@@ -445,16 +494,18 @@ pub fn make_property_editors_container(
     container.register_inheritable_enum::<Projection, _>();
     container.register_inheritable_enum::<ColliderShape, _>();
     container.register_inheritable_enum::<PropertyValue, _>();
-    container.register_inheritable_enum::<Mobility, _>();
     container.register_inheritable_enum::<RigidBodyType, _>();
     container.register_inheritable_enum::<Exposure, _>();
     container.register_inheritable_enum::<FrustumSplitOptions, _>();
     container.register_inheritable_enum::<MaterialSearchOptions, _>();
     container.register_inheritable_enum::<DistanceModel, _>();
-    container.register_inheritable_enum::<sound::Renderer, _>();
+    container.register_enum::<sound::Renderer, _>();
     container.register_inheritable_enum::<RenderPath, _>();
+    container.register_inheritable_enum::<TexturePixelKind, _>();
+    container.register_inheritable_enum::<EnvironmentLightingSource, _>();
     container.register_inheritable_enum::<CoordinateSystem, _>();
     container.register_inheritable_enum::<UpdateMode, _>();
+    container.register_inheritable_enum::<LuminanceCalculationMethod, _>();
 
     container.insert(EnumPropertyEditorDefinition::<Vec<ScriptRecord>>::new_optional());
     container.insert(VecCollectionPropertyEditorDefinition::<ScriptRecord>::new());
@@ -482,6 +533,8 @@ pub fn make_property_editors_container(
     container.register_inheritable_inspectable::<dim2::collider::HeightfieldShape>();
     container.register_inheritable_inspectable::<dim2::collider::TileMapShape>();
     container.register_inheritable_inspectable::<ConvexPolyhedronShape>();
+    container.register_inheritable_inspectable::<JointMotorParams>();
+    container.register_inheritable_inspectable::<dim2::joint::JointMotorParams>();
     container.insert(SpriteSheetFramesContainerEditorDefinition);
 
     container.insert(SurfaceDataPropertyEditorDefinition {
@@ -535,6 +588,103 @@ pub fn make_property_editors_container(
 
     container.register_inheritable_enum::<TileCollider, _>();
     container.register_inheritable_enum::<RigidBodyMassPropertiesType, _>();
+
+    container.insert(InspectablePropertyEditorDefinition::<DrawParameters>::new());
+
+    container.insert(InspectablePropertyEditorDefinition::<ShaderDefinition>::new());
+
+    container.insert(VecCollectionPropertyEditorDefinition::<RenderPassDefinition>::new());
+    container.insert(InspectablePropertyEditorDefinition::<RenderPassDefinition>::new());
+
+    container.insert(VecCollectionPropertyEditorDefinition::<
+        ShaderResourceDefinition,
+    >::new());
+    container.insert(InspectablePropertyEditorDefinition::<
+        ShaderResourceDefinition,
+    >::new());
+
+    container.insert(VecCollectionPropertyEditorDefinition::<ShaderProperty>::new());
+    container.insert(InspectablePropertyEditorDefinition::<ShaderProperty>::new());
+
+    container.insert(EnumPropertyEditorDefinition::<ShaderPropertyKind>::new());
+
+    container.insert(EnumPropertyEditorDefinition::<SamplerFallback>::new());
+    container.insert(EnumPropertyEditorDefinition::<SamplerKind>::new());
+    container.insert(EnumPropertyEditorDefinition::<ShaderResourceKind>::new());
+
+    container.insert(InspectablePropertyEditorDefinition::<ColorMask>::new());
+
+    container.insert(EnumPropertyEditorDefinition::<CullFace>::new());
+    container.insert(EnumPropertyEditorDefinition::<CullFace>::new_optional());
+
+    container.insert(InspectablePropertyEditorDefinition::<StencilFunc>::new());
+    container.insert(EnumPropertyEditorDefinition::<StencilFunc>::new_optional());
+
+    container.insert(EnumPropertyEditorDefinition::<CompareFunc>::new());
+    container.insert(EnumPropertyEditorDefinition::<CompareFunc>::new_optional());
+
+    container.insert(InspectablePropertyEditorDefinition::<BlendParameters>::new());
+    container.insert(EnumPropertyEditorDefinition::<BlendParameters>::new_optional());
+
+    container.insert(InspectablePropertyEditorDefinition::<StencilOp>::new());
+    container.insert(EnumPropertyEditorDefinition::<StencilOp>::new_optional());
+
+    container.insert(InspectablePropertyEditorDefinition::<BlendEquation>::new());
+    container.insert(EnumPropertyEditorDefinition::<BlendEquation>::new_optional());
+
+    container.insert(InspectablePropertyEditorDefinition::<ScissorBox>::new());
+    container.insert(EnumPropertyEditorDefinition::<ScissorBox>::new_optional());
+
+    container.insert(InspectablePropertyEditorDefinition::<BlendFunc>::new());
+    container.insert(EnumPropertyEditorDefinition::<BlendFunc>::new_optional());
+
+    container.insert(EnumPropertyEditorDefinition::<BlendMode>::new());
+    container.insert(EnumPropertyEditorDefinition::<BlendMode>::new_optional());
+
+    container.insert(EnumPropertyEditorDefinition::<StencilAction>::new());
+    container.insert(EnumPropertyEditorDefinition::<StencilAction>::new_optional());
+
+    container.insert(EnumPropertyEditorDefinition::<BlendFactor>::new());
+    container.insert(EnumPropertyEditorDefinition::<BlendFactor>::new_optional());
+
+    container.insert(ShaderSourceCodeEditorDefinition);
+
+    container.insert(EnumPropertyEditorDefinition::<TextureKind>::new());
+
+    container.insert(DynTypePropertyEditorDefinition {});
+
+    container.insert(InspectablePropertyEditorDefinition::<GeneralSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<GraphicsSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<SelectionSettings>::new());
+    container.insert(EnumPropertyEditorDefinition::<ShadowMapPrecision>::new());
+    container.insert(EnumPropertyEditorDefinition::<ScriptEditor>::new());
+    container.insert(EnumPropertyEditorDefinition::<EditorStyle>::new());
+    container.insert(InspectablePropertyEditorDefinition::<DebuggingSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<CsmSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<QualitySettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<CameraSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<
+        MoveInteractionModeSettings,
+    >::new());
+    container.insert(InspectablePropertyEditorDefinition::<
+        RotateInteractionModeSettings,
+    >::new());
+    container.insert(InspectablePropertyEditorDefinition::<ModelSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<NavmeshSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<KeyBindings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<TerrainKeyBindings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<BuildSettings>::new());
+    container.insert(InspectablePropertyEditorDefinition::<BloomSettings>::new());
+    container.insert(VecCollectionPropertyEditorDefinition::<EnvironmentVariable>::new());
+    container.insert(InspectablePropertyEditorDefinition::<EnvironmentVariable>::new());
+    container.insert(VecCollectionPropertyEditorDefinition::<BuildProfile>::new());
+    container.insert(InspectablePropertyEditorDefinition::<BuildProfile>::new());
+    container.insert(VecCollectionPropertyEditorDefinition::<CommandDescriptor>::new());
+    container.insert(InspectablePropertyEditorDefinition::<CommandDescriptor>::new());
+    container.insert(HotKeyPropertyEditorDefinition);
+
+    container.insert(VertexBufferPropertyEditorDefinition);
+    container.insert(TriangleBufferPropertyEditorDefinition);
 
     reg_node_handle_editors!(
         container,

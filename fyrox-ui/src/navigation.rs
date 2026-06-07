@@ -24,21 +24,17 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::{
-        pool::Handle, reflect::prelude::*, type_traits::prelude::*, variable::InheritableVariable,
-        visitor::prelude::*,
-    },
-    message::{KeyCode, MessageDirection, UiMessage},
+    core::{pool::Handle, reflect::prelude::*, variable::InheritableVariable, visitor::prelude::*},
+    message::{KeyCode, UiMessage},
     scroll_viewer::{ScrollViewer, ScrollViewerMessage},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, UiNode, UserInterface,
 };
 
 use fyrox_graph::SceneGraph;
-use std::ops::{Deref, DerefMut};
 
 /// A widget, that handles keyboard navigation on its descendant widgets using Tab key. It should
-/// be used as a root widget for an hierarchy, that should support Tab key navigation:
+/// be used as a root widget for a hierarchy, that should support Tab key navigation:
 ///
 /// ```rust
 /// use fyrox_ui::{
@@ -78,8 +74,8 @@ use std::ops::{Deref, DerefMut};
 ///
 /// This example shows how to create a simple confirmation dialog, that allows a user to use Tab key
 /// to cycle from one button to another. A focused button then can be "clicked" using Enter key.
-#[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "135d347b-5019-4743-906c-6df5c295a3be")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "135d347b-5019-4743-906c-6df5c295a3be")]
 #[reflect(derived_type = "UiNode")]
 pub struct NavigationLayer {
     /// Base widget of the navigation layer.
@@ -138,21 +134,17 @@ impl Control for NavigationLayer {
                 };
 
                 if let Some(entry) = tab_list.get(next_focused_node_index) {
-                    ui.send_message(WidgetMessage::focus(
-                        entry.handle,
-                        MessageDirection::ToWidget,
-                    ));
+                    ui.send(entry.handle, WidgetMessage::Focus);
 
                     if *self.bring_into_view {
                         // Find a parent scroll viewer.
                         if let Some((scroll_viewer, _)) =
-                            ui.find_component_up::<ScrollViewer>(entry.handle)
+                            ui.find_self_or_field_up::<ScrollViewer>(entry.handle)
                         {
-                            ui.send_message(ScrollViewerMessage::bring_into_view(
+                            ui.send(
                                 scroll_viewer,
-                                MessageDirection::ToWidget,
-                                entry.handle,
-                            ));
+                                ScrollViewerMessage::BringIntoView(entry.handle),
+                            );
                         }
                     }
                 }
@@ -178,12 +170,12 @@ impl NavigationLayerBuilder {
 
     /// Finishes navigation layer widget building and adds the instance to the user interface and
     /// returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<NavigationLayer> {
         let navigation_layer = NavigationLayer {
             widget: self.widget_builder.build(ctx),
             bring_into_view: self.bring_into_view.into(),
         };
-        ctx.add_node(UiNode::new(navigation_layer))
+        ctx.add(navigation_layer)
     }
 }
 

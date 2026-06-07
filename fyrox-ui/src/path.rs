@@ -23,28 +23,23 @@
 
 #![warn(missing_docs)]
 
+use crate::button::Button;
+use crate::file_browser::{FileSelector, PathFilter};
+use crate::text_box::TextBox;
 use crate::{
     button::{ButtonBuilder, ButtonMessage},
-    core::{pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
-    define_constructor,
+    core::{pool::Handle, reflect::prelude::*, variable::InheritableVariable, visitor::prelude::*},
     file_browser::{FileSelectorBuilder, FileSelectorMessage},
     grid::{Column, GridBuilder, Row},
-    message::{MessageDirection, UiMessage},
+    message::{MessageData, UiMessage},
     text::TextMessage,
     text_box::TextBoxBuilder,
     widget::{Widget, WidgetBuilder, WidgetMessage},
-    window::{WindowBuilder, WindowMessage, WindowTitle},
+    window::{WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
-
-use fyrox_core::uuid_provider;
-use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::{
-    ops::{Deref, DerefMut},
-    path::Path,
-    path::PathBuf,
-};
+use std::{path::Path, path::PathBuf};
 
 /// A set of messages for the [`PathEditor`] widget.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,13 +47,7 @@ pub enum PathEditorMessage {
     /// A message, that is used to set new value of the editor or to receive changes from the editor.
     Path(PathBuf),
 }
-
-impl PathEditorMessage {
-    define_constructor!(
-        /// Creates [`PathEditorMessage::Path`] message.
-        PathEditorMessage:Path => fn path(PathBuf), layout: false
-    );
-}
+impl MessageData for PathEditorMessage {}
 
 /// Path editor is a simple widget that has a text box, that shows the current path and a "..." button, that opens a file
 /// selector.
@@ -69,32 +58,37 @@ impl PathEditorMessage {
 ///
 /// ```rust
 /// # use fyrox_ui::{
-/// #     core::pool::Handle, path::PathEditorBuilder, widget::WidgetBuilder, BuildContext, UiNode,
+/// #     core::pool::Handle, path::{PathEditor, PathEditorBuilder}, widget::WidgetBuilder, BuildContext, UiNode,
 /// # };
 /// # use std::path::PathBuf;
 /// #
-/// fn create_path_editor(path: PathBuf, ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_path_editor(path: PathBuf, ctx: &mut BuildContext) -> Handle<PathEditor> {
 ///     PathEditorBuilder::new(WidgetBuilder::new())
 ///         .with_path(path)
 ///         .build(ctx)
 /// }
 /// ```
 ///
-/// To receive the changes, listen to [`PathEditorMessage::Path`] and check for its direction, it should be [`MessageDirection::FromWidget`].
-/// To set a new path value, send [`PathEditorMessage::Path`] message, but with [`MessageDirection::ToWidget`].
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+/// To receive the changes, listen to [`PathEditorMessage::Path`] and check for its direction, it should be [`crate::message::MessageDirection::FromWidget`].
+/// To set a new path value, send [`PathEditorMessage::Path`] message, but with [`crate::message::MessageDirection::ToWidget`].
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "51cfe7ec-ec31-4354-9578-047004b213a1"
+)]
 pub struct PathEditor {
     /// Base widget of the editor.
     pub widget: Widget,
-    /// A handle of the text field, that is used to show current path.
-    pub text_field: InheritableVariable<Handle<UiNode>>,
+    /// A handle of the text field, that is used to show the current path.
+    pub text_field: InheritableVariable<Handle<TextBox>>,
     /// A button, that opens a file selection.
-    pub select: InheritableVariable<Handle<UiNode>>,
-    /// Current file selector instance, could be [`Handle::NONE`] if the selector is closed.
-    pub selector: InheritableVariable<Handle<UiNode>>,
+    pub select: InheritableVariable<Handle<Button>>,
+    /// The current file selector instance, could be [`Handle::NONE`] if the selector is closed.
+    pub selector: InheritableVariable<Handle<FileSelector>>,
     /// Current path.
     pub path: InheritableVariable<PathBuf>,
+    /// Current filter that will be used in the file browser created by clicking on `...` button.
+    pub file_types: PathFilter,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for PathEditor {
@@ -103,6 +97,7 @@ impl ConstructorProvider<UiNode, UserInterface> for PathEditor {
             .with_variant("Path Editor", |ui| {
                 PathEditorBuilder::new(WidgetBuilder::new().with_name("Path Editor"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -110,8 +105,6 @@ impl ConstructorProvider<UiNode, UserInterface> for PathEditor {
 }
 
 crate::define_widget_deref!(PathEditor);
-
-uuid_provider!(PathEditor = "51cfe7ec-ec31-4354-9578-047004b213a1");
 
 impl Control for PathEditor {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -127,38 +120,33 @@ impl Control for PathEditor {
                         .open(false)
                         .with_title(WindowTitle::text("Select a Path")),
                     )
+                    .with_filter(self.file_types.clone())
                     .build(&mut ui.build_ctx()),
                 );
 
-                ui.send_message(FileSelectorMessage::path(
+                ui.send(
                     *self.selector,
-                    MessageDirection::ToWidget,
-                    (*self.path).clone(),
-                ));
-                ui.send_message(WindowMessage::open_modal(
+                    FileSelectorMessage::Path((*self.path).clone()),
+                );
+                ui.send(
                     *self.selector,
-                    MessageDirection::ToWidget,
-                    true,
-                    true,
-                ));
-                ui.send_message(FileSelectorMessage::focus_current_path(
-                    *self.selector,
-                    MessageDirection::ToWidget,
-                ));
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Center,
+                        modal: true,
+                        focus_content: true,
+                    },
+                );
+                ui.send(*self.selector, FileSelectorMessage::FocusCurrentPath);
             }
-        } else if let Some(PathEditorMessage::Path(path)) = message.data() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-                && &*self.path != path
-            {
+        } else if let Some(PathEditorMessage::Path(path)) = message.data_for(self.handle) {
+            if &*self.path != path {
                 self.path.set_value_and_mark_modified(path.clone());
 
-                ui.send_message(TextMessage::text(
+                ui.send(
                     *self.text_field,
-                    MessageDirection::ToWidget,
-                    path.to_string_lossy().to_string(),
-                ));
-                ui.send_message(message.reverse());
+                    TextMessage::Text(path.to_string_lossy().to_string()),
+                );
+                ui.try_send_response(message);
             }
         }
     }
@@ -166,16 +154,8 @@ impl Control for PathEditor {
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
         if let Some(FileSelectorMessage::Commit(path)) = message.data() {
             if message.destination() == *self.selector && &*self.path != path {
-                ui.send_message(WidgetMessage::remove(
-                    *self.selector,
-                    MessageDirection::ToWidget,
-                ));
-
-                ui.send_message(PathEditorMessage::path(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    path.clone(),
-                ));
+                ui.send(*self.selector, WidgetMessage::Remove);
+                ui.send(self.handle, PathEditorMessage::Path(path.clone()));
             }
         }
     }
@@ -185,6 +165,7 @@ impl Control for PathEditor {
 pub struct PathEditorBuilder {
     widget_builder: WidgetBuilder,
     path: PathBuf,
+    file_types: PathFilter,
 }
 
 impl PathEditorBuilder {
@@ -193,6 +174,7 @@ impl PathEditorBuilder {
         Self {
             widget_builder,
             path: Default::default(),
+            file_types: Default::default(),
         }
     }
 
@@ -202,8 +184,14 @@ impl PathEditorBuilder {
         self
     }
 
+    /// Sets a filter that will be used in the file browser created by clicking on `...` button.
+    pub fn with_file_types(mut self, filter: PathFilter) -> Self {
+        self.file_types = filter;
+        self
+    }
+
     /// Finishes widget building and adds it to the user interface returning a handle to the instance.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<PathEditor> {
         let text_field;
         let select;
         let grid = GridBuilder::new(
@@ -236,7 +224,7 @@ impl PathEditorBuilder {
         .add_column(Column::auto())
         .build(ctx);
 
-        let canvas = PathEditor {
+        let path_editor = PathEditor {
             widget: self
                 .widget_builder
                 .with_child(grid)
@@ -246,8 +234,9 @@ impl PathEditorBuilder {
             select: select.into(),
             selector: Default::default(),
             path: self.path.into(),
+            file_types: self.file_types,
         };
-        ctx.add_node(UiNode::new(canvas))
+        ctx.add(path_editor)
     }
 }
 

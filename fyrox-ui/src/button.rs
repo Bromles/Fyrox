@@ -22,33 +22,28 @@
 
 #![warn(missing_docs)]
 
+use crate::message::MessageData;
 use crate::style::StyledProperty;
 use crate::{
     border::BorderBuilder,
-    core::{
-        pool::Handle, reflect::prelude::*, type_traits::prelude::*, variable::InheritableVariable,
-        visitor::prelude::*,
-    },
+    core::{pool::Handle, reflect::prelude::*, variable::InheritableVariable, visitor::prelude::*},
     decorator::DecoratorBuilder,
-    define_constructor,
     font::FontResource,
-    message::{KeyCode, MessageDirection, UiMessage},
+    message::{KeyCode, UiMessage},
     style::{resource::StyleResourceExt, Style},
     text::TextBuilder,
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+use fyrox_core::pool::ObjectOrVariant;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut},
-};
+use std::cell::RefCell;
 
 /// Messages that can be emitted by [`Button`] widget (or can be sent to the widget).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ButtonMessage {
-    /// Emitted by the button widget when it was clicked by any mouse button. Click is a press with a following release
+    /// Emitted by the button widget when it was clicked by any mouse button. Click event is a press with the following release
     /// of a mouse button withing the button bounds. This message can be only emitted, not sent. See [`Button`] docs
     /// for usage examples.
     Click,
@@ -60,39 +55,21 @@ pub enum ButtonMessage {
     /// A flag, that defines whether the button should repeat click message when being hold or not.
     RepeatClicksOnHold(bool),
 }
-
-impl ButtonMessage {
-    define_constructor!(
-        /// A shortcut method to create [`ButtonMessage::Click`] message.
-        ButtonMessage:Click => fn click(), layout: false
-    );
-    define_constructor!(
-        /// A shortcut method to create [`ButtonMessage::Content`] message.
-        ButtonMessage:Content => fn content(ButtonContent), layout: false
-    );
-    define_constructor!(
-        /// A shortcut method to create [`ButtonMessage::RepeatInterval`] message.
-        ButtonMessage:RepeatInterval => fn repeat_interval(f32), layout: false
-    );
-    define_constructor!(
-        /// A shortcut method to create [`ButtonMessage::RepeatClicksOnHold`] message.
-        ButtonMessage:RepeatClicksOnHold => fn repeat_clicks_on_hold(bool), layout: false
-    );
-}
+impl MessageData for ButtonMessage {}
 
 /// Defines a clickable widget with arbitrary content. The content could be any kind of widget, usually it
 /// is just a text or an image.
 ///
 /// ## Examples
 ///
-/// To create a simple button with text you should do something like this:
+/// To create a simple button with text, you should do something like this:
 ///
 /// ```rust
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     button::ButtonBuilder, widget::WidgetBuilder, UiNode, UserInterface
+/// #     button::{ButtonBuilder, Button}, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
-/// fn create_button(ui: &mut UserInterface) -> Handle<UiNode> {
+/// fn create_button(ui: &mut UserInterface) -> Handle<Button> {
 ///     ButtonBuilder::new(WidgetBuilder::new())
 ///         .with_text("Click me!")
 ///         .build(&mut ui.build_ctx())
@@ -103,9 +80,9 @@ impl ButtonMessage {
 /// queue and check if there's [`ButtonMessage::Click`] message from your button:
 ///
 /// ```rust
-/// # use fyrox_ui::{button::ButtonMessage, core::pool::Handle, message::UiMessage};
+/// # use fyrox_ui::{button::ButtonMessage, core::pool::Handle, message::UiMessage, UiNode};
 /// fn on_ui_message(message: &UiMessage) {
-/// #   let your_button_handle = Handle::NONE;
+/// #   let your_button_handle = Handle::<UiNode>::NONE;
 ///     if let Some(ButtonMessage::Click) = message.data() {
 ///         if message.destination() == your_button_handle {
 ///             println!("{} button was clicked!", message.destination());
@@ -113,8 +90,8 @@ impl ButtonMessage {
 ///     }
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "2abcf12b-2f19-46da-b900-ae8890f7c9c6")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "2abcf12b-2f19-46da-b900-ae8890f7c9c6")]
 #[reflect(derived_type = "UiNode")]
 pub struct Button {
     /// Base widget of the button.
@@ -162,6 +139,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Button {
                         .with_name("Button"),
                 )
                 .build(&mut ui.build_ctx())
+                .to_base()
                 .into()
             })
             .with_group("Input")
@@ -176,10 +154,7 @@ impl Control for Button {
         if let Some(repeat_timer) = &mut *repeat_timer {
             *repeat_timer -= dt;
             if *repeat_timer <= 0.0 {
-                ui.send_message(ButtonMessage::click(
-                    self.handle(),
-                    MessageDirection::FromWidget,
-                ));
+                ui.post(self.handle(), ButtonMessage::Click);
                 *repeat_timer = *self.repeat_interval;
             }
         }
@@ -211,63 +186,45 @@ impl Control for Button {
                         // close button on a tab.
                         if self.screen_bounds().contains(ui.cursor_position()) && !message.handled()
                         {
-                            ui.send_message(ButtonMessage::click(
-                                self.handle(),
-                                MessageDirection::FromWidget,
-                            ));
+                            ui.post(self.handle(), ButtonMessage::Click);
                         }
                         ui.release_mouse_capture();
                         message.set_handled(true);
                         self.repeat_timer.replace(None);
                     }
-                    WidgetMessage::KeyDown(key_code) => {
+                    WidgetMessage::KeyDown(key_code)
                         if !message.handled()
-                            && (*key_code == KeyCode::Enter || *key_code == KeyCode::Space)
-                        {
-                            ui.send_message(ButtonMessage::click(
-                                self.handle,
-                                MessageDirection::FromWidget,
-                            ));
-                            message.set_handled(true);
-                        }
+                            && (*key_code == KeyCode::Enter
+                                || *key_code == KeyCode::NumpadEnter
+                                || *key_code == KeyCode::Space) =>
+                    {
+                        ui.post(self.handle, ButtonMessage::Click);
+                        message.set_handled(true);
                     }
                     _ => (),
                 }
             }
-        } else if let Some(msg) = message.data::<ButtonMessage>() {
-            if message.destination() == self.handle() {
-                match msg {
-                    ButtonMessage::Click => (),
-                    ButtonMessage::Content(content) => {
-                        if self.content.is_some() {
-                            ui.send_message(WidgetMessage::remove(
-                                *self.content,
-                                MessageDirection::ToWidget,
-                            ));
-                        }
-                        self.content
-                            .set_value_and_mark_modified(content.build(&mut ui.build_ctx()));
-                        ui.send_message(WidgetMessage::link(
-                            *self.content,
-                            MessageDirection::ToWidget,
-                            *self.decorator,
-                        ));
+        } else if let Some(msg) = message.data_for::<ButtonMessage>(self.handle()) {
+            match msg {
+                ButtonMessage::Click => (),
+                ButtonMessage::Content(content) => {
+                    if self.content.is_some() {
+                        ui.send(*self.content, WidgetMessage::Remove);
                     }
-                    ButtonMessage::RepeatInterval(interval) => {
-                        if *self.repeat_interval != *interval
-                            && message.direction() == MessageDirection::ToWidget
-                        {
-                            *self.repeat_interval = *interval;
-                            ui.send_message(message.reverse());
-                        }
+                    self.content
+                        .set_value_and_mark_modified(content.build(&mut ui.build_ctx()));
+                    ui.send(*self.content, WidgetMessage::LinkWith(*self.decorator));
+                }
+                ButtonMessage::RepeatInterval(interval) => {
+                    if *self.repeat_interval != *interval {
+                        *self.repeat_interval = *interval;
+                        ui.try_send_response(message);
                     }
-                    ButtonMessage::RepeatClicksOnHold(repeat_clicks) => {
-                        if *self.repeat_clicks_on_hold != *repeat_clicks
-                            && message.direction() == MessageDirection::ToWidget
-                        {
-                            *self.repeat_clicks_on_hold = *repeat_clicks;
-                            ui.send_message(message.reverse());
-                        }
+                }
+                ButtonMessage::RepeatClicksOnHold(repeat_clicks) => {
+                    if *self.repeat_clicks_on_hold != *repeat_clicks {
+                        *self.repeat_clicks_on_hold = *repeat_clicks;
+                        ui.try_send_response(message);
                     }
                 }
             }
@@ -290,7 +247,7 @@ pub enum ButtonContent {
         /// Font size of the text. Default is 14.0 (defined by default style of the crate).
         size: Option<StyledProperty<f32>>,
     },
-    /// Arbitrary widget handle. It could be any widget handle, for example a handle of [`crate::image::Image`]
+    /// Arbitrary widget handle. It could be any widget handle, for example, a handle of [`crate::image::Image`]
     /// widget.
     Node(Handle<UiNode>),
 }
@@ -343,7 +300,8 @@ impl ButtonContent {
                     size.clone()
                         .unwrap_or_else(|| ctx.style.property(Style::FONT_SIZE)),
                 )
-                .build(ctx),
+                .build(ctx)
+                .to_base(),
             Self::Node(node) => *node,
         }
     }
@@ -356,6 +314,15 @@ pub struct ButtonBuilder {
     back: Option<Handle<UiNode>>,
     repeat_interval: f32,
     repeat_clicks_on_hold: bool,
+}
+
+fn make_decorator_builder(ctx: &mut BuildContext) -> DecoratorBuilder {
+    DecoratorBuilder::new(
+        BorderBuilder::new(WidgetBuilder::new())
+            .with_pad_by_corner_radius(false)
+            .with_corner_radius(ctx.style.property(Button::CORNER_RADIUS))
+            .with_stroke_thickness(ctx.style.property(Button::BORDER_THICKNESS)),
+    )
 }
 
 impl ButtonBuilder {
@@ -394,16 +361,38 @@ impl ButtonBuilder {
     }
 
     /// Sets the content of the button to be [`ButtonContent::Node`] (arbitrary widget handle).
-    pub fn with_content(mut self, node: Handle<UiNode>) -> Self {
-        self.content = Some(ButtonContent::Node(node));
+    pub fn with_content(mut self, node: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = Some(ButtonContent::Node(node.to_base()));
         self
     }
 
-    /// Specifies the widget that will be used as a content holder of the button. By default it is an
+    /// Specifies the widget that will be used as a content holder of the button. By default, it is an
     /// instance of [`crate::decorator::Decorator`] widget. Usually, this widget should respond to mouse
     /// events to highlight button state (hovered, pressed, etc.)
-    pub fn with_back(mut self, decorator: Handle<UiNode>) -> Self {
-        self.back = Some(decorator);
+    pub fn with_back(mut self, decorator: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.back = Some(decorator.to_base());
+        self
+    }
+
+    /// Sets a new decorator background with `ok` style (green color by default).
+    pub fn with_ok_back(mut self, ctx: &mut BuildContext) -> Self {
+        self.back = Some(
+            make_decorator_builder(ctx)
+                .with_ok_style(ctx)
+                .build(ctx)
+                .to_base(),
+        );
+        self
+    }
+
+    /// Sets a new decorator background with `cancel` style (red color by default).
+    pub fn with_cancel_back(mut self, ctx: &mut BuildContext) -> Self {
+        self.back = Some(
+            make_decorator_builder(ctx)
+                .with_cancel_style(ctx)
+                .build(ctx)
+                .to_base(),
+        );
         self
     }
 
@@ -421,30 +410,22 @@ impl ButtonBuilder {
     }
 
     /// Finishes building a button.
-    pub fn build_node(self, ctx: &mut BuildContext) -> UiNode {
+    pub fn build_button(self, ctx: &mut BuildContext) -> Button {
         let content = self.content.map(|c| c.build(ctx)).unwrap_or_default();
         let back = self.back.unwrap_or_else(|| {
-            DecoratorBuilder::new(
-                BorderBuilder::new(
-                    WidgetBuilder::new()
-                        .with_foreground(ctx.style.property(Style::BRUSH_DARKER))
-                        .with_child(content),
-                )
-                .with_pad_by_corner_radius(false)
-                .with_corner_radius(ctx.style.property(Button::CORNER_RADIUS))
-                .with_stroke_thickness(ctx.style.property(Button::BORDER_THICKNESS)),
-            )
-            .with_normal_brush(ctx.style.property(Style::BRUSH_LIGHT))
-            .with_hover_brush(ctx.style.property(Style::BRUSH_LIGHTER))
-            .with_pressed_brush(ctx.style.property(Style::BRUSH_LIGHTEST))
-            .build(ctx)
+            make_decorator_builder(ctx)
+                .with_normal_brush(ctx.style.property(Style::BRUSH_LIGHT))
+                .with_hover_brush(ctx.style.property(Style::BRUSH_LIGHTER))
+                .with_pressed_brush(ctx.style.property(Style::BRUSH_LIGHTEST))
+                .build(ctx)
+                .to_base()
         });
 
         if content.is_some() {
             ctx.link(content, back);
         }
 
-        UiNode::new(Button {
+        Button {
             widget: self
                 .widget_builder
                 .with_accepts_input(true)
@@ -456,13 +437,18 @@ impl ButtonBuilder {
             repeat_interval: self.repeat_interval.into(),
             repeat_clicks_on_hold: self.repeat_clicks_on_hold.into(),
             repeat_timer: Default::default(),
-        })
+        }
+    }
+
+    /// Finishes building a button.
+    pub fn build_node(self, ctx: &mut BuildContext) -> UiNode {
+        UiNode::new(self.build_button(ctx))
     }
 
     /// Finishes button build and adds to the user interface and returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        let node = self.build_node(ctx);
-        ctx.add_node(node)
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Button> {
+        let node = self.build_button(ctx);
+        ctx.add(node)
     }
 }
 

@@ -18,22 +18,23 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use fyrox_core::{reflect::prelude::*, type_traits::prelude::*};
+use fyrox_core::reflect::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 
 pub mod build;
+pub mod export;
 
-#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "55e7651e-8840-4c81-aa93-3f01348855e6")]
+#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default, Reflect)]
+#[reflect(type_uuid = "55e7651e-8840-4c81-aa93-3f01348855e6")]
 pub struct EnvironmentVariable {
     pub name: String,
     pub value: String,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "67b93136-17fe-4776-b5f0-f4a9ef3d8972")]
+#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default, Reflect)]
+#[reflect(type_uuid = "67b93136-17fe-4776-b5f0-f4a9ef3d8972")]
 pub struct CommandDescriptor {
     pub command: String,
     pub args: Vec<String>,
@@ -73,15 +74,14 @@ impl Display for CommandDescriptor {
     }
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "1a9443df-bf75-42fb-93d3-860a0249168a")]
+#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default, Reflect)]
+#[reflect(type_uuid = "1a9443df-bf75-42fb-93d3-860a0249168a")]
 pub struct BuildProfile {
     pub name: String,
-    #[reflect(description = "A set of commands that will be used to build your game.")]
+    /// A set of commands that will be used to build your game.
     pub build_commands: Vec<CommandDescriptor>,
-    #[reflect(description = "A set of commands that will be used to run your game. \
-        This set of commands will be executed right after build commands (if the \
-        build was successful)")]
+    /// A set of commands that will be used to run your game. This set of commands will be executed
+    /// right after build commands (if the build was successful).
     pub run_command: CommandDescriptor,
 }
 

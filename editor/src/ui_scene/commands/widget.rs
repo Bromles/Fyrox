@@ -21,7 +21,7 @@
 use crate::command::{CommandContext, CommandTrait};
 use crate::fyrox::{
     core::{algebra::Vector2, log::Log, pool::Handle, reflect::Reflect},
-    graph::SceneGraphNode,
+    graph::NodeWrapper,
     gui::{UiNode, UserInterface},
 };
 use crate::ui_scene::commands::UiSceneContext;
@@ -104,20 +104,19 @@ impl CommandTrait for RevertWidgetPropertyCommand {
         // If the property was modified, then simply set it to previous value to make it modified again.
         if let Some(old_value) = self.value.take() {
             let mut old_value = Some(old_value);
-            context
-                .get_mut::<UiSceneContext>()
-                .ui
-                .node_mut(self.handle)
-                .as_reflect_mut(&mut |node| {
-                    node.set_field_by_path(&self.path, old_value.take().unwrap(), &mut |result| {
-                        if result.is_err() {
-                            Log::err(format!(
-                                "Failed to revert property {}. Reason: no such property!",
-                                self.path
-                            ))
-                        }
-                    });
-                })
+            let node = context.get_mut::<UiSceneContext>().ui.node_mut(self.handle);
+            node.inner_mut().set_field_by_path(
+                &self.path,
+                old_value.take().unwrap(),
+                &mut |result| {
+                    if result.is_err() {
+                        Log::err(format!(
+                            "Failed to revert property {}. Reason: no such property!",
+                            self.path
+                        ))
+                    }
+                },
+            );
         }
     }
 }

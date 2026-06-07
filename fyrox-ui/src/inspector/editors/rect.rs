@@ -25,7 +25,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     numeric::NumericType,
@@ -76,11 +76,11 @@ where
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Rect<T>>()?;
 
-        Ok(PropertyEditorInstance::Simple {
-            editor: RectEditorBuilder::new(WidgetBuilder::new().with_height(36.0))
+        Ok(PropertyEditorInstance::simple(
+            RectEditorBuilder::new(WidgetBuilder::new().with_height(36.0))
                 .with_value(*value)
                 .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -88,10 +88,9 @@ where
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Rect<T>>()?;
-        Ok(Some(RectEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            *value,
+            RectEditorMessage::Value(*value),
         )))
     }
 
@@ -103,7 +102,7 @@ where
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(*value),
+                    action: FieldAction::object(*value),
                 });
             }
         }

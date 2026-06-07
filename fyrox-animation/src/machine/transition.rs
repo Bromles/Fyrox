@@ -25,15 +25,14 @@ use crate::{
     machine::{Parameter, ParameterContainer, State},
     Animation, AnimationContainer, EntityId,
 };
-use fyrox_core::uuid::{uuid, Uuid};
-use fyrox_core::{NameProvider, TypeUuidProvider};
-use std::any::{type_name, Any, TypeId};
+use fyrox_core::uuid::uuid;
+use fyrox_core::NameProvider;
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 macro_rules! define_two_args_node {
     ($(#[$meta:meta])* $name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Reflect, Visit)]
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq)]
         pub struct $name <T:EntityId> {
             /// Left argument.
             pub lhs: Box<LogicNode<T>>,
@@ -49,186 +48,28 @@ macro_rules! define_two_args_node {
                 }
             }
         }
-
-        impl<T:EntityId> Visit for $name<T> {
-            fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-                let mut guard = visitor.enter_region(name)?;
-
-                self.lhs.visit("Lhs", &mut guard)?;
-                self.rhs.visit("Rhs", &mut guard)?;
-
-                Ok(())
-            }
-        }
-
-        impl<T:EntityId> Reflect for $name<T> {
-            fn source_path() -> &'static str {
-                file!()
-            }
-
-            fn derived_types() -> &'static [TypeId] {
-                &[]
-            }
-
-            fn query_derived_types(&self) -> &'static [TypeId] {
-                Self::derived_types()
-            }
-
-            fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
-                Some(Box::new(self.clone()))
-            }
-
-            fn type_name(&self) -> &'static str {
-                type_name::<Self>()
-            }
-
-            fn doc(&self) -> &'static str {
-                ""
-            }
-
-            fn assembly_name(&self) -> &'static str {
-                env!("CARGO_PKG_NAME")
-            }
-
-            fn type_assembly_name() -> &'static str {
-                env!("CARGO_PKG_NAME")
-            }
-
-            fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
-                func(&[
-                    {
-                        static METADATA: FieldMetadata = FieldMetadata {
-                            name: "Lhs",
-                            display_name: "Lhs",
-                            description: "",
-                            tag: "",
-                            read_only: false,
-                            immutable_collection: false,
-                            min_value: None,
-                            max_value: None,
-                            step: None,
-                            precision: None,
-                            doc: "",
-                        };
-
-                        FieldRef {
-                            metadata: &METADATA,
-                            value: &*self.lhs,
-                        }
-                    },
-                    {
-                        static METADATA: FieldMetadata = FieldMetadata {
-                            name: "Rhs",
-                            display_name: "Rhs",
-                            description: "",
-                            tag: "",
-                            read_only: false,
-                            immutable_collection: false,
-                            min_value: None,
-                            max_value: None,
-                            step: None,
-                            precision: None,doc: "",
-                        };
-
-                        FieldRef {
-                            metadata: &METADATA,
-                            value: &*self.rhs,
-                        }
-                    },
-                ])
-            }
-
-            fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
-                func(&mut [
-                    {
-                        static METADATA: FieldMetadata = FieldMetadata {
-                            name: "Lhs",
-                            display_name: "Lhs",
-                            description: "",
-                            tag: "",
-                            read_only: false,
-                            immutable_collection: false,
-                            min_value: None,
-                            max_value: None,
-                            step: None,
-                            precision: None,
-                            doc: "",
-                        };
-
-                        FieldMut {
-                            metadata: &METADATA,
-                            value: &mut *self.lhs,
-                        }
-                    },
-                    {
-                        static METADATA: FieldMetadata = FieldMetadata {
-                            name: "Rhs",
-                            display_name: "Rhs",
-                            description: "",
-                            tag: "",
-                            read_only: false,
-                            immutable_collection: false,
-                            min_value: None,
-                            max_value: None,
-                            step: None,
-                            precision: None,doc: "",
-                        };
-
-                        FieldMut {
-                            metadata: &METADATA,
-                            value: &mut *self.rhs,
-                        }
-                    },
-                ])
-            }
-
-
-            fn into_any(self: Box<Self>) -> Box<dyn Any> {
-                self
-            }
-
-            fn as_any(&self, func: &mut dyn FnMut(&dyn ::core::any::Any)) {
-                func(self)
-            }
-
-            fn as_any_mut(&mut self, func: &mut dyn FnMut(&mut dyn ::core::any::Any)) {
-                func(self)
-            }
-
-            fn as_reflect(&self, func: &mut dyn FnMut(&dyn Reflect)) {
-                func(self)
-            }
-
-            fn as_reflect_mut(&mut self, func: &mut dyn FnMut(&mut dyn Reflect)) {
-                func(self)
-            }
-
-            fn set(
-                &mut self,
-                value: Box<dyn Reflect>,
-            ) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-                let this = std::mem::replace(self, value.take()?);
-                Ok(Box::new(this))
-            }
-        }
     };
 }
 
 define_two_args_node!(
     /// Calculates logical AND between two arguments. Output value will be `true` iff both of the arguments is `true`.
+    #[reflect(type_uuid = "cd0e3ec8-54d0-40da-b182-d7f8e9df7ed6")]
     AndNode
 );
 define_two_args_node!(
     /// Calculates logical OR between two arguments. Output value will be `true` iff any of the arguments is `true`.
+    #[reflect(type_uuid = "ed98d148-c6d2-45a3-b322-63dc5b09f396")]
     OrNode
 );
 define_two_args_node!(
     /// Calculates logical XOR (excluding OR) between two arguments. Output value will be `true` iff the arguments differ.
+    #[reflect(type_uuid = "7b853d2e-3659-4060-a5be-2fae7a68431b")]
     XorNode
 );
 
 /// Calculates logical NOT of an argument. Output value will be `true` if the value of the argument is `false`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect, Visit)]
+#[reflect(type_uuid = "3ee5dca4-8509-4251-8591-7adb4a90264b")]
 pub struct NotNode<T: EntityId> {
     /// Argument to be negated.
     pub lhs: Box<LogicNode<T>>,
@@ -239,121 +80,6 @@ impl<T: EntityId> Default for NotNode<T> {
         Self {
             lhs: Box::new(LogicNode::Parameter(Default::default())),
         }
-    }
-}
-
-impl<T: EntityId> Visit for NotNode<T> {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        let mut guard = visitor.enter_region(name)?;
-
-        self.lhs.visit("Lhs", &mut guard)?;
-
-        Ok(())
-    }
-}
-
-impl<T: EntityId> Reflect for NotNode<T> {
-    fn source_path() -> &'static str {
-        file!()
-    }
-
-    fn derived_types() -> &'static [TypeId] {
-        &[]
-    }
-
-    fn query_derived_types(&self) -> &'static [TypeId] {
-        Self::derived_types()
-    }
-
-    fn type_name(&self) -> &'static str {
-        type_name::<Self>()
-    }
-
-    fn doc(&self) -> &'static str {
-        ""
-    }
-
-    fn assembly_name(&self) -> &'static str {
-        env!("CARGO_PKG_NAME")
-    }
-
-    fn type_assembly_name() -> &'static str {
-        env!("CARGO_PKG_NAME")
-    }
-
-    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
-        func(&[{
-            static METADATA: FieldMetadata = FieldMetadata {
-                name: "Lhs",
-                display_name: "Lhs",
-                description: "",
-                tag: "",
-                read_only: false,
-                immutable_collection: false,
-                min_value: None,
-                max_value: None,
-                step: None,
-                precision: None,
-                doc: "",
-            };
-
-            FieldRef {
-                metadata: &METADATA,
-                value: &*self.lhs,
-            }
-        }])
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
-        func(&mut [{
-            static METADATA: FieldMetadata = FieldMetadata {
-                name: "Lhs",
-                display_name: "Lhs",
-                description: "",
-                tag: "",
-                read_only: false,
-                immutable_collection: false,
-                min_value: None,
-                max_value: None,
-                step: None,
-                precision: None,
-                doc: "",
-            };
-
-            FieldMut {
-                metadata: &METADATA,
-                value: &mut *self.lhs,
-            }
-        }])
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-
-    fn as_any(&self, func: &mut dyn FnMut(&dyn ::core::any::Any)) {
-        func(self)
-    }
-
-    fn as_any_mut(&mut self, func: &mut dyn FnMut(&mut dyn ::core::any::Any)) {
-        func(self)
-    }
-
-    fn as_reflect(&self, func: &mut dyn FnMut(&dyn Reflect)) {
-        func(self)
-    }
-
-    fn as_reflect_mut(&mut self, func: &mut dyn FnMut(&mut dyn Reflect)) {
-        func(self)
-    }
-
-    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-        let this = std::mem::replace(self, value.take()?);
-        Ok(Box::new(this))
-    }
-
-    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
-        Some(Box::new(self.clone()))
     }
 }
 
@@ -384,6 +110,7 @@ impl<T: EntityId> Reflect for NotNode<T> {
 /// assert_eq!(transition_logic.calculate_value(&parameters, &AnimationContainer::default()), true);
 /// ```
 #[derive(Debug, Visit, Clone, Reflect, PartialEq, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "98a5b767-5560-4ed7-ad40-1625a8868e39")]
 pub enum LogicNode<T: EntityId> {
     /// Fetches a value of `Rule` parameter and returns its value. `false` if the parameter is not found.
     Parameter(String),
@@ -397,12 +124,6 @@ pub enum LogicNode<T: EntityId> {
     Not(NotNode<T>),
     /// Returns `true` if the animation has ended, `false` - otherwise.
     IsAnimationEnded(Handle<Animation<T>>),
-}
-
-impl<T: EntityId> TypeUuidProvider for LogicNode<T> {
-    fn type_uuid() -> Uuid {
-        uuid!("98a5b767-5560-4ed7-ad40-1625a8868e39")
-    }
 }
 
 impl<T: EntityId> Default for LogicNode<T> {
@@ -442,23 +163,22 @@ impl<T: EntityId> LogicNode<T> {
                 lhs_value ^ rhs_value
             }
             LogicNode::Not(node) => !node.lhs.calculate_value(parameters, animations),
-            LogicNode::IsAnimationEnded(animation) => {
-                animations.try_get(*animation).is_none_or(|a| a.has_ended())
-            }
+            LogicNode::IsAnimationEnded(animation) => animations
+                .try_get(*animation)
+                .ok()
+                .is_none_or(|a| a.has_ended()),
         }
     }
 }
 
 /// Transition is a connection between two states with a rule that defines possibility of actual transition with blending.
 #[derive(Default, Debug, Clone, Reflect, PartialEq)]
+#[reflect(type_uuid = "2c0bb5f4-4496-4a8b-a719-c0c48650dce6")]
 pub struct Transition<T: EntityId> {
     /// The name of the transition, it is used for debug output.
-    #[reflect(description = "The name of the transition, it is used for debug output.")]
     pub(crate) name: String,
 
-    /// Total amount of time to transition from `src` to `dst` state.
-    #[reflect(description = "Total amount of time (in seconds) to transition \
-        from source to destination state")]
+    /// Total amount of time (in seconds) to transition from source to destination state.
     pub(crate) transition_time: f32,
 
     pub(crate) elapsed_time: f32,
@@ -469,9 +189,7 @@ pub struct Transition<T: EntityId> {
     #[reflect(read_only)]
     pub(crate) dest: Handle<State<T>>,
 
-    #[reflect(
-        description = "Computational graph that can use any amount of Rule parameters to calculate transition value."
-    )]
+    /// Computational graph that can use any amount of Rule parameters to calculate transition value.
     pub(crate) condition: LogicNode<T>,
 
     /// 0 - evaluates `src` pose, 1 - `dest`, 0..1 - blends `src` and `dest`

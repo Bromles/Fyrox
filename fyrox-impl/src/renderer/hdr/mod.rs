@@ -18,42 +18,37 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::resources::RendererResources;
 use crate::{
+    asset::manager::ResourceManager,
     core::{
         algebra::{Matrix4, Vector2},
         color::Color,
         math::Rect,
         value_as_u8_slice, ImmutableString,
     },
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, DrawCallStatistics, GpuFrameBuffer, ReadTarget},
+        gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
+        server::GraphicsServer,
+    },
     renderer::{
+        bloom::BloomRenderer,
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             texture::TextureCache,
             uniform::UniformBufferCache,
         },
-        framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, DrawCallStatistics, GpuFrameBuffer},
-            gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
-            server::GraphicsServer,
-        },
         hdr::{adaptation::AdaptationChain, luminance::luminance_evaluator::LuminanceEvaluator},
-        make_viewport_matrix, RenderPassStatistics,
+        make_viewport_matrix,
+        resources::RendererResources,
+        LuminanceCalculationMethod, QualitySettings, RenderPassStatistics,
     },
     scene::camera::{ColorGradingLut, Exposure},
 };
-use fyrox_graphics::framebuffer::ReadTarget;
-use fyrox_resource::manager::ResourceManager;
 
 mod adaptation;
 mod luminance;
-
-#[allow(dead_code)] // TODO
-pub enum LuminanceCalculationMethod {
-    Histogram,
-    DownSampling,
-}
 
 pub struct LumBuffer {
     framebuffer: GpuFrameBuffer,
@@ -93,11 +88,33 @@ pub struct HighDynamicRangeRenderer {
     downscale_chain: [LumBuffer; 6],
     frame_luminance: LumBuffer,
     stub_lut: GpuTexture,
-    lum_calculation_method: LuminanceCalculationMethod,
+    /// Bloom contains only overly bright pixels that create light
+    /// bleeding effect (glow effect).
+    bloom_renderer: BloomRenderer,
+}
+
+pub struct HdrRendererArgs<'a> {
+    pub server: &'a dyn GraphicsServer,
+    pub hdr_scene_frame: &'a GpuTexture,
+    pub ldr_framebuffer: &'a GpuFrameBuffer,
+    pub viewport: Rect<i32>,
+    pub speed: f32,
+    pub exposure: Exposure,
+    pub color_grading_lut: Option<&'a ColorGradingLut>,
+    pub use_color_grading: bool,
+    pub texture_cache: &'a mut TextureCache,
+    pub uniform_buffer_cache: &'a mut UniformBufferCache,
+    pub renderer_resources: &'a RendererResources,
+    pub resource_manager: &'a ResourceManager,
+    pub settings: &'a QualitySettings,
 }
 
 impl HighDynamicRangeRenderer {
-    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
+    pub fn new(
+        width: usize,
+        height: usize,
+        server: &dyn GraphicsServer,
+    ) -> Result<Self, FrameworkError> {
         Ok(Self {
             frame_luminance: LumBuffer::new(server, 64)?,
             downscale_chain: [
@@ -120,16 +137,19 @@ impl HighDynamicRangeRenderer {
                 data: Some(&[0, 0, 0]),
                 ..Default::default()
             })?,
-            lum_calculation_method: LuminanceCalculationMethod::DownSampling,
+            bloom_renderer: BloomRenderer::new(server, width, height)?,
         })
     }
 
     fn calculate_frame_luminance(
         &self,
+        server: &dyn GraphicsServer,
         scene_frame: &GpuTexture,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<DrawCallStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("CalculateFrameLuminance");
+
         self.frame_luminance.clear();
 
         let frame_matrix = self.frame_luminance.matrix();
@@ -167,12 +187,16 @@ impl HighDynamicRangeRenderer {
 
     fn calculate_avg_frame_luminance(
         &self,
+        server: &dyn GraphicsServer,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
+        luminance_calculation_method: LuminanceCalculationMethod,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("CalculateAvgFrameLuminance");
+
         let mut stats = RenderPassStatistics::default();
 
-        match self.lum_calculation_method {
+        match luminance_calculation_method {
             LuminanceCalculationMethod::Histogram => {
                 // TODO: Cloning memory from GPU to CPU is slow, but since the engine is limited
                 // by macOS's OpenGL 4.1 support and lack of compute shaders we'll build histogram
@@ -201,20 +225,22 @@ impl HighDynamicRangeRenderer {
                 )?;
             }
             LuminanceCalculationMethod::DownSampling => {
-                let mut prev_luminance = self.frame_luminance.texture();
+                let mut src = &self.frame_luminance;
 
-                for lum_buffer in self.downscale_chain.iter() {
-                    let inv_size = Vector2::repeat(1.0 / lum_buffer.size as f32);
-                    let matrix = lum_buffer.matrix();
+                for dest in self.downscale_chain.iter() {
+                    let src_inv_size = Vector2::repeat(1.0 / src.size as f32);
+                    let src_texture = src.texture();
+
+                    let matrix = dest.matrix();
 
                     let properties = PropertyGroup::from([
                         property("worldViewProjection", &matrix),
-                        property("invSize", &inv_size),
+                        property("invSize", &src_inv_size),
                     ]);
                     let material = RenderMaterial::from([
                         binding(
                             "lumSampler",
-                            (prev_luminance, &renderer_resources.nearest_clamp_sampler),
+                            (src_texture, &renderer_resources.linear_clamp_sampler),
                         ),
                         binding("properties", &properties),
                     ]);
@@ -222,16 +248,16 @@ impl HighDynamicRangeRenderer {
                     stats += renderer_resources.shaders.hdr_downscale.run_pass(
                         1,
                         &ImmutableString::new("Primary"),
-                        &lum_buffer.framebuffer,
+                        &dest.framebuffer,
                         &renderer_resources.quad,
-                        Rect::new(0, 0, lum_buffer.size as i32, lum_buffer.size as i32),
+                        Rect::new(0, 0, dest.size as i32, dest.size as i32),
                         &material,
                         uniform_buffer_cache,
                         Default::default(),
                         None,
                     )?;
 
-                    prev_luminance = lum_buffer.texture();
+                    src = dest;
                 }
             }
         }
@@ -241,15 +267,17 @@ impl HighDynamicRangeRenderer {
 
     fn adaptation(
         &self,
-        dt: f32,
+        server: &dyn GraphicsServer,
+        speed: f32,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<DrawCallStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("Adaptation");
+
         let ctx = self.adaptation_chain.begin();
         let viewport = Rect::new(0, 0, ctx.lum_buffer.size as i32, ctx.lum_buffer.size as i32);
         let matrix = ctx.lum_buffer.matrix();
 
-        let speed = 0.3 * dt;
         let properties = PropertyGroup::from([
             property("worldViewProjection", &matrix),
             property("speed", &speed),
@@ -282,21 +310,25 @@ impl HighDynamicRangeRenderer {
         )
     }
 
-    fn map_hdr_to_ldr(
-        &self,
-        server: &dyn GraphicsServer,
-        hdr_scene_frame: &GpuTexture,
-        bloom_texture: &GpuTexture,
-        ldr_framebuffer: &GpuFrameBuffer,
-        viewport: Rect<i32>,
-        exposure: Exposure,
-        color_grading_lut: Option<&ColorGradingLut>,
-        use_color_grading: bool,
-        texture_cache: &mut TextureCache,
-        uniform_buffer_cache: &mut UniformBufferCache,
-        renderer_resources: &RendererResources,
-        resource_manager: &ResourceManager,
-    ) -> Result<DrawCallStatistics, FrameworkError> {
+    fn map_hdr_to_ldr(&self, args: HdrRendererArgs) -> Result<DrawCallStatistics, FrameworkError> {
+        let HdrRendererArgs {
+            server,
+            hdr_scene_frame,
+            ldr_framebuffer,
+            viewport,
+            exposure,
+            color_grading_lut,
+            use_color_grading,
+            texture_cache,
+            uniform_buffer_cache,
+            renderer_resources,
+            resource_manager,
+            settings,
+            ..
+        } = args;
+
+        let _debug_scope = args.server.begin_scope("ToneMap");
+
         let frame_matrix = make_viewport_matrix(viewport);
 
         let color_grading_lut_tex = color_grading_lut
@@ -307,20 +339,24 @@ impl HighDynamicRangeRenderer {
             })
             .unwrap_or((&self.stub_lut, &renderer_resources.nearest_clamp_sampler));
 
-        let (is_auto, key_value, min_luminance, max_luminance, fixed_exposure) = match exposure {
+        let (is_auto, min_luminance, max_luminance, fixed_exposure) = match exposure {
             Exposure::Auto {
-                key_value,
                 min_luminance,
                 max_luminance,
-            } => (true, key_value, min_luminance, max_luminance, 0.0),
-            Exposure::Manual(fixed_exposure) => (false, 0.0, 0.0, 0.0, fixed_exposure),
+            } => (true, min_luminance, max_luminance, 0.0),
+            Exposure::Manual(fixed_exposure) => (false, 0.0, 0.0, fixed_exposure),
+        };
+
+        let bloom_texture = if settings.hdr_settings.bloom_settings.use_bloom {
+            self.bloom_renderer.result()
+        } else {
+            &renderer_resources.black_dummy
         };
 
         let color_grading_enabled = use_color_grading && color_grading_lut.is_some();
         let properties = PropertyGroup::from([
             property("worldViewProjection", &frame_matrix),
             property("useColorGrading", &color_grading_enabled),
-            property("keyValue", &key_value),
             property("minLuminance", &min_luminance),
             property("maxLuminance", &max_luminance),
             property("autoExposure", &is_auto),
@@ -359,44 +395,37 @@ impl HighDynamicRangeRenderer {
         )
     }
 
-    pub fn render(
-        &self,
-        server: &dyn GraphicsServer,
-        hdr_scene_frame: &GpuTexture,
-        bloom_texture: &GpuTexture,
-        ldr_framebuffer: &GpuFrameBuffer,
-        viewport: Rect<i32>,
-        dt: f32,
-        exposure: Exposure,
-        color_grading_lut: Option<&ColorGradingLut>,
-        use_color_grading: bool,
-        texture_cache: &mut TextureCache,
-        uniform_buffer_cache: &mut UniformBufferCache,
-        renderer_resources: &RendererResources,
-        resource_manager: &ResourceManager,
-    ) -> Result<RenderPassStatistics, FrameworkError> {
+    pub fn render(&self, args: HdrRendererArgs) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = args.server.begin_scope("HDR");
         let mut stats = RenderPassStatistics::default();
         stats += self.calculate_frame_luminance(
-            hdr_scene_frame,
-            uniform_buffer_cache,
-            renderer_resources,
+            args.server,
+            args.hdr_scene_frame,
+            args.uniform_buffer_cache,
+            args.renderer_resources,
         )?;
-        stats += self.calculate_avg_frame_luminance(uniform_buffer_cache, renderer_resources)?;
-        stats += self.adaptation(dt, uniform_buffer_cache, renderer_resources)?;
-        stats += self.map_hdr_to_ldr(
-            server,
-            hdr_scene_frame,
-            bloom_texture,
-            ldr_framebuffer,
-            viewport,
-            exposure,
-            color_grading_lut,
-            use_color_grading,
-            texture_cache,
-            uniform_buffer_cache,
-            renderer_resources,
-            resource_manager,
+        stats += self.calculate_avg_frame_luminance(
+            args.server,
+            args.uniform_buffer_cache,
+            args.renderer_resources,
+            args.settings.hdr_settings.luminance_calculation_method,
         )?;
+        if args.settings.hdr_settings.bloom_settings.use_bloom {
+            stats += self.bloom_renderer.render(
+                args.server,
+                args.hdr_scene_frame,
+                args.uniform_buffer_cache,
+                args.renderer_resources,
+                args.settings,
+            )?;
+        }
+        stats += self.adaptation(
+            args.server,
+            args.speed,
+            args.uniform_buffer_cache,
+            args.renderer_resources,
+        )?;
+        stats += self.map_hdr_to_ldr(args)?;
         Ok(stats)
     }
 }

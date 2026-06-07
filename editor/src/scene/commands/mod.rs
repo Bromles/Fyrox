@@ -20,9 +20,9 @@
 
 use crate::fyrox::{
     asset::manager::ResourceManager,
-    core::{log::Log, pool::Handle, reflect::prelude::*, type_traits::prelude::*},
+    core::{log::Log, pool::Handle, reflect::prelude::*},
     engine::SerializationContext,
-    graph::{BaseSceneGraph, SceneGraphNode},
+    graph::{NodeWrapper, SceneGraph},
     scene::{graph::SubGraph, node::Node, Scene},
 };
 use crate::{
@@ -45,16 +45,18 @@ pub mod navmesh;
 pub mod sound_context;
 pub mod terrain;
 
-#[derive(ComponentProvider)]
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable)]
+#[reflect(type_uuid = "4dd03d8c-b0c9-43a2-871c-55e5fd603afd")]
 pub struct GameSceneContext {
-    #[component(include)]
     pub selection: &'static mut Selection,
     pub scene: &'static mut Scene,
+    #[reflect(hidden)]
     pub scene_content_root: &'static mut Handle<Node>,
     pub clipboard: &'static mut Clipboard,
-    #[component(include)]
     pub message_sender: MessageSender,
     pub resource_manager: ResourceManager,
+    #[reflect(hidden)]
     pub serialization_context: Arc<SerializationContext>,
 }
 
@@ -337,16 +339,19 @@ impl CommandTrait for RevertSceneNodePropertyCommand {
         // If the property was modified, then simply set it to previous value to make it modified again.
         if let Some(old_value) = self.value.take() {
             let mut old_value = Some(old_value);
-            context.scene.graph[self.handle].as_reflect_mut(&mut |node| {
-                node.set_field_by_path(&self.path, old_value.take().unwrap(), &mut |result| {
+            let node = &mut context.scene.graph[self.handle];
+            node.inner_mut().set_field_by_path(
+                &self.path,
+                old_value.take().unwrap(),
+                &mut |result| {
                     if result.is_err() {
                         Log::err(format!(
                             "Failed to revert property {}. Reason: no such property!",
                             self.path
                         ))
                     }
-                });
-            })
+                },
+            );
         }
     }
 }

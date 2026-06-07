@@ -18,31 +18,36 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::BaseSceneGraph;
-use crate::fyrox::{
-    core::{
-        algebra::Vector2,
-        pool::Handle,
-        uuid::{uuid, Uuid},
-        TypeUuidProvider,
-    },
-    engine::Engine,
-    gui::{message::MessageDirection, widget::WidgetMessage, BuildContext, UiNode},
-};
-use crate::scene::commands::ChangeSelectionCommand;
 use crate::{
+    fyrox::graph::SceneGraph,
+    fyrox::{
+        core::{
+            algebra::Vector2,
+            pool::Handle,
+            reflect::prelude::*,
+            uuid::{uuid, Uuid},
+        },
+        engine::Engine,
+        gui::{widget::WidgetMessage, BuildContext, UiNode},
+    },
     interaction::{make_interaction_mode_button, InteractionMode},
     message::MessageSender,
+    scene::commands::ChangeSelectionCommand,
     scene::{controller::SceneController, Selection},
     settings::Settings,
     ui_scene::{UiScene, UiSelection},
 };
+use fyrox::gui::border::Border;
+use fyrox::gui::button::Button;
+use fyrox::gui::image::Image;
 
 pub mod move_mode;
 
+#[derive(Reflect, Clone, Debug)]
+#[reflect(type_uuid = "12e550dc-0fb2-4a45-8060-fa363db3e197")]
 pub struct UiSelectInteractionMode {
-    preview: Handle<UiNode>,
-    selection_frame: Handle<UiNode>,
+    preview: Handle<Image>,
+    selection_frame: Handle<Border>,
     message_sender: MessageSender,
     stack: Vec<Handle<UiNode>>,
     click_pos: Vector2<f32>,
@@ -50,8 +55,8 @@ pub struct UiSelectInteractionMode {
 
 impl UiSelectInteractionMode {
     pub fn new(
-        preview: Handle<UiNode>,
-        selection_frame: Handle<UiNode>,
+        preview: Handle<Image>,
+        selection_frame: Handle<Border>,
         message_sender: MessageSender,
     ) -> Self {
         Self {
@@ -61,12 +66,6 @@ impl UiSelectInteractionMode {
             stack: Vec::new(),
             click_pos: Vector2::default(),
         }
-    }
-}
-
-impl TypeUuidProvider for UiSelectInteractionMode {
-    fn type_uuid() -> Uuid {
-        uuid!("12e550dc-0fb2-4a45-8060-fa363db3e197")
     }
 }
 
@@ -82,26 +81,13 @@ impl InteractionMode for UiSelectInteractionMode {
     ) {
         self.click_pos = mouse_pos;
         let ui = &mut engine.user_interfaces.first_mut();
-        ui.send_message(WidgetMessage::visibility(
+        ui.send(self.selection_frame, WidgetMessage::Visibility(true));
+        ui.send(
             self.selection_frame,
-            MessageDirection::ToWidget,
-            true,
-        ));
-        ui.send_message(WidgetMessage::desired_position(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            mouse_pos,
-        ));
-        ui.send_message(WidgetMessage::width(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            0.0,
-        ));
-        ui.send_message(WidgetMessage::height(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            0.0,
-        ));
+            WidgetMessage::DesiredPosition(mouse_pos),
+        );
+        ui.send(self.selection_frame, WidgetMessage::Width(0.0));
+        ui.send(self.selection_frame, WidgetMessage::Height(0.0));
     }
 
     fn on_left_mouse_button_up(
@@ -109,7 +95,7 @@ impl InteractionMode for UiSelectInteractionMode {
         editor_selection: &Selection,
         controller: &mut dyn SceneController,
         engine: &mut Engine,
-        _mouse_pos: Vector2<f32>,
+        mouse_pos: Vector2<f32>,
         _frame_size: Vector2<f32>,
         _settings: &Settings,
     ) {
@@ -117,49 +103,62 @@ impl InteractionMode for UiSelectInteractionMode {
             return;
         };
 
-        let preview_screen_bounds = engine
-            .user_interfaces
-            .first_mut()
-            .node(self.preview)
-            .screen_bounds();
-        let frame_screen_bounds = engine
-            .user_interfaces
-            .first_mut()
-            .node(self.selection_frame)
-            .screen_bounds();
+        let preview_screen_bounds =
+            engine.user_interfaces.first_mut()[self.preview].screen_bounds();
+        let frame_screen_bounds =
+            engine.user_interfaces.first_mut()[self.selection_frame].screen_bounds();
+
         let relative_bounds = frame_screen_bounds.translate(-preview_screen_bounds.position);
-        self.stack.clear();
-        self.stack.push(ui_scene.ui.root());
-        let mut ui_selection = UiSelection::default();
-        while let Some(handle) = self.stack.pop() {
-            let node = ui_scene.ui.node(handle);
-            if handle == ui_scene.ui.root() {
+
+        // Small selection box is considered as a click that does single selection.
+        if relative_bounds.size.x < 2.0 && relative_bounds.size.y < 2.0 {
+            let picked = ui_scene.ui.hit_test(mouse_pos);
+            if picked.is_some() {
+                let mut new_selection = if let (Some(current), true) = (
+                    editor_selection.as_ui(),
+                    engine
+                        .user_interfaces
+                        .first_mut()
+                        .keyboard_modifiers()
+                        .control,
+                ) {
+                    current.clone()
+                } else {
+                    Default::default()
+                };
+                new_selection.insert_or_exclude(picked);
+                self.message_sender
+                    .do_command(ChangeSelectionCommand::new(Selection::new(new_selection)));
+            }
+        } else {
+            self.stack.clear();
+            self.stack.push(ui_scene.ui.root());
+            let mut ui_selection = UiSelection::default();
+            while let Some(handle) = self.stack.pop() {
+                let node = ui_scene.ui.node(handle);
+                if handle == ui_scene.ui.root() {
+                    self.stack.extend_from_slice(node.children());
+                    continue;
+                }
+
+                if relative_bounds.intersects(node.screen_bounds()) {
+                    ui_selection.insert_or_exclude(handle);
+                }
+
                 self.stack.extend_from_slice(node.children());
-                continue;
             }
 
-            if relative_bounds.intersects(node.screen_bounds()) {
-                ui_selection.insert_or_exclude(handle);
-                break;
+            let new_selection = Selection::new(ui_selection);
+
+            if &new_selection != editor_selection {
+                self.message_sender
+                    .do_command(ChangeSelectionCommand::new(new_selection));
             }
-
-            self.stack.extend_from_slice(node.children());
-        }
-
-        let new_selection = Selection::new(ui_selection);
-
-        if &new_selection != editor_selection {
-            self.message_sender
-                .do_command(ChangeSelectionCommand::new(new_selection));
         }
         engine
             .user_interfaces
-            .first_mut()
-            .send_message(WidgetMessage::visibility(
-                self.selection_frame,
-                MessageDirection::ToWidget,
-                false,
-            ));
+            .first()
+            .send(self.selection_frame, WidgetMessage::Visibility(false));
     }
 
     fn on_mouse_move(
@@ -188,21 +187,12 @@ impl InteractionMode for UiSelectInteractionMode {
                 self.click_pos.y
             },
         );
-        ui.send_message(WidgetMessage::desired_position(
+        ui.send(
             self.selection_frame,
-            MessageDirection::ToWidget,
-            position,
-        ));
-        ui.send_message(WidgetMessage::width(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            width.abs(),
-        ));
-        ui.send_message(WidgetMessage::height(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            height.abs(),
-        ));
+            WidgetMessage::DesiredPosition(position),
+        );
+        ui.send(self.selection_frame, WidgetMessage::Width(width.abs()));
+        ui.send(self.selection_frame, WidgetMessage::Height(height.abs()));
     }
 
     fn update(
@@ -214,7 +204,7 @@ impl InteractionMode for UiSelectInteractionMode {
     ) {
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         let select_mode_tooltip = "Select Object(s) - Shortcut: [1]\n\nSelection interaction mode \
         allows you to select an object by a single left mouse button click or multiple objects using either \
         frame selection (click and drag) or by holding Ctrl+Click";
@@ -228,6 +218,6 @@ impl InteractionMode for UiSelectInteractionMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        Self::type_info().type_uuid
     }
 }

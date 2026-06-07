@@ -20,7 +20,7 @@
 
 //! All possible errors that can happen in the engine.
 
-use crate::{renderer::framework::error::FrameworkError, scene::sound::SoundError};
+use crate::{graphics::error::FrameworkError, scene::sound::SoundError};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 
@@ -34,6 +34,8 @@ pub enum EngineError {
     /// Internal error.
     Custom(String),
 }
+
+impl std::error::Error for EngineError {}
 
 impl Display for EngineError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

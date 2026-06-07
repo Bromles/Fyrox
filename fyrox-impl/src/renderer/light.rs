@@ -18,41 +18,46 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::cache::DynamicSurfaceCache;
-use crate::renderer::convolution::{
-    EnvironmentMapIrradianceConvolution, EnvironmentMapSpecularConvolution,
-};
-use crate::renderer::observer::Observer;
-use crate::renderer::resources::RendererResources;
-use crate::renderer::utils::make_brdf_lut;
 use crate::{
+    asset::manager::ResourceManager,
     core::{
         algebra::{Matrix4, Point3, UnitQuaternion, Vector2, Vector3},
         color::Color,
         math::{frustum::Frustum, Matrix4Ext, Rect, TriangleDefinition},
         ImmutableString,
     },
+    graphics::{
+        buffer::BufferUsage,
+        error::FrameworkError,
+        framebuffer::GpuFrameBuffer,
+        geometry_buffer::GpuGeometryBuffer,
+        gpu_texture::{GpuTexture, GpuTextureKind},
+        server::GraphicsServer,
+        ColorMask, CompareFunc, CullFace, DrawParameters, ElementRange, StencilAction, StencilFunc,
+        StencilOp,
+    },
+    include_bytes_align_as,
     renderer::{
         bundle::{LightSourceKind, RenderDataBundleStorage},
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial, ShaderCache},
             uniform::{UniformBufferCache, UniformMemoryAllocator},
+            DynamicSurfaceCache,
         },
-        framework::{
-            buffer::BufferUsage, error::FrameworkError, framebuffer::GpuFrameBuffer,
-            geometry_buffer::GpuGeometryBuffer, server::GraphicsServer, ColorMask, CompareFunc,
-            CullFace, DrawParameters, ElementRange, GeometryBufferExt, StencilAction, StencilFunc,
-            StencilOp,
-        },
+        convolution::{EnvironmentMapIrradianceConvolution, EnvironmentMapSpecularConvolution},
+        framework::GeometryBufferExt,
         gbuffer::GBuffer,
         light_volume::LightVolumeRenderer,
         make_viewport_matrix,
+        observer::Observer,
+        resources::RendererResources,
         shadow::{
             csm::{CsmRenderContext, CsmRenderer},
             point::{PointShadowMapRenderContext, PointShadowMapRenderer},
             spot::SpotShadowMapRenderer,
         },
         ssao::ScreenSpaceAmbientOcclusionRenderer,
+        utils::make_brdf_lut,
         visibility::ObserverVisibilityCache,
         GeometryCache, LightingStatistics, QualitySettings, RenderPassStatistics, TextureCache,
     },
@@ -62,11 +67,9 @@ use crate::{
             surface::SurfaceData,
             vertex::SimpleVertex,
         },
-        Scene,
+        EnvironmentLightingSource, Scene,
     },
 };
-use fyrox_graphics::gpu_texture::{GpuTexture, GpuTextureKind};
-use fyrox_resource::manager::ResourceManager;
 
 pub struct DeferredLightRenderer {
     sphere: GpuGeometryBuffer,
@@ -86,6 +89,7 @@ pub(crate) struct DeferredRendererContext<'a> {
     pub observer: &'a Observer,
     pub gbuffer: &'a mut GBuffer,
     pub ambient_color: Color,
+    pub environment_lighting_source: EnvironmentLightingSource,
     pub render_data_bundle: &'a RenderDataBundleStorage,
     pub settings: &'a QualitySettings,
     pub textures: &'a mut TextureCache,
@@ -200,7 +204,14 @@ impl DeferredLightRenderer {
                 quality_defaults.csm_settings.size,
                 quality_defaults.csm_settings.precision,
             )?,
-            brdf_lut: make_brdf_lut(server, 256, 64)?,
+            // Use `test_write_brdf_lut` to re-generate the BRDF if needed.
+            brdf_lut: {
+                make_brdf_lut(
+                    server,
+                    256,
+                    include_bytes_align_as!(half::f16, "brdf_256x256_256samples.bin"),
+                )?
+            },
         })
     }
 
@@ -244,6 +255,8 @@ impl DeferredLightRenderer {
         &mut self,
         args: DeferredRendererContext,
     ) -> Result<(RenderPassStatistics, LightingStatistics), FrameworkError> {
+        let _debug_scope = args.server.begin_scope("DeferredLighting");
+
         let mut pass_stats = RenderPassStatistics::default();
         let mut light_stats = LightingStatistics::default();
 
@@ -253,6 +266,7 @@ impl DeferredLightRenderer {
             scene,
             observer,
             gbuffer,
+            environment_lighting_source,
             render_data_bundle,
             shader_cache,
             ambient_color,
@@ -293,6 +307,7 @@ impl DeferredLightRenderer {
         // Fill SSAO map.
         if settings.use_ssao {
             pass_stats += ssao_renderer.render(
+                server,
                 gbuffer,
                 observer.position.projection_matrix,
                 observer.position.view_matrix.basis(),
@@ -369,10 +384,16 @@ impl DeferredLightRenderer {
             pass_stats += environment_map_specular_convolution
                 .as_ref()
                 .unwrap()
-                .render(environment_map, uniform_buffer_cache, renderer_resources)?;
+                .render(
+                    server,
+                    environment_map,
+                    uniform_buffer_cache,
+                    renderer_resources,
+                )?;
 
             // Prepare the irradiance component of the probe.
             pass_stats += environment_map_irradiance_convolution.render(
+                server,
                 environment_map,
                 uniform_buffer_cache,
                 renderer_resources,
@@ -394,12 +415,21 @@ impl DeferredLightRenderer {
         let gbuffer_ambient_map = gbuffer.ambient_texture();
         let ao_map = ssao_renderer.ao_map();
 
+        let skybox_lighting = matches!(
+            environment_lighting_source,
+            EnvironmentLightingSource::SkyBox
+        );
         let ambient_color = ambient_color.srgb_to_linear_f32();
         let properties = PropertyGroup::from([
             property("worldViewProjection", &frame_matrix),
             property("ambientColor", &ambient_color),
             property("cameraPosition", &observer.position.translation),
             property("invViewProj", &inv_view_projection),
+            property("skyboxLighting", &skybox_lighting),
+            property(
+                "environmentLightingBrightness",
+                &scene.rendering_options.environment_lighting_brightness,
+            ),
         ]);
         let material = RenderMaterial::from([
             binding(
@@ -429,7 +459,7 @@ impl DeferredLightRenderer {
             ),
             binding(
                 "depthTexture",
-                (gbuffer_depth_map, &renderer_resources.linear_clamp_sampler),
+                (gbuffer_depth_map, &renderer_resources.nearest_clamp_sampler),
             ),
             binding(
                 "normalTexture",
@@ -714,7 +744,7 @@ impl DeferredLightRenderer {
                                 .render(PointShadowMapRenderContext {
                                     render_mask: observer.render_mask,
                                     elapsed_time,
-                                    state: server,
+                                    server,
                                     graph: &scene.graph,
                                     light_pos: light.position,
                                     light_radius,
@@ -734,7 +764,7 @@ impl DeferredLightRenderer {
                         pass_stats += self.csm_renderer.render(CsmRenderContext {
                             elapsed_time,
                             frame_size: Vector2::new(gbuffer.width as f32, gbuffer.height as f32),
-                            state: server,
+                            server,
                             graph: &scene.graph,
                             light,
                             observer,
@@ -942,7 +972,6 @@ impl DeferredLightRenderer {
                             self.csm_renderer.cascades()[1].view_proj_matrix,
                             self.csm_renderer.cascades()[2].view_proj_matrix,
                         ];
-                        let shadow_map_inv_size = 1.0 / (self.csm_renderer.size() as f32);
                         let shadow_bias = csm_options.shadow_bias();
                         let properties = PropertyGroup::from([
                             property("worldViewProjection", &frame_matrix),
@@ -956,7 +985,6 @@ impl DeferredLightRenderer {
                             property("shadowsEnabled", &shadows_enabled),
                             property("shadowBias", &shadow_bias),
                             property("softShadows", &settings.csm_settings.pcf),
-                            property("shadowMapInvSize", &shadow_map_inv_size),
                             property("cascadeDistances", distances.as_slice()),
                         ]);
                         let cascades = self.csm_renderer.cascades();
@@ -1030,6 +1058,7 @@ impl DeferredLightRenderer {
             // light source.
             if settings.light_scatter_enabled && light.scatter_enabled {
                 pass_stats += self.light_volume.render_volume(
+                    server,
                     light,
                     gbuffer,
                     observer.position.view_matrix,

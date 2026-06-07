@@ -293,7 +293,7 @@ impl GlTexture {
 
             let mut binding = result.make_temp_binding();
             #[cfg(not(target_arch = "wasm32"))]
-            if server.gl.supports_debug() {
+            if server.gl.supports_debug() && server.named_objects.get() {
                 server
                     .gl
                     .object_label(glow::TEXTURE, texture.0.get(), Some(desc.name));
@@ -337,10 +337,8 @@ impl GlTexture {
 impl Drop for GlTexture {
     fn drop(&mut self) {
         if let Some(state) = self.state.upgrade() {
-            unsafe {
-                state.memory_usage.borrow_mut().textures -= self.size_bytes.get();
-                state.gl.delete_texture(self.texture);
-            }
+            state.memory_usage.borrow_mut().textures -= self.size_bytes.get();
+            state.delete_texture(self.texture)
         }
     }
 }

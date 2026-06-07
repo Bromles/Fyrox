@@ -29,35 +29,29 @@ use crate::{
         num_traits::{Euclid, NumCast, One, Zero},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::uuid,
         visitor::prelude::*,
     },
-    define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
-    message::{ButtonState, UiMessage},
-    utils::load_image,
+    message::{ButtonState, MessageData, UiMessage},
+    resources::BITS_ICON,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, MessageDirection, MouseButton, UiNode, UserInterface, WidgetMessage,
 };
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_texture::TextureResource;
 use std::{
     fmt::Debug,
     mem,
     ops::{BitAnd, BitOr, Deref, DerefMut, Not, Shl},
-    sync::LazyLock,
 };
 
-static BIT_ICONS: LazyLock<Option<TextureResource>> =
-    LazyLock::new(|| load_image(include_bytes!("resources/bits.png")));
-
-const BIT_SIZE: f32 = 16.0;
-const BYTE_GAP: f32 = 8.0;
+const BIT_SIZE: f32 = 18.0;
+const BYTE_GAP: f32 = 24.0;
 const ROW_GAP: f32 = 4.0;
+const BIT_GAP: f32 = 2.0;
 
-const ON_NORMAL: Brush = Brush::Solid(Color::DARK_GRAY);
-const ON_HOVER: Brush = Brush::Solid(Color::LIGHT_BLUE);
+const ON_NORMAL: Brush = Brush::Solid(Color::opaque(80, 118, 178));
+const ON_HOVER: Brush = Brush::Solid(Color::opaque(50, 88, 148));
 const OFF_HOVER: Brush = Brush::Solid(Color::DARK_SLATE_BLUE);
 
 pub trait BitContainer:
@@ -76,7 +70,6 @@ pub trait BitContainer:
     + Reflect
     + Visit
     + Send
-    + TypeUuidProvider
     + 'static
 {
 }
@@ -97,7 +90,6 @@ impl<T> BitContainer for T where
         + Reflect
         + Visit
         + Send
-        + TypeUuidProvider
         + 'static
 {
 }
@@ -106,10 +98,7 @@ impl<T> BitContainer for T where
 pub enum BitFieldMessage<T: BitContainer> {
     Value(T),
 }
-
-impl<T: BitContainer> BitFieldMessage<T> {
-    define_constructor!(BitFieldMessage:Value => fn value(T), layout: false);
-}
+impl<T: BitContainer> MessageData for BitFieldMessage<T> {}
 
 impl<T: BitContainer> ConstructorProvider<UiNode, UserInterface> for BitField<T> {
     fn constructor() -> GraphNodeConstructor<UiNode, UserInterface> {
@@ -117,14 +106,18 @@ impl<T: BitContainer> ConstructorProvider<UiNode, UserInterface> for BitField<T>
             .with_variant(format!("Bit Field<{}>", std::any::type_name::<T>()), |ui| {
                 BitFieldBuilder::<T>::new(WidgetBuilder::new())
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Bit")
     }
 }
 
-#[derive(Default, Clone, Reflect, Visit, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Reflect, Visit, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "6c19b266-18be-46d2-bfd3-f1dc9cb3f36c"
+)]
 pub struct BitField<T>
 where
     T: BitContainer,
@@ -205,7 +198,7 @@ fn bit_to_rect(index: usize, width: usize) -> Rect<f32> {
     let (byte_y, byte_x) = byte_index.div_rem_euclid(&width);
     let row_stride = BIT_SIZE + ROW_GAP;
     let col_stride = BIT_SIZE * 8.0 + BYTE_GAP;
-    let x = col_stride * byte_x as f32 + BIT_SIZE * bit_index as f32;
+    let x = col_stride * byte_x as f32 + (BIT_SIZE + BIT_GAP) * bit_index as f32;
     let y = row_stride * byte_y as f32;
     Rect::new(x, y, BIT_SIZE, BIT_SIZE)
 }
@@ -215,25 +208,13 @@ fn position_to_bit(position: Vector2<f32>, size: usize, width: f32) -> Option<us
     (0..size).find(|&i| bit_to_rect(i, byte_width).contains(position))
 }
 
-impl<T> TypeUuidProvider for BitField<T>
-where
-    T: BitContainer,
-{
-    fn type_uuid() -> Uuid {
-        combine_uuids(
-            uuid!("6c19b266-18be-46d2-bfd3-f1dc9cb3f36c"),
-            T::type_uuid(),
-        )
-    }
-}
-
 impl<T> Control for BitField<T>
 where
     T: BitContainer,
 {
     fn measure_override(&self, _ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
         let size = mem::size_of::<T>();
-        let byte_size = BIT_SIZE * 8.0;
+        let byte_size = (BIT_SIZE + BIT_GAP) * 8.0;
         let width = available_size.x;
         let byte_width = if width.is_finite() {
             byte_width(width)
@@ -308,7 +289,7 @@ where
         }
         ctx.commit(
             self.clip_bounds(),
-            Brush::Solid(Color::WHITE),
+            Brush::Solid(Color::repeat_opaque(20)),
             CommandTexture::None,
             &self.material,
             None,
@@ -320,8 +301,8 @@ where
         }
         ctx.commit(
             self.clip_bounds(),
-            Brush::Solid(Color::BLACK),
-            CommandTexture::Texture(BIT_ICONS.clone().unwrap()),
+            Brush::Solid(Color::opaque(200, 200, 200)),
+            CommandTexture::Texture(BITS_ICON.clone().unwrap()),
             &self.material,
             None,
         );
@@ -332,8 +313,8 @@ where
         }
         ctx.commit(
             self.clip_bounds(),
-            Brush::Solid(Color::GRAY),
-            CommandTexture::Texture(BIT_ICONS.clone().unwrap()),
+            Brush::Solid(Color::opaque(200, 200, 200)),
+            CommandTexture::Texture(BITS_ICON.clone().unwrap()),
             &self.material,
             None,
         );
@@ -362,12 +343,9 @@ where
                     }
 
                     if new_value != self.value {
-                        ui.send_message(BitFieldMessage::value(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            new_value,
-                        ));
+                        ui.send(self.handle, BitFieldMessage::Value(new_value));
                     }
+                    self.invalidate_visual();
                 }
             }
         } else if let Some(WidgetMessage::MouseDown { pos, button }) = message.data() {
@@ -388,11 +366,7 @@ where
                                 set_bit_value(self.value, bit_index, self.current_value);
                             self.bit_state = BitState::Pressed;
 
-                            ui.send_message(BitFieldMessage::value(
-                                self.handle,
-                                MessageDirection::ToWidget,
-                                new_value,
-                            ));
+                            ui.send(self.handle, BitFieldMessage::Value(new_value));
                         }
                         MouseButton::Right => {
                             message.set_handled(true);
@@ -403,11 +377,7 @@ where
                                 T::one() << T::from(bit_index).unwrap_or_default()
                             };
 
-                            ui.send_message(BitFieldMessage::value(
-                                self.handle,
-                                MessageDirection::ToWidget,
-                                new_value,
-                            ));
+                            ui.send(self.handle, BitFieldMessage::Value(new_value));
                         }
                         _ => (),
                     }
@@ -421,14 +391,13 @@ where
         {
             if message.destination() == self.handle() {
                 self.bit_state = BitState::Normal;
+                self.invalidate_visual();
             }
-        } else if let Some(BitFieldMessage::Value(value)) = message.data() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-                && *value != self.value
-            {
+        } else if let Some(BitFieldMessage::Value(value)) = message.data_for(self.handle) {
+            if *value != self.value {
                 self.value = *value;
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
+                self.invalidate_visual();
             }
         }
     }
@@ -447,11 +416,11 @@ where
     }
     fn draw_bit_background(&self, index: usize, width: usize, ctx: &mut DrawingContext) {
         let rect = bit_to_rect(index, width);
-        ctx.push_rect_filled(&rect, None);
+        ctx.push_rounded_rect_filled(&rect, 3.0, 4);
     }
     fn draw_bit_foreground(&self, index: usize, width: usize, ctx: &mut DrawingContext) {
         let rect = bit_to_rect(index, width);
-        ctx.push_rect(&rect, 1.0);
+        ctx.push_rounded_rect(&rect, 1.0, 3.0, 4);
     }
     fn draw_bit_icon(&self, index: usize, width: usize, ctx: &mut DrawingContext) {
         let rect = bit_to_rect(index, width);
@@ -492,7 +461,7 @@ where
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<BitField<T>> {
         let canvas = BitField {
             widget: self.widget_builder.build(ctx),
             value: self.value,
@@ -500,7 +469,7 @@ where
             bit_state: BitState::Normal,
             current_value: false,
         };
-        ctx.add_node(UiNode::new(canvas))
+        ctx.add(canvas)
     }
 }
 

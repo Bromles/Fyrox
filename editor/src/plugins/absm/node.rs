@@ -19,18 +19,13 @@
 // SOFTWARE.
 
 use crate::fyrox::{
-    core::{
-        color::Color, pool::Handle, reflect::prelude::*, type_traits::prelude::*, uuid::uuid,
-        visitor::prelude::*,
-    },
-    graph::BaseSceneGraph,
+    core::{color::Color, pool::Handle, reflect::prelude::*, uuid::uuid, visitor::prelude::*},
     gui::{
         border::{BorderBuilder, BorderMessage},
         brush::Brush,
         button::{ButtonBuilder, ButtonMessage},
-        define_constructor,
         grid::{Column, GridBuilder, Row},
-        message::{MessageDirection, MouseButton, UiMessage},
+        message::{MouseButton, UiMessage},
         stack_panel::StackPanelBuilder,
         text::{TextBuilder, TextMessage},
         widget::{Widget, WidgetBuilder, WidgetMessage},
@@ -39,40 +34,48 @@ use crate::fyrox::{
     },
 };
 use crate::plugins::absm::selectable::{Selectable, SelectableMessage};
-
+use crate::plugins::absm::socket::Socket;
+use fyrox::core::pool::HandlesVecExtension;
+use fyrox::gui::border::Border;
+use fyrox::gui::button::Button;
+use fyrox::gui::message::MessageData;
+use fyrox::gui::stack_panel::StackPanel;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::{Style, StyledProperty};
+use fyrox::gui::text::Text;
 use std::{
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
 };
 
 #[derive(Clone, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "1a5d0042-3607-4fcb-88c6-025a0bce6111")]
 pub struct AbsmBaseNode {
-    pub input_sockets: Vec<Handle<UiNode>>,
-    pub output_socket: Handle<UiNode>,
+    pub input_sockets: Vec<Handle<Socket>>,
+    pub output_socket: Handle<Socket>,
 }
 
-#[derive(Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "15bc1a7e-a385-46e0-a65c-7e9c014b4a1d"
+)]
 pub struct AbsmNode<T>
 where
     T: Reflect,
 {
     widget: Widget,
-    background: Handle<UiNode>,
-    #[component(include)]
+    background: Handle<Border>,
     selectable: Selectable,
     pub name_value: String,
     pub model_handle: Handle<T>,
-    #[component(include)]
     pub base: AbsmBaseNode,
-    pub add_input: Handle<UiNode>,
-    input_sockets_panel: Handle<UiNode>,
+    pub add_input: Handle<Button>,
+    input_sockets_panel: Handle<StackPanel>,
     normal_brush: StyledProperty<Brush>,
     selected_brush: StyledProperty<Brush>,
-    name: Handle<UiNode>,
-    edit: Handle<UiNode>,
+    name: Handle<Text>,
+    edit: Handle<Button>,
 }
 
 impl<T: Reflect> Debug for AbsmNode<T> {
@@ -128,15 +131,14 @@ where
     T: Reflect,
 {
     fn update_colors(&self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::background(
+        ui.send(
             self.background,
-            MessageDirection::ToWidget,
-            if self.selectable.selected {
+            WidgetMessage::Background(if self.selectable.selected {
                 self.selected_brush.clone()
             } else {
                 self.normal_brush.clone()
-            },
-        ));
+            }),
+        );
     }
 }
 
@@ -145,29 +147,13 @@ pub enum AbsmNodeMessage {
     Name(String),
     Enter,
     AddInput,
-    InputSockets(Vec<Handle<UiNode>>),
+    InputSockets(Vec<Handle<Socket>>),
     NormalBrush(StyledProperty<Brush>),
     SelectedBrush(StyledProperty<Brush>),
     SetActive(bool),
     Edit,
 }
-
-impl AbsmNodeMessage {
-    define_constructor!(AbsmNodeMessage:Name => fn name(String), layout: false);
-    define_constructor!(AbsmNodeMessage:Enter => fn enter(), layout: false);
-    define_constructor!(AbsmNodeMessage:AddInput => fn add_input(), layout: false);
-    define_constructor!(AbsmNodeMessage:InputSockets => fn input_sockets(Vec<Handle<UiNode>>), layout: false);
-    define_constructor!(AbsmNodeMessage:NormalBrush => fn normal_color(StyledProperty<Brush>), layout: false);
-    define_constructor!(AbsmNodeMessage:SelectedBrush => fn selected_color(StyledProperty<Brush>), layout: false);
-    define_constructor!(AbsmNodeMessage:SetActive => fn set_active(bool), layout: false);
-    define_constructor!(AbsmNodeMessage:Edit => fn edit(), layout: false);
-}
-
-impl<T: Reflect> TypeUuidProvider for AbsmNode<T> {
-    fn type_uuid() -> Uuid {
-        uuid!("15bc1a7e-a385-46e0-a65c-7e9c014b4a1d")
-    }
-}
+impl MessageData for AbsmNodeMessage {}
 
 impl<T> Control for AbsmNode<T>
 where
@@ -175,114 +161,79 @@ where
 {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
-        self.selectable
-            .handle_routed_message(self.handle(), ui, message);
+        if self
+            .selectable
+            .handle_routed_message(self.handle(), ui, message)
+        {
+            self.invalidate_visual();
+        }
 
-        if let Some(SelectableMessage::Select(selected)) = message.data() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.update_colors(ui);
-                if *selected {
-                    ui.send_message(WidgetMessage::topmost(
-                        self.handle(),
-                        MessageDirection::ToWidget,
-                    ));
-                }
+        if let Some(SelectableMessage::Select(selected)) = message.data_from(self.handle()) {
+            self.update_colors(ui);
+            if *selected {
+                ui.send(self.handle(), WidgetMessage::Topmost);
             }
         } else if let Some(WidgetMessage::DoubleClick { button }) = message.data() {
             if !message.handled() && *button == MouseButton::Left {
-                ui.send_message(AbsmNodeMessage::enter(
-                    self.handle(),
-                    MessageDirection::FromWidget,
-                ));
+                ui.post(self.handle(), AbsmNodeMessage::Enter);
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.add_input {
-                ui.send_message(AbsmNodeMessage::add_input(
-                    self.handle(),
-                    MessageDirection::FromWidget,
-                ));
+                ui.post(self.handle(), AbsmNodeMessage::AddInput);
             } else if message.destination() == self.edit {
-                ui.send_message(AbsmNodeMessage::edit(
-                    self.handle(),
-                    MessageDirection::FromWidget,
-                ));
+                ui.post(self.handle(), AbsmNodeMessage::Edit);
             }
-        } else if let Some(msg) = message.data::<AbsmNodeMessage>() {
-            if message.destination == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    AbsmNodeMessage::InputSockets(input_sockets) => {
-                        if input_sockets != &self.base.input_sockets {
-                            for &child in ui.node(self.input_sockets_panel).children() {
-                                ui.send_message(WidgetMessage::remove(
-                                    child,
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
+        } else if let Some(msg) = message.data_for::<AbsmNodeMessage>(self.handle) {
+            match msg {
+                AbsmNodeMessage::InputSockets(input_sockets)
+                    if input_sockets != &self.base.input_sockets =>
+                {
+                    for &child in ui[self.input_sockets_panel].children() {
+                        ui.send(child, WidgetMessage::Remove);
+                    }
 
-                            for &socket in input_sockets {
-                                ui.send_message(WidgetMessage::link(
-                                    socket,
-                                    MessageDirection::ToWidget,
-                                    self.input_sockets_panel,
-                                ));
-                            }
+                    for &socket in input_sockets {
+                        ui.send(socket, WidgetMessage::link_with(self.input_sockets_panel));
+                    }
 
-                            self.base.input_sockets.clone_from(input_sockets);
-                        }
-                    }
-                    AbsmNodeMessage::NormalBrush(color) => {
-                        if &self.normal_brush != color {
-                            self.normal_brush = color.clone();
-                            self.update_colors(ui);
-                        }
-                    }
-                    AbsmNodeMessage::SelectedBrush(color) => {
-                        if &self.selected_brush != color {
-                            self.selected_brush = color.clone();
-                            self.update_colors(ui);
-                        }
-                    }
-                    AbsmNodeMessage::Name(name) => {
-                        if &self.name_value != name {
-                            self.name_value.clone_from(name);
-
-                            ui.send_message(TextMessage::text(
-                                self.name,
-                                MessageDirection::ToWidget,
-                                format!("{} ({})", self.name_value, self.model_handle),
-                            ));
-                        }
-                    }
-                    AbsmNodeMessage::SetActive(active) => {
-                        let (thickness, brush) = if *active {
-                            (
-                                Thickness::uniform(3.0),
-                                Brush::Solid(Color::opaque(120, 80, 60)).into(),
-                            )
-                        } else {
-                            (
-                                Thickness::uniform(1.0),
-                                ui.style.property(Style::BRUSH_LIGHT),
-                            )
-                        };
-
-                        ui.send_message(BorderMessage::stroke_thickness(
-                            self.background,
-                            MessageDirection::ToWidget,
-                            thickness.into(),
-                        ));
-                        ui.send_message(WidgetMessage::foreground(
-                            self.background,
-                            MessageDirection::ToWidget,
-                            brush,
-                        ));
-                    }
-                    _ => (),
+                    self.base.input_sockets.clone_from(input_sockets);
                 }
+                AbsmNodeMessage::NormalBrush(color) if &self.normal_brush != color => {
+                    self.normal_brush = color.clone();
+                    self.update_colors(ui);
+                }
+                AbsmNodeMessage::SelectedBrush(color) if &self.selected_brush != color => {
+                    self.selected_brush = color.clone();
+                    self.update_colors(ui);
+                }
+                AbsmNodeMessage::Name(name) if &self.name_value != name => {
+                    self.name_value.clone_from(name);
+
+                    ui.send(
+                        self.name,
+                        TextMessage::Text(format!("{} ({})", self.name_value, self.model_handle)),
+                    );
+                }
+                AbsmNodeMessage::SetActive(active) => {
+                    let (thickness, brush) = if *active {
+                        (
+                            Thickness::uniform(3.0),
+                            Brush::Solid(Color::opaque(120, 80, 60)).into(),
+                        )
+                    } else {
+                        (
+                            Thickness::uniform(1.0),
+                            ui.style.property(Style::BRUSH_LIGHT),
+                        )
+                    };
+
+                    ui.send(
+                        self.background,
+                        BorderMessage::StrokeThickness(thickness.into()),
+                    );
+                    ui.send(self.background, WidgetMessage::Foreground(brush));
+                }
+                _ => (),
             }
         }
     }
@@ -295,8 +246,8 @@ where
     widget_builder: WidgetBuilder,
     name: String,
     model_handle: Handle<T>,
-    input_sockets: Vec<Handle<UiNode>>,
-    output_socket: Handle<UiNode>,
+    input_sockets: Vec<Handle<Socket>>,
+    output_socket: Handle<Socket>,
     can_add_sockets: bool,
     title: Option<String>,
     normal_brush: Option<StyledProperty<Brush>>,
@@ -333,12 +284,12 @@ where
         self
     }
 
-    pub fn with_input_sockets(mut self, sockets: Vec<Handle<UiNode>>) -> Self {
+    pub fn with_input_sockets(mut self, sockets: Vec<Handle<Socket>>) -> Self {
         self.input_sockets = sockets;
         self
     }
 
-    pub fn with_output_socket(mut self, socket: Handle<UiNode>) -> Self {
+    pub fn with_output_socket(mut self, socket: Handle<Socket>) -> Self {
         self.output_socket = socket;
         self
     }
@@ -368,7 +319,7 @@ where
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<AbsmNode<T>> {
         let input_sockets_panel;
         let add_input;
         let name;
@@ -387,7 +338,7 @@ where
                                         .on_column(0)
                                         .with_margin(Thickness::uniform(2.0))
                                         .with_vertical_alignment(VerticalAlignment::Center)
-                                        .with_children(self.input_sockets.iter().cloned())
+                                        .with_children(self.input_sockets.clone().to_base())
                                         .on_column(0),
                                 )
                                 .build(ctx);
@@ -407,7 +358,7 @@ where
                                 add_input
                             }),
                     )
-                    .add_row(Row::stretch())
+                    .add_row(Row::auto())
                     .add_row(Row::auto())
                     .add_column(Column::auto())
                     .build(ctx),
@@ -450,7 +401,7 @@ where
                     .build(ctx),
                 ),
         )
-        .add_row(Row::stretch())
+        .add_row(Row::auto())
         .add_column(Column::auto())
         .add_column(Column::stretch())
         .add_column(Column::auto())
@@ -528,7 +479,7 @@ where
             edit,
         };
 
-        ctx.add_node(UiNode::new(node))
+        ctx.add(node)
     }
 }
 

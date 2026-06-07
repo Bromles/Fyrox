@@ -26,15 +26,11 @@
 
 use crate::{
     button::{ButtonBuilder, ButtonMessage},
-    core::{
-        algebra::Vector2, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
-    define_constructor,
-    draw::DrawingContext,
+    control_trait_proxy_impls,
+    core::{algebra::Vector2, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     formatted_text::WrapMode,
     grid::{Column, GridBuilder, Row},
-    message::{MessageDirection, OsEvent, UiMessage},
+    message::UiMessage,
     stack_panel::StackPanelBuilder,
     text::{TextBuilder, TextMessage},
     widget::{Widget, WidgetBuilder},
@@ -43,7 +39,10 @@ use crate::{
     UserInterface,
 };
 
-use fyrox_core::uuid_provider;
+use crate::button::Button;
+use crate::message::MessageData;
+use crate::text::Text;
+use crate::window::WindowAlignment;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut};
@@ -62,17 +61,7 @@ pub enum MessageBoxMessage {
     /// from the UI. See [`MessageBox`] docs for examples.
     Close(MessageBoxResult),
 }
-
-impl MessageBoxMessage {
-    define_constructor!(
-        /// Creates [`MessageBoxMessage::Open`] message.
-        MessageBoxMessage:Open => fn open(title: Option<String>, text: Option<String>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`MessageBoxMessage::Close`] message.
-        MessageBoxMessage:Close => fn close(MessageBoxResult), layout: false
-    );
-}
+impl MessageData for MessageBoxMessage {}
 
 /// A set of possible reasons why a message box was closed.
 #[derive(Copy, Clone, PartialOrd, PartialEq, Ord, Eq, Hash, Debug)]
@@ -91,13 +80,14 @@ pub enum MessageBoxResult {
 
 /// A fixed set of possible buttons in a message box.
 #[derive(Copy, Clone, PartialOrd, PartialEq, Ord, Eq, Hash, Debug, Visit, Reflect, Default)]
+#[reflect(type_uuid = "2fb9021b-148a-45cd-9602-8197acbab47a")]
 pub enum MessageBoxButtons {
-    /// Only `Ok` button. It is typically used to show a message with results of some finished action.
+    /// Only `Ok` button. It is typically used to show a message with the results of some finished action.
     #[default]
     Ok,
-    /// `Yes` and `No` buttons. It is typically used to show a message to ask a user if they are want to continue or not.
+    /// `Yes` and `No` buttons. It is typically used to show a message to ask a user if they want to continue or not.
     YesNo,
-    /// `Yes`, `No`, `Cancel` buttons. It is typically used to show a message to ask a user if they are want to confirm action,
+    /// `Yes`, `No`, `Cancel` buttons. It is typically used to show a message to ask a user if they want to confirm action,
     /// refuse, cancel the next action completely.
     YesNoCancel,
 }
@@ -117,8 +107,9 @@ pub enum MessageBoxButtons {
 /// #     window::WindowBuilder,
 /// #     BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::messagebox::MessageBox;
 /// #
-/// fn create_message_box(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_message_box(ctx: &mut BuildContext) -> Handle<MessageBox> {
 ///     MessageBoxBuilder::new(WindowBuilder::new(WidgetBuilder::new()))
 ///         .with_buttons(MessageBoxButtons::YesNo)
 ///         .with_text("Do you want to save your changes?")
@@ -161,35 +152,35 @@ pub enum MessageBoxButtons {
 /// #     UserInterface,
 /// # };
 /// # fn open_message_box(my_message_box: Handle<UiNode>, ui: &UserInterface) {
-/// ui.send_message(MessageBoxMessage::open(
-///     my_message_box,
-///     MessageDirection::ToWidget,
-///     Some("This is the new title".to_string()),
-///     Some("This is the new text".to_string()),
-/// ))
+/// ui.send(my_message_box, MessageBoxMessage::Open{
+///     title: Some("This is the new title".to_string()),
+///     text: Some("This is the new text".to_string()),
+/// })
 /// # }
 /// ```
 ///
 /// ## Styling
 ///
-/// There's no way to change the style of the message box, nor add some widgets to it. If you need custom message box, then you
-/// need to create your own widget. This message box is meant to be used as a standard dialog box for standard situations in UI.
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+/// There's no way to change the style of the message box, nor add some widgets to it. If you need a custom message box, then you
+/// need to create your own widget. This message box is meant to be used as a standard dialog box for standard situations in the UI.
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "b14c0012-4383-45cf-b9a1-231415d95373"
+)]
 pub struct MessageBox {
     /// Base window of the message box.
-    #[component(include)]
     pub window: Window,
     /// Current set of buttons of the message box.
     pub buttons: InheritableVariable<MessageBoxButtons>,
     /// A handle of `Ok`/`Yes` buttons.
-    pub ok_yes: InheritableVariable<Handle<UiNode>>,
+    pub ok_yes: InheritableVariable<Handle<Button>>,
     /// A handle of `No` button.
-    pub no: InheritableVariable<Handle<UiNode>>,
+    pub no: InheritableVariable<Handle<Button>>,
     /// A handle of `Cancel` button.
-    pub cancel: InheritableVariable<Handle<UiNode>>,
+    pub cancel: InheritableVariable<Handle<Button>>,
     /// A handle of text widget.
-    pub text: InheritableVariable<Handle<UiNode>>,
+    pub text: InheritableVariable<Handle<Text>>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for MessageBox {
@@ -200,6 +191,7 @@ impl ConstructorProvider<UiNode, UserInterface> for MessageBox {
                     WidgetBuilder::new().with_name("Message Box"),
                 ))
                 .build(&mut ui.build_ctx())
+                .to_base()
                 .into()
             })
             .with_group("Input")
@@ -220,26 +212,10 @@ impl DerefMut for MessageBox {
     }
 }
 
-uuid_provider!(MessageBox = "b14c0012-4383-45cf-b9a1-231415d95373");
-
-// Message box extends Window widget so it delegates most of calls
-// to inner window.
+// Message box extends Window widget so it delegates most of the calls
+//  to the inner window.
 impl Control for MessageBox {
-    fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
-        self.window.measure_override(ui, available_size)
-    }
-
-    fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
-        self.window.arrange_override(ui, final_size)
-    }
-
-    fn draw(&self, drawing_context: &mut DrawingContext) {
-        self.window.draw(drawing_context)
-    }
-
-    fn update(&mut self, dt: f32, ui: &mut UserInterface) {
-        self.window.update(dt, ui);
-    }
+    control_trait_proxy_impls!(window);
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.window.handle_routed_message(ui, message);
@@ -251,76 +227,53 @@ impl Control for MessageBox {
                     MessageBoxButtons::YesNo => MessageBoxResult::Yes,
                     MessageBoxButtons::YesNoCancel => MessageBoxResult::Yes,
                 };
-                ui.send_message(MessageBoxMessage::close(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    result,
-                ));
+                ui.send(self.handle, MessageBoxMessage::Close(result));
             } else if message.destination() == *self.cancel {
-                ui.send_message(MessageBoxMessage::close(
+                ui.send(
                     self.handle(),
-                    MessageDirection::ToWidget,
-                    MessageBoxResult::Cancel,
-                ));
+                    MessageBoxMessage::Close(MessageBoxResult::Cancel),
+                );
             } else if message.destination() == *self.no {
-                ui.send_message(MessageBoxMessage::close(
+                ui.send(
                     self.handle(),
-                    MessageDirection::ToWidget,
-                    MessageBoxResult::No,
-                ));
+                    MessageBoxMessage::Close(MessageBoxResult::No),
+                );
             }
-        } else if let Some(msg) = message.data::<MessageBoxMessage>() {
+        } else if let Some(msg) = message.data_for::<MessageBoxMessage>(self.handle) {
             match msg {
                 MessageBoxMessage::Open { title, text } => {
                     if let Some(title) = title {
-                        ui.send_message(WindowMessage::title(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            WindowTitle::text(title.clone()),
-                        ));
+                            WindowMessage::Title(WindowTitle::text(title.clone())),
+                        );
                     }
 
                     if let Some(text) = text {
-                        ui.send_message(TextMessage::text(
-                            *self.text,
-                            MessageDirection::ToWidget,
-                            text.clone(),
-                        ));
+                        ui.send(*self.text, TextMessage::Text(text.clone()));
                     }
 
-                    ui.send_message(WindowMessage::open_modal(
+                    ui.send(
                         self.handle(),
-                        MessageDirection::ToWidget,
-                        true,
-                        true,
-                    ));
+                        WindowMessage::Open {
+                            alignment: WindowAlignment::Center,
+                            modal: true,
+                            focus_content: true,
+                        },
+                    );
                 }
                 MessageBoxMessage::Close(_) => {
                     // Translate message box message into window message.
-                    ui.send_message(WindowMessage::close(
-                        self.handle(),
-                        MessageDirection::ToWidget,
-                    ));
+                    ui.send(self.handle(), WindowMessage::Close);
+
+                    ui.try_send_response(message);
                 }
             }
         }
     }
-
-    fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
-        self.window.preview_message(ui, message);
-    }
-
-    fn handle_os_event(
-        &mut self,
-        self_handle: Handle<UiNode>,
-        ui: &mut UserInterface,
-        event: &OsEvent,
-    ) {
-        self.window.handle_os_event(self_handle, ui, event);
-    }
 }
 
-/// Creates [`MessageBox`] widgets and adds them to user interface.
+/// Creates [`MessageBox`] widgets and adds them to the user interface.
 pub struct MessageBoxBuilder<'b> {
     window_builder: WindowBuilder,
     buttons: MessageBoxButtons,
@@ -328,7 +281,7 @@ pub struct MessageBoxBuilder<'b> {
 }
 
 impl<'b> MessageBoxBuilder<'b> {
-    /// Creates new builder instace. `window_builder` could be used to customize the look of you message box.
+    /// Creates new builder instance. `window_builder` could be used to customize the look of your message box.
     pub fn new(window_builder: WindowBuilder) -> Self {
         Self {
             window_builder,
@@ -350,7 +303,7 @@ impl<'b> MessageBoxBuilder<'b> {
     }
 
     /// Finished message box building and adds it to the user interface.
-    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<MessageBox> {
         let ok_yes;
         let mut no = Default::default();
         let mut cancel = Default::default();
@@ -502,14 +455,17 @@ impl<'b> MessageBoxBuilder<'b> {
             text: text.into(),
         };
 
-        let handle = ctx.add_node(UiNode::new(message_box));
+        let handle = ctx.add(message_box);
 
         if is_open {
-            // We must restrict picking because message box is modal.
-            ctx.push_picking_restriction(RestrictionEntry { handle, stop: true });
+            // We must restrict picking because the message box is modal.
+            ctx.push_picking_restriction(RestrictionEntry {
+                handle: handle.to_base(),
+                stop: true,
+            });
         }
 
-        handle
+        handle.to_variant()
     }
 }
 

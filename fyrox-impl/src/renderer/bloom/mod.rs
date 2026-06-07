@@ -18,22 +18,24 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::resources::RendererResources;
+use crate::renderer::QualitySettings;
 use crate::{
     core::{math::Rect, ImmutableString},
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, GpuFrameBuffer},
+        gpu_texture::{GpuTexture, PixelKind},
+        server::GraphicsServer,
+    },
     renderer::{
         bloom::blur::GaussianBlur,
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
         },
-        framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, GpuFrameBuffer},
-            gpu_texture::{GpuTexture, PixelKind},
-            server::GraphicsServer,
-        },
-        make_viewport_matrix, RenderPassStatistics,
+        make_viewport_matrix,
+        resources::RendererResources,
+        RenderPassStatistics,
     },
 };
 
@@ -53,12 +55,12 @@ impl BloomRenderer {
         height: usize,
     ) -> Result<Self, FrameworkError> {
         Ok(Self {
-            blur: GaussianBlur::new(server, width, height, PixelKind::RGBA16F)?,
+            blur: GaussianBlur::new(server, width, height, PixelKind::RGB10A2)?,
             framebuffer: server.create_frame_buffer(
                 None,
                 vec![Attachment::color(server.create_2d_render_target(
                     "Bloom",
-                    PixelKind::RGBA16F,
+                    PixelKind::RGB10A2,
                     width,
                     height,
                 )?)],
@@ -78,16 +80,23 @@ impl BloomRenderer {
 
     pub(crate) fn render(
         &self,
+        server: &dyn GraphicsServer,
         hdr_scene_frame: &GpuTexture,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
+        settings: &QualitySettings,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("Bloom");
+
         let mut stats = RenderPassStatistics::default();
 
         let viewport = Rect::new(0, 0, self.width as i32, self.height as i32);
 
         let wvp = make_viewport_matrix(viewport);
-        let properties = PropertyGroup::from([property("worldViewProjection", &wvp)]);
+        let properties = PropertyGroup::from([
+            property("worldViewProjection", &wvp),
+            property("threshold", &settings.hdr_settings.bloom_settings.threshold),
+        ]);
         let material = RenderMaterial::from([
             binding(
                 "hdrSampler",
@@ -109,6 +118,7 @@ impl BloomRenderer {
         )?;
 
         stats += self.blur.render(
+            server,
             &renderer_resources.quad,
             self.glow_texture(),
             uniform_buffer_cache,

@@ -26,22 +26,19 @@
 use crate::{
     core::{
         algebra::Vector2, log::Log, math::Rect, pool::Handle, reflect::prelude::*,
-        type_traits::prelude::*, uuid_provider, variable::InheritableVariable, visitor::prelude::*,
+        variable::InheritableVariable, visitor::prelude::*,
     },
-    define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
-    message::{MessageDirection, UiMessage},
+    message::UiMessage,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
 };
 use core::f32;
 
+use crate::message::MessageData;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut},
-};
+use fyrox_graph::SceneGraph;
+use std::cell::RefCell;
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 /// A set of messages that can be used to modify [`Grid`] widget state.
@@ -56,33 +53,13 @@ pub enum GridMessage {
     /// Sets new border thickness for the grid.
     BorderThickness(f32),
 }
-
-impl GridMessage {
-    define_constructor!(
-        /// Creates a new [`Self::Rows`] message.
-        GridMessage:Rows => fn rows(Vec<Row>), layout: false
-    );
-
-    define_constructor!(
-        /// Creates a new [`Self::Columns`] message.
-        GridMessage:Columns => fn columns(Vec<Column>), layout: false
-    );
-
-    define_constructor!(
-        /// Creates a new [`Self::DrawBorder`] message.
-        GridMessage:DrawBorder => fn draw_border(bool), layout: false
-    );
-
-    define_constructor!(
-        /// Creates a new [`Self::BorderThickness`] message.
-        GridMessage:BorderThickness => fn border_thickness(f32), layout: false
-    );
-}
+impl MessageData for GridMessage {}
 
 /// Size mode defines how grid's dimension (see [`GridDimension`]) will behave on layout step.
 #[derive(
     Clone, Copy, PartialEq, Eq, Debug, Reflect, Visit, Default, AsRefStr, EnumString, VariantNames,
 )]
+#[reflect(type_uuid = "9c5dfbce-5df2-4a7f-8c57-c4473743a718")]
 pub enum SizeMode {
     /// The desired size of this dimension must be provided in advance,
     /// and it will always be rendered with exactly that size, regardless of what nodes it contains.
@@ -97,10 +74,9 @@ pub enum SizeMode {
     Stretch,
 }
 
-uuid_provider!(SizeMode = "9c5dfbce-5df2-4a7f-8c57-c4473743a718");
-
 /// Grid dimension defines sizing rules and constraints for [`Grid`]'s rows and columns.
 #[derive(Clone, Copy, PartialEq, Debug, Reflect, Visit, Default)]
+#[reflect(type_uuid = "5e894900-c14a-4eb6-acb9-1636efead4b4")]
 pub struct GridDimension {
     /// Current size mode of the dimension.
     pub size_mode: SizeMode,
@@ -110,19 +86,19 @@ pub struct GridDimension {
     pub desired_size: f32,
     /// Measured size of the dimension. It could be considered as "output" parameter of the dimension
     /// that will be filled after measurement layout step. It is used to calculate the grid's desired size.
+    #[reflect(read_only)]
     pub actual_size: f32,
     /// Local position along the axis of the dimension after arrangement step.
+    #[reflect(hidden)]
     pub location: f32,
     /// The number of children in this dimension that still need to be measured before the size is known.
-    /// For Auto rows and columns this is initially the number of nodes in that row or column,
+    /// For Auto rows and columns, this is initially the number of nodes in that row or column,
     /// and then it is reduced as nodes are measured.
     /// This is zero for all non-Auto rows and columns.
     #[visit(skip)]
     #[reflect(hidden)]
     unmeasured_node_count: usize,
 }
-
-uuid_provider!(GridDimension = "5e894900-c14a-4eb6-acb9-1636efead4b4");
 
 impl GridDimension {
     /// Generic constructor for [`GridDimension`].
@@ -188,7 +164,9 @@ pub type Row = GridDimension;
 /// #     text::TextBuilder,
 /// #     grid::{GridBuilder, GridDimension},
 /// # };
-/// fn create_text_grid(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::grid::Grid;
+///
+/// fn create_text_grid(ctx: &mut BuildContext) -> Handle<Grid> {
 ///     GridBuilder::new(
 ///         WidgetBuilder::new()
 ///             .with_child(
@@ -226,21 +204,24 @@ pub type Row = GridDimension;
 /// You then need to tell each child what row and column it belongs to via the [`WidgetBuilder::on_column`] and [`WidgetBuilder::on_row`]
 /// functions of their base widget. By default, all children will be placed into row 0, column 0.
 ///
-/// After that you need to provide sizing constraints for each row and column to the [`GridBuilder`] by using the [`GridBuilder::add_row`]
+/// After that, you need to provide sizing constraints for each row and column to the [`GridBuilder`] by using the [`GridBuilder::add_row`]
 /// and [`GridBuilder::add_column`] functions while providing a [`GridDimension`] instance to the call. [`GridDimension`] can be
 /// constructed with the following functions:
 ///
 /// * [`GridDimension::auto`] - Sizes the row or column so it's just large enough to fit the largest child's size.
 /// * [`GridDimension::stretch`] - Stretches the row or column to fill the parent's available space, if multiple rows or
-/// columns have this option the size is evenly distributed between them.
+/// columns have this option, the size is evenly distributed between them.
 /// * [`GridDimension::strict`] - Sets the row or column to be exactly the given value of pixels long. So a row will only
 /// be the given number of pixels wide, while a column will be that many pixels tall.
 ///
 /// You can add any number of rows and columns to a grid widget, and each grid cell does **not** need to have a UI widget
-/// in it to be valid. For example you can add a column and set it to a specific size via strict to provide spacing between
+/// in it to be valid. For example, you can add a column and set it to a specific size via strict to provide spacing between
 /// two other columns.
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "98ce15e2-bd62-497d-a37b-9b1cb4a1918c"
+)]
 pub struct Grid {
     /// Base widget of the grid.
     pub widget: Widget,
@@ -257,7 +238,7 @@ pub struct Grid {
     #[reflect(hidden)]
     pub cells: RefCell<Vec<Cell>>,
     /// A set of four groups, where each group contains cell indices. It is used for measurement
-    /// purposes to group the cells in specific way, so it can be measured in the correct order
+    /// purposes to group the cells in a specific way, so it can be measured in the correct order
     /// later.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -270,6 +251,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Grid {
             .with_variant("Grid", |ui| {
                 GridBuilder::new(WidgetBuilder::new().with_name("Grid"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -310,7 +292,7 @@ pub struct Cell {
 /// desired size information from other nodes, and so they are always measured first.
 ///
 /// Group 1 is special because it contains all the remaining auto-width nodes
-/// after group 0 has been measured, and group 1 may blocked from being measured
+/// after group 0 has been measured, and group 1 may be blocked from being measured
 /// due to group 2 not yet being measured to provide the desired size of the
 /// remaining auto rows.
 ///
@@ -357,7 +339,7 @@ fn calc_total_size_of_non_stretch_dims(dims: &[GridDimension]) -> Option<f32> {
         // This requires that all the autos be already measured.
         Some(dims.iter().map(|d| d.desired_size).sum())
     } else {
-        // We have at least one stretch but not all the autos are measured
+        // We have at least one stretch, but not all the autos are measured
         // so we fail.
         None
     }
@@ -420,8 +402,6 @@ fn arrange_dims(dims: &mut [GridDimension], final_size: f32) {
     }
 }
 
-uuid_provider!(Grid = "98ce15e2-bd62-497d-a37b-9b1cb4a1918c");
-
 impl Grid {
     fn initialize_measure(&self, ui: &UserInterface) {
         self.calc_needed_measurements(ui);
@@ -446,7 +426,7 @@ impl Grid {
                         .iter()
                         .copied()
                         .filter(|&c| {
-                            let Some(child_ref) = ui.try_get(c) else {
+                            let Ok(child_ref) = ui.try_get_node(c) else {
                                 return false;
                             };
                             child_ref.row() == row_index && child_ref.column() == column_index
@@ -470,13 +450,13 @@ impl Grid {
             }
         }
         for handle in self.children() {
-            let Some(node) = ui.try_get(*handle) else {
+            let Ok(node) = ui.try_get_node(*handle) else {
                 continue;
             };
             let Some(row) = rows.get_mut(node.row()) else {
                 Log::err(format!(
                     "Node row out of bounds: {} row:{}, column:{}",
-                    Reflect::type_name(node),
+                    node.type_info_ref().type_name,
                     node.row(),
                     node.column()
                 ));
@@ -485,7 +465,7 @@ impl Grid {
             let Some(col) = cols.get_mut(node.column()) else {
                 Log::err(format!(
                     "Node column out of bounds: {} row:{}, column:{}",
-                    Reflect::type_name(node),
+                    node.type_info_ref().type_name,
                     node.row(),
                     node.column()
                 ));
@@ -507,7 +487,7 @@ impl Grid {
         measure_width: bool,
         measure_height: bool,
     ) {
-        let Some(node) = ui.try_get(child) else {
+        let Ok(node) = ui.try_get_node(child) else {
             return;
         };
         let mut rows = self.rows.borrow_mut();
@@ -619,7 +599,7 @@ impl Control for Grid {
             let space_y = calc_avg_size_for_stretch_dim(&self.rows, available_size.y).unwrap();
             // Now that we finally have the vertical stretch amount, we can properly measure group 1 (auto width, stretch height).
             // This is the only time we measure a node twice. The first time was just to discover the width.
-            // This measurement is just for height, now that we can give the node the true available veritical size.
+            // This measurement is just for height, now that we can give the node the true available vertical size.
             self.measure_group_height(&groups[1], ui, Vector2::new(available_size.x, space_y));
             self.measure_group(&groups[3], ui, Vector2::new(space_x, space_y));
         }
@@ -704,32 +684,30 @@ impl Control for Grid {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(msg) = message.data::<GridMessage>() {
-            if message.direction() == MessageDirection::ToWidget
-                && message.destination() == self.handle
-            {
-                match msg {
-                    GridMessage::Rows(rows) => {
-                        if &*self.rows.borrow() != rows {
-                            self.rows
-                                .set_value_and_mark_modified(RefCell::new(rows.clone()));
-                            self.invalidate_layout();
-                        }
+        if let Some(msg) = message.data_for::<GridMessage>(self.handle) {
+            match msg {
+                GridMessage::Rows(rows) => {
+                    if &*self.rows.borrow() != rows {
+                        self.rows
+                            .set_value_and_mark_modified(RefCell::new(rows.clone()));
+                        self.invalidate_layout();
                     }
-                    GridMessage::Columns(columns) => {
-                        if &*self.columns.borrow() != columns {
-                            self.columns
-                                .set_value_and_mark_modified(RefCell::new(columns.clone()));
-                            self.invalidate_layout();
-                        }
+                }
+                GridMessage::Columns(columns) => {
+                    if &*self.columns.borrow() != columns {
+                        self.columns
+                            .set_value_and_mark_modified(RefCell::new(columns.clone()));
+                        self.invalidate_layout();
                     }
-                    GridMessage::DrawBorder(draw_border) => {
-                        self.draw_border.set_value_and_mark_modified(*draw_border);
-                    }
-                    GridMessage::BorderThickness(border_thickness) => {
-                        self.border_thickness
-                            .set_value_and_mark_modified(*border_thickness);
-                    }
+                }
+                GridMessage::DrawBorder(draw_border) => {
+                    self.draw_border.set_value_and_mark_modified(*draw_border);
+                    self.invalidate_visual();
+                }
+                GridMessage::BorderThickness(border_thickness) => {
+                    self.border_thickness
+                        .set_value_and_mark_modified(*border_thickness);
+                    self.invalidate_visual();
                 }
             }
         }
@@ -757,25 +735,25 @@ impl GridBuilder {
         }
     }
 
-    /// Adds a new row to the grid builder. Number of rows is unlimited.
+    /// Adds a new row to the grid builder. The number of rows is unlimited.
     pub fn add_row(mut self, row: Row) -> Self {
         self.rows.push(row);
         self
     }
 
-    /// Adds a new column to the grid builder. Number of columns is unlimited.
+    /// Adds a new column to the grid builder. The number of columns is unlimited.
     pub fn add_column(mut self, column: Column) -> Self {
         self.columns.push(column);
         self
     }
 
-    /// Adds a set of rows to the grid builder. Number of rows is unlimited.
+    /// Adds a set of rows to the grid builder. The number of rows is unlimited.
     pub fn add_rows(mut self, mut rows: Vec<Row>) -> Self {
         self.rows.append(&mut rows);
         self
     }
 
-    /// Adds a set of columnds to the grid builder. Number of columnds is unlimited.
+    /// Adds a set of columns to the grid builder. The number of columns is unlimited.
     pub fn add_columns(mut self, mut columns: Vec<Column>) -> Self {
         self.columns.append(&mut columns);
         self
@@ -794,7 +772,7 @@ impl GridBuilder {
     }
 
     /// Creates new [`Grid`] widget instance and adds it to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Grid> {
         let grid = Grid {
             widget: self.widget_builder.build(ctx),
             rows: RefCell::new(self.rows).into(),
@@ -804,7 +782,7 @@ impl GridBuilder {
             cells: Default::default(),
             groups: Default::default(),
         };
-        ctx.add_node(UiNode::new(grid))
+        ctx.add(grid)
     }
 }
 

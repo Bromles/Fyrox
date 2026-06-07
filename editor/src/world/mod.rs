@@ -22,7 +22,7 @@ use crate::{
     asset::item::AssetItem,
     fyrox::{
         core::pool::{ErasedHandle, Handle},
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
         gui::{
             border::BorderBuilder,
             button::{ButtonBuilder, ButtonMessage},
@@ -40,7 +40,7 @@ use crate::{
                 TreeBuilder, TreeExpansionStrategy, TreeMessage, TreeRoot, TreeRootBuilder,
                 TreeRootMessage,
             },
-            utils::{make_image_button_with_tooltip, make_simple_tooltip},
+            utils::make_simple_tooltip,
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowTitle},
             wrap_panel::WrapPanelBuilder,
@@ -51,11 +51,21 @@ use crate::{
     },
     load_image,
     message::MessageSender,
-    send_sync_message,
     utils::window_content,
     world::item::{DropAnchor, SceneItem, SceneItemBuilder, SceneItemMessage},
     Mode, Settings,
 };
+use fyrox::core::color::Color;
+use fyrox::core::pool::HandlesVecExtension;
+use fyrox::gui::button::Button;
+use fyrox::gui::scroll_viewer::ScrollViewer;
+use fyrox::gui::searchbar::SearchBar;
+use fyrox::gui::text_box::EmptyTextPlaceholder;
+use fyrox::gui::toggle::ToggleButton;
+use fyrox::gui::tree::Tree;
+use fyrox::gui::utils::ImageButtonBuilder;
+use fyrox::gui::window::Window;
+use fyrox::gui::wrap_panel::WrapPanel;
 use rust_fuzzy_search::fuzzy_compare;
 use std::{
     borrow::Cow,
@@ -70,6 +80,21 @@ pub mod graph;
 pub mod item;
 pub mod menu;
 pub mod selection;
+
+pub struct SceneItemIcon {
+    pub icon: TextureResource,
+    pub color: Color,
+}
+
+#[macro_export]
+macro_rules! scene_item_icon {
+    ($icon:expr,$color:expr) => {
+        $crate::load_image!($icon).map(|icon| SceneItemIcon {
+            icon,
+            color: $color,
+        })
+    };
+}
 
 pub trait WorldViewerDataProvider {
     fn root_node(&self) -> ErasedHandle;
@@ -90,7 +115,7 @@ pub trait WorldViewerDataProvider {
 
     fn is_valid_handle(&self, node: ErasedHandle) -> bool;
 
-    fn icon_of(&self, node: ErasedHandle) -> Option<TextureResource>;
+    fn icon_of(&self, node: ErasedHandle) -> Option<SceneItemIcon>;
 
     fn is_instance(&self, node: ErasedHandle) -> bool;
 
@@ -115,37 +140,37 @@ pub trait WorldViewerItemContextMenu {
 }
 
 pub struct WorldViewer {
-    pub window: Handle<UiNode>,
-    tree_root: Handle<UiNode>,
+    pub window: Handle<Window>,
+    tree_root: Handle<TreeRoot>,
     sender: MessageSender,
-    track_selection: Handle<UiNode>,
-    search_bar: Handle<UiNode>,
+    track_selection: Handle<ToggleButton>,
+    search_bar: Handle<SearchBar>,
     filter: String,
     stack: Vec<(Handle<UiNode>, ErasedHandle)>,
     /// Hack. Due to delayed execution of UI code we can't sync immediately after we
     /// did sync_to_model, instead we defer selection syncing to post_update() - at
     /// this moment UI is completely built and we can do syncing.
     pub sync_selection: bool,
-    node_path: Handle<UiNode>,
-    breadcrumbs: HashMap<Handle<UiNode>, Handle<UiNode>>,
-    collapse_all: Handle<UiNode>,
-    expand_all: Handle<UiNode>,
-    locate_selection: Handle<UiNode>,
-    scroll_view: Handle<UiNode>,
+    node_path: Handle<WrapPanel>,
+    breadcrumbs: HashMap<Handle<Button>, Handle<UiNode>>,
+    collapse_all: Handle<Button>,
+    expand_all: Handle<Button>,
+    locate_selection: Handle<Button>,
+    scroll_view: Handle<ScrollViewer>,
     pub item_context_menu: Option<Rc<RefCell<dyn WorldViewerItemContextMenu>>>,
-    node_to_view_map: HashMap<ErasedHandle, Handle<UiNode>>,
+    node_to_view_map: HashMap<ErasedHandle, Handle<SceneItem>>,
 }
 
 fn make_graph_node_item(
     name: Cow<str>,
     is_instance: bool,
-    icon: Option<TextureResource>,
+    icon: Option<SceneItemIcon>,
     handle: ErasedHandle,
     ctx: &mut BuildContext,
     context_menu: RcUiNodeHandle,
     sender: MessageSender,
     is_expanded: bool,
-) -> Handle<UiNode> {
+) -> Handle<SceneItem> {
     SceneItemBuilder::new(
         TreeBuilder::new(
             WidgetBuilder::new()
@@ -165,11 +190,8 @@ fn make_graph_node_item(
     .build(ctx, sender)
 }
 
-fn tree_node(ui: &UserInterface, tree: Handle<UiNode>) -> ErasedHandle {
-    ui.node(tree)
-        .cast::<SceneItem>()
-        .expect("Malformed scene item!")
-        .entity_handle
+fn tree_node(ui: &UserInterface, tree: Handle<SceneItem>) -> ErasedHandle {
+    ui[tree].entity_handle
 }
 
 fn colorize(handle: Handle<UiNode>, ui: &UserInterface, index: &mut usize) {
@@ -177,18 +199,14 @@ fn colorize(handle: Handle<UiNode>, ui: &UserInterface, index: &mut usize) {
 
     if let Some(decorator) = node.cast::<Decorator>() {
         if node.parent().is_some() {
-            let new_brush = if *index % 2 == 0 {
+            let new_brush = if (*index).is_multiple_of(2) {
                 ui.style.property(Style::BRUSH_PRIMARY)
             } else {
                 ui.style.property(Style::BRUSH_LIGHTER_PRIMARY)
             };
 
             if *decorator.normal_brush != new_brush {
-                ui.send_message(DecoratorMessage::normal_brush(
-                    handle,
-                    MessageDirection::ToWidget,
-                    new_brush,
-                ));
+                ui.send(handle, DecoratorMessage::NormalBrush(new_brush));
             }
 
             *index += 1;
@@ -230,9 +248,8 @@ impl WorldViewer {
                 .on_column(1)
                 .with_margin(Thickness::uniform(2.0)),
         )
+        .with_empty_text_placeholder(EmptyTextPlaceholder::Text("Search for an object"))
         .build(ctx);
-
-        let size = 15.0;
 
         let track_selection_tooltip = make_simple_tooltip(
             ctx,
@@ -247,16 +264,16 @@ impl WorldViewer {
                 .with_tab_index(Some(3))
                 .with_vertical_alignment(VerticalAlignment::Center)
                 .with_margin(Thickness::uniform(1.0))
-                .with_width(22.0)
-                .with_height(22.0)
+                .with_width(26.0)
+                .with_height(26.0)
                 .with_tooltip(track_selection_tooltip),
         )
         .with_content(
             ImageBuilder::new(
                 WidgetBuilder::new()
                     .with_margin(Thickness::uniform(1.0))
-                    .with_width(10.0)
-                    .with_height(14.0)
+                    .with_width(13.0)
+                    .with_height(17.0)
                     .with_horizontal_alignment(HorizontalAlignment::Center)
                     .with_vertical_alignment(VerticalAlignment::Center),
             )
@@ -272,36 +289,27 @@ impl WorldViewer {
                 .on_row(0)
                 .on_column(0)
                 .with_child({
-                    collapse_all = make_image_button_with_tooltip(
-                        ctx,
-                        size,
-                        size,
-                        load_image!("../../resources/collapse.png"),
-                        "Collapse Everything",
-                        Some(0),
-                    );
+                    collapse_all = ImageButtonBuilder::default()
+                        .with_image(load_image!("../../resources/collapse.png"))
+                        .with_tooltip("Collapse Everything")
+                        .with_tab_index(Some(0))
+                        .build_button(ctx);
                     collapse_all
                 })
                 .with_child({
-                    expand_all = make_image_button_with_tooltip(
-                        ctx,
-                        size,
-                        size,
-                        load_image!("../../resources/expand.png"),
-                        "Expand Everything",
-                        Some(1),
-                    );
+                    expand_all = ImageButtonBuilder::default()
+                        .with_image(load_image!("../../resources/expand.png"))
+                        .with_tooltip("Expand Everything")
+                        .with_tab_index(Some(1))
+                        .build_button(ctx);
                     expand_all
                 })
                 .with_child({
-                    locate_selection = make_image_button_with_tooltip(
-                        ctx,
-                        size,
-                        size,
-                        load_image!("../../resources/locate.png"),
-                        "Locate Selection",
-                        Some(2),
-                    );
+                    locate_selection = ImageButtonBuilder::default()
+                        .with_image(load_image!("../../resources/locate.png"))
+                        .with_tooltip("Locate Selection")
+                        .with_tab_index(Some(2))
+                        .build_button(ctx);
                     locate_selection
                 })
                 .with_child(track_selection),
@@ -320,7 +328,6 @@ impl WorldViewer {
         .build(ctx);
 
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("WorldOutliner"))
-            .can_minimize(false)
             .with_title(WindowTitle::text("World Viewer"))
             .with_tab_label("World")
             .with_content(
@@ -418,18 +425,15 @@ impl WorldViewer {
             )
             .build(ctx);
 
-        send_sync_message(
-            ui,
-            WidgetMessage::link_reverse(element, MessageDirection::ToWidget, self.node_path),
-        );
+        ui.send_sync(element, WidgetMessage::link_with_reverse(self.node_path));
 
         self.breadcrumbs.insert(element, associated_item);
     }
 
     fn clear_breadcrumbs(&mut self, ui: &UserInterface) {
         self.breadcrumbs.clear();
-        for &child in ui.node(self.node_path).children() {
-            send_sync_message(ui, WidgetMessage::remove(child, MessageDirection::ToWidget));
+        for &child in ui[self.node_path].children() {
+            ui.send_sync(child, WidgetMessage::Remove);
         }
     }
 
@@ -449,16 +453,17 @@ impl WorldViewer {
                         .map(|i| i.entity_handle == node_handle)
                         .unwrap_or_default()
                 });
-                assert!(view.is_some());
-                self.build_breadcrumb(
-                    &format!(
-                        "{}({})",
-                        data_provider.name_of(node_handle).unwrap_or_default(),
-                        node_handle
-                    ),
-                    view,
-                    ui,
-                );
+                if view.is_some() {
+                    self.build_breadcrumb(
+                        &format!(
+                            "{}({})",
+                            data_provider.name_of(node_handle).unwrap_or_default(),
+                            node_handle
+                        ),
+                        view,
+                        ui,
+                    );
+                }
 
                 node_handle = data_provider.parent_of(node_handle);
             }
@@ -473,12 +478,18 @@ impl WorldViewer {
     ) {
         // Sync tree structure with graph structure.
         self.stack.clear();
-        self.stack.push((self.tree_root, data_provider.root_node()));
+        self.stack
+            .push((self.tree_root.to_base(), data_provider.root_node()));
         while let Some((tree_handle, node_handle)) = self.stack.pop() {
             let ui_node = ui.node(tree_handle);
 
             if let Some(item) = ui_node.cast::<SceneItem>() {
-                let mut items = item.tree.items.clone();
+                let mut items = item
+                    .tree
+                    .items
+                    .iter()
+                    .map(|i| i.transmute::<SceneItem>())
+                    .collect::<Vec<_>>();
 
                 let mut i = 0;
                 while i < items.len() {
@@ -486,10 +497,7 @@ impl WorldViewer {
 
                     let child_node = tree_node(ui, item);
                     if !data_provider.is_node_has_child(node_handle, child_node) {
-                        send_sync_message(
-                            ui,
-                            TreeMessage::remove_item(tree_handle, MessageDirection::ToWidget, item),
-                        );
+                        ui.send_sync(tree_handle, TreeMessage::RemoveItem(item.transmute()));
                         if let Some(existing_view) = self.node_to_view_map.get(&child_node) {
                             if *existing_view == item {
                                 self.node_to_view_map.remove(&child_node);
@@ -512,7 +520,7 @@ impl WorldViewer {
                     }
                     if !found {
                         let menu = self.item_context_menu.as_ref().map_or(
-                            RcUiNodeHandle::new(Default::default(), ui.sender()),
+                            RcUiNodeHandle::new(Handle::<UiNode>::default(), ui.sender()),
                             |menu| menu.borrow().menu(),
                         );
                         let graph_node_item = make_graph_node_item(
@@ -525,13 +533,10 @@ impl WorldViewer {
                             self.sender.clone(),
                             fetch_expanded_state(child_handle, data_provider, settings),
                         );
-                        send_sync_message(
-                            ui,
-                            TreeMessage::add_item(
-                                tree_handle,
-                                MessageDirection::ToWidget,
-                                graph_node_item,
-                            ),
+
+                        ui.send_sync(
+                            tree_handle,
+                            TreeMessage::AddItem(graph_node_item.transmute()),
                         );
                         items.push(graph_node_item);
                         self.node_to_view_map.insert(child_handle, graph_node_item);
@@ -540,7 +545,7 @@ impl WorldViewer {
 
                 for &tree in items.iter() {
                     let child = tree_node(ui, tree);
-                    self.stack.push((tree, child));
+                    self.stack.push((tree.to_base(), child));
                 }
 
                 // Check order
@@ -555,24 +560,26 @@ impl WorldViewer {
                     }
 
                     if !is_order_match {
-                        ui.send_message(TreeMessage::set_items(
+                        ui.send(
                             tree_handle,
-                            MessageDirection::ToWidget,
-                            data_provider
-                                .children_of(node_handle)
-                                .into_iter()
-                                .map(|c| self.node_to_view_map.get(&c).cloned().unwrap())
-                                .collect(),
-                            false,
-                        ));
+                            TreeMessage::SetItems {
+                                items: data_provider
+                                    .children_of(node_handle)
+                                    .into_iter()
+                                    .map(|c| self.node_to_view_map.get(&c).cloned().unwrap())
+                                    .collect::<Vec<_>>()
+                                    .to_any(),
+                                remove_previous: false,
+                            },
+                        );
                     }
                 }
             } else if let Some(tree_root) = ui_node.cast::<TreeRoot>() {
                 if tree_root.items.is_empty()
-                    || tree_node(ui, tree_root.items[0]) != data_provider.root_node()
+                    || tree_node(ui, tree_root.items[0].transmute()) != data_provider.root_node()
                 {
                     let menu = self.item_context_menu.as_ref().map_or(
-                        RcUiNodeHandle::new(Default::default(), ui.sender()),
+                        RcUiNodeHandle::new(Handle::<UiNode>::default(), ui.sender()),
                         |menu| menu.borrow().menu(),
                     );
                     let new_root_item = make_graph_node_item(
@@ -585,56 +592,46 @@ impl WorldViewer {
                         self.sender.clone(),
                         fetch_expanded_state(node_handle, data_provider, settings),
                     );
-                    send_sync_message(
-                        ui,
-                        TreeRootMessage::items(
-                            tree_handle,
-                            MessageDirection::ToWidget,
-                            vec![new_root_item],
-                        ),
+
+                    ui.send_sync(
+                        tree_handle,
+                        TreeRootMessage::Items(vec![new_root_item.transmute()]),
                     );
                     self.node_to_view_map.insert(node_handle, new_root_item);
-                    self.stack.push((new_root_item, node_handle));
+                    self.stack.push((new_root_item.transmute(), node_handle));
                 } else {
-                    self.stack.push((tree_root.items[0], node_handle));
+                    self.stack
+                        .push((tree_root.items[0].transmute(), node_handle));
                 }
             }
         }
 
         // Sync items data.
-        let mut stack = vec![self.tree_root];
+        let mut stack = vec![self.tree_root.to_base()];
         while let Some(handle) = stack.pop() {
             let ui_node = ui.node(handle);
 
             if let Some(item) = ui_node.cast::<SceneItem>() {
                 if let Some(name) = data_provider.name_of(item.entity_handle) {
                     if item.name() != name {
-                        send_sync_message(
-                            ui,
-                            SceneItemMessage::name(
-                                handle,
-                                MessageDirection::ToWidget,
-                                (*name).to_owned(),
-                            ),
-                        );
+                        ui.send_sync(handle, SceneItemMessage::Name((*name).to_owned()));
                     }
-
-                    stack.extend_from_slice(&item.tree.items);
+                    stack.extend(item.tree.items.iter().map(|v| v.to_base()));
                 }
             } else if let Some(root) = ui_node.cast::<TreeRoot>() {
-                stack.extend_from_slice(&root.items)
+                stack.extend(root.items.iter().map(|v| v.to_base()))
             }
         }
 
         self.colorize(ui);
 
         self.node_to_view_map
-            .retain(|k, v| data_provider.is_valid_handle(*k) && ui.try_get(*v).is_some());
+            .retain(|k, v| data_provider.is_valid_handle(*k) && ui.try_get(*v).is_ok());
     }
 
     pub fn colorize(&mut self, ui: &UserInterface) {
         let mut index = 0;
-        colorize(self.tree_root, ui, &mut index);
+        colorize(self.tree_root.to_base(), ui, &mut index);
     }
 
     fn apply_filter(&self, data_provider: &dyn WorldViewerDataProvider, ui: &UserInterface) {
@@ -652,26 +649,21 @@ impl WorldViewer {
                 is_any_match |= name.to_lowercase().contains(filter)
                     || fuzzy_compare(filter, name.to_lowercase().as_str()) >= 0.33;
 
-                ui.send_message(WidgetMessage::visibility(
-                    node,
-                    MessageDirection::ToWidget,
-                    is_any_match,
-                ));
+                ui.send(node, WidgetMessage::Visibility(is_any_match));
             }
 
             is_any_match
         }
 
-        apply_filter_recursive(self.tree_root, &self.filter.to_lowercase(), ui);
+        apply_filter_recursive(self.tree_root.to_base(), &self.filter.to_lowercase(), ui);
 
         if self.filter.is_empty() {
             if let Some(first) = data_provider.selection().first() {
                 if let Some(view) = self.node_to_view_map.get(first) {
-                    ui.send_message(ScrollViewerMessage::bring_into_view(
+                    ui.send(
                         self.scroll_view,
-                        MessageDirection::ToWidget,
-                        *view,
-                    ));
+                        ScrollViewerMessage::BringIntoView(view.to_base()),
+                    );
                 }
             }
         }
@@ -694,7 +686,7 @@ impl WorldViewer {
         ui: &UserInterface,
         settings: &mut Settings,
     ) {
-        if let Some(TreeRootMessage::Selected(selection)) = message.data::<TreeRootMessage>() {
+        if let Some(TreeRootMessage::Select(selection)) = message.data::<TreeRootMessage>() {
             if message.destination() == self.tree_root
                 && message.direction() == MessageDirection::FromWidget
             {
@@ -703,20 +695,14 @@ impl WorldViewer {
         } else if let Some(&WidgetMessage::Drop(node)) = message.data::<WidgetMessage>() {
             self.handle_drop(ui, data_provider, message.destination(), node);
         } else if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
-            if let Some(&view) = self.breadcrumbs.get(&message.destination()) {
-                if let Some(graph_node) = ui.try_get(view).and_then(|n| n.cast::<SceneItem>()) {
+            if let Some(&view) = self.breadcrumbs.get(&message.destination().to_variant()) {
+                if let Ok(graph_node) = ui.try_get_of_type::<SceneItem>(view) {
                     data_provider.on_selection_changed(&[graph_node.entity_handle]);
                 }
             } else if message.destination() == self.collapse_all {
-                ui.send_message(TreeRootMessage::collapse_all(
-                    self.tree_root,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.tree_root, TreeRootMessage::CollapseAll);
             } else if message.destination() == self.expand_all {
-                ui.send_message(TreeRootMessage::expand_all(
-                    self.tree_root,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.tree_root, TreeRootMessage::ExpandAll);
             } else if message.destination() == self.locate_selection {
                 self.locate_selection(&data_provider.selection(), ui)
             }
@@ -736,7 +722,7 @@ impl WorldViewer {
         } else if let Some(TreeMessage::Expand { expand, .. }) = message.data() {
             if let Some(scene_view_item) = ui
                 .node(message.destination())
-                .query_component::<SceneItem>()
+                .self_or_field_ref::<SceneItem>()
             {
                 if let Some(path) = data_provider.path() {
                     settings
@@ -760,36 +746,31 @@ impl WorldViewer {
         let tree_to_focus = self.map_selection(selection, ui);
 
         if let Some(tree_to_focus) = tree_to_focus.first() {
-            ui.send_message(TreeMessage::expand(
+            ui.send(
                 *tree_to_focus,
-                MessageDirection::ToWidget,
-                true,
-                TreeExpansionStrategy::RecursiveAncestors,
-            ));
+                TreeMessage::Expand {
+                    expand: true,
+                    expansion_strategy: TreeExpansionStrategy::RecursiveAncestors,
+                },
+            );
 
-            ui.send_message(ScrollViewerMessage::bring_into_view(
+            ui.send(
                 self.scroll_view,
-                MessageDirection::ToWidget,
-                *tree_to_focus,
-            ));
+                ScrollViewerMessage::BringIntoView(tree_to_focus.to_base()),
+            );
         }
     }
 
     fn handle_selection(
         &self,
-        selection: &[Handle<UiNode>],
+        selection: &[Handle<Tree>],
         data_provider: &dyn WorldViewerDataProvider,
         ui: &UserInterface,
     ) {
         data_provider.on_selection_changed(
             &selection
                 .iter()
-                .map(|selected_item| {
-                    ui.node(*selected_item)
-                        .cast::<SceneItem>()
-                        .unwrap()
-                        .entity_handle
-                })
+                .map(|selected_item| ui[selected_item.transmute::<SceneItem>()].entity_handle)
                 .collect::<Vec<_>>(),
         );
     }
@@ -824,8 +805,12 @@ impl WorldViewer {
         }
     }
 
-    fn map_selection(&self, selection: &[ErasedHandle], ui: &UserInterface) -> Vec<Handle<UiNode>> {
-        map_selection(selection, self.tree_root, ui)
+    fn map_selection(
+        &self,
+        selection: &[ErasedHandle],
+        ui: &UserInterface,
+    ) -> Vec<Handle<SceneItem>> {
+        map_selection(selection, self.tree_root.to_base(), ui)
     }
 
     pub fn post_update(
@@ -836,13 +821,8 @@ impl WorldViewer {
     ) {
         // Hack. See `self.sync_selection` for details.
         if self.sync_selection {
-            let trees = self.map_selection(&data_provider.selection(), ui);
-
-            send_sync_message(
-                ui,
-                TreeRootMessage::select(self.tree_root, MessageDirection::ToWidget, trees),
-            );
-
+            let trees = self.map_selection(&data_provider.selection(), ui).to_any();
+            ui.send_sync(self.tree_root, TreeRootMessage::Select(trees));
             self.update_breadcrumbs(ui, data_provider);
             if settings.selection.track_selection {
                 self.locate_selection(&data_provider.selection(), ui);
@@ -855,41 +835,31 @@ impl WorldViewer {
     pub fn clear(&mut self, ui: &UserInterface) {
         self.node_to_view_map.clear();
         self.clear_breadcrumbs(ui);
-        ui.send_message(TreeRootMessage::items(
-            self.tree_root,
-            MessageDirection::ToWidget,
-            vec![],
-        ));
+        ui.send(self.tree_root, TreeRootMessage::Items(vec![]));
     }
 
     pub fn on_configure(&self, ui: &UserInterface, settings: &Settings) {
-        ui.send_message(ToggleButtonMessage::toggled(
+        ui.send(
             self.track_selection,
-            MessageDirection::ToWidget,
-            settings.selection.track_selection,
-        ));
+            ToggleButtonMessage::Toggled(settings.selection.track_selection),
+        );
     }
 
     pub fn on_mode_changed(&mut self, ui: &UserInterface, mode: &Mode) {
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             window_content(self.window, ui),
-            MessageDirection::ToWidget,
-            mode.is_edit(),
-        ));
+            WidgetMessage::Enabled(mode.is_edit()),
+        );
     }
 
     pub fn validate(&self, data_provider: &dyn WorldViewerDataProvider, ui: &UserInterface) {
         for (node_handle, result) in data_provider.validate() {
             if let Some(view) = self.node_to_view_map.get(&node_handle) {
-                let view_ref = ui.node(*view).query_component::<SceneItem>().unwrap();
-
+                let view_ref = &ui[*view];
                 if view_ref.warning_icon.is_none() && result.is_err()
                     || view_ref.warning_icon.is_some() && result.is_ok()
                 {
-                    send_sync_message(
-                        ui,
-                        SceneItemMessage::validate(*view, MessageDirection::ToWidget, result),
-                    );
+                    ui.send_sync(*view, SceneItemMessage::Validate(result));
                 }
             }
         }
@@ -900,15 +870,16 @@ fn map_selection(
     selection: &[ErasedHandle],
     root_node: Handle<UiNode>,
     ui: &UserInterface,
-) -> Vec<Handle<UiNode>> {
+) -> Vec<Handle<SceneItem>> {
     selection
         .iter()
         .filter_map(|&handle| {
-            let item = ui.find_handle(root_node, &mut |n| {
-                n.cast::<SceneItem>()
-                    .map(|n| n.entity_handle == handle)
-                    .unwrap_or_default()
-            });
+            let item = ui
+                .find_handle(root_node, &mut |n| {
+                    n.cast::<SceneItem>()
+                        .is_some_and(|n| n.entity_handle == handle)
+                })
+                .to_variant();
             if item.is_some() {
                 Some(item)
             } else {

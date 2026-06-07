@@ -82,6 +82,7 @@ use fyrox_core::{find_by_name_mut, find_by_name_ref, NameProvider};
 ///
 /// ```
 #[derive(Default, Debug, Visit, Reflect, Clone, PartialEq)]
+#[reflect(type_uuid = "e24e025c-b816-49f7-8227-f74f75862403")]
 pub struct MachineLayer<T: EntityId> {
     name: String,
 
@@ -310,7 +311,7 @@ impl<T: EntityId> MachineLayer<T> {
         animations: &AnimationContainer<T>,
         strategy: AnimationEventCollectionStrategy,
     ) -> LayerAnimationEventsCollection<T> {
-        if let Some(state) = self.states.try_borrow(self.active_state) {
+        if let Ok(state) = self.states.try_borrow(self.active_state) {
             return LayerAnimationEventsCollection {
                 source: AnimationEventsSource::State {
                     handle: self.active_state,
@@ -324,8 +325,8 @@ impl<T: EntityId> MachineLayer<T> {
                     })
                     .unwrap_or_default(),
             };
-        } else if let Some(transition) = self.transitions.try_borrow(self.active_transition) {
-            if let (Some(source_state), Some(dest_state)) = (
+        } else if let Ok(transition) = self.transitions.try_borrow(self.active_transition) {
+            if let (Ok(source_state), Ok(dest_state)) = (
                 self.states.try_borrow(transition.source()),
                 self.states.try_borrow(transition.dest()),
             ) {
@@ -333,7 +334,7 @@ impl<T: EntityId> MachineLayer<T> {
                 match strategy {
                     AnimationEventCollectionStrategy::All => {
                         for state in [source_state, dest_state] {
-                            if let Some(root) = self.nodes.try_borrow(state.root) {
+                            if let Ok(root) = self.nodes.try_borrow(state.root) {
                                 events.extend(root.collect_animation_events(
                                     &self.nodes,
                                     params,
@@ -350,7 +351,7 @@ impl<T: EntityId> MachineLayer<T> {
                             dest_state
                         };
 
-                        if let Some(pose_source) = self.nodes.try_borrow(input.root) {
+                        if let Ok(pose_source) = self.nodes.try_borrow(input.root) {
                             events = pose_source.collect_animation_events(
                                 &self.nodes,
                                 params,
@@ -366,7 +367,7 @@ impl<T: EntityId> MachineLayer<T> {
                             source_state
                         };
 
-                        if let Some(pose_source) = self.nodes.try_borrow(input.root) {
+                        if let Ok(pose_source) = self.nodes.try_borrow(input.root) {
                             events = pose_source.collect_animation_events(
                                 &self.nodes,
                                 params,
@@ -581,7 +582,7 @@ impl<T: EntityId> MachineLayer<T> {
         animations: &AnimationContainer<T>,
     ) -> bool {
         self.animations_of_state(state)
-            .filter_map(|a| animations.try_get(a))
+            .filter_map(|a| animations.try_get(a).ok())
             .all(|a| a.has_ended())
     }
 
@@ -610,7 +611,7 @@ impl<T: EntityId> MachineLayer<T> {
                     }
 
                     if transition.condition.calculate_value(parameters, animations) {
-                        if let Some(active_state) = self.states.try_borrow(self.active_state) {
+                        if let Ok(active_state) = self.states.try_borrow(self.active_state) {
                             for action in active_state.on_leave_actions.iter() {
                                 action.apply(animations);
                             }
@@ -624,7 +625,7 @@ impl<T: EntityId> MachineLayer<T> {
                             );
                         }
 
-                        if let Some(source) = self.states.try_borrow(transition.dest()) {
+                        if let Ok(source) = self.states.try_borrow(transition.dest()) {
                             for action in source.on_enter_actions.iter() {
                                 action.apply(animations);
                             }
@@ -654,11 +655,11 @@ impl<T: EntityId> MachineLayer<T> {
                 let transition = &mut self.transitions[self.active_transition];
 
                 // Blend between source and dest states.
-                if let Some(source_pose) = self.states[transition.source()].pose(&self.nodes) {
+                if let Ok(source_pose) = self.states[transition.source()].pose(&self.nodes) {
                     self.final_pose
                         .blend_with(&source_pose, 1.0 - transition.blend_factor());
                 }
-                if let Some(dest_pose) = self.states[transition.dest()].pose(&self.nodes) {
+                if let Ok(dest_pose) = self.states[transition.dest()].pose(&self.nodes) {
                     self.final_pose
                         .blend_with(&dest_pose, transition.blend_factor());
                 }
@@ -691,7 +692,7 @@ impl<T: EntityId> MachineLayer<T> {
             } else {
                 // We must have active state all the time when we do not have any active transition.
                 // Just get pose from active state.
-                if let Some(active_state_pose) = self.states[self.active_state].pose(&self.nodes) {
+                if let Ok(active_state_pose) = self.states[self.active_state].pose(&self.nodes) {
                     active_state_pose.clone_into(&mut self.final_pose);
                 }
             }

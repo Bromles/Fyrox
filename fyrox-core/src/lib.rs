@@ -25,11 +25,10 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::from_over_into)]
 #![allow(clippy::doc_lazy_continuation)]
+#![allow(mismatched_lifetime_syntaxes)]
 
 #[macro_use]
 extern crate memoffset;
-#[macro_use]
-extern crate lazy_static;
 
 pub use arrayvec;
 pub use byteorder;
@@ -43,6 +42,7 @@ pub use uuid;
 use crate::visitor::{Visit, VisitResult, Visitor};
 use bytemuck::Pod;
 use fxhash::FxHashMap;
+pub use safelock::*;
 use std::collections::hash_map::Entry;
 use std::ffi::OsString;
 use std::hash::Hasher;
@@ -54,6 +54,7 @@ use std::{
 };
 pub mod color;
 pub mod color_gradient;
+pub mod dyntype;
 pub mod early;
 pub mod io;
 pub mod log;
@@ -65,10 +66,10 @@ pub mod pool;
 pub mod quadtree;
 pub mod rectpack;
 pub mod reflect;
+mod safelock;
 pub mod sparse;
 pub mod sstorage;
 pub mod task;
-pub mod type_traits;
 pub mod variable;
 pub mod visitor;
 pub mod watcher;
@@ -88,7 +89,6 @@ pub use wasm_bindgen_futures;
 #[cfg(target_arch = "wasm32")]
 pub use web_sys;
 
-pub use type_traits::prelude::*;
 /// Defines as_(variant), as_mut_(variant) and is_(variant) methods.
 #[macro_export]
 macro_rules! define_is_as {
@@ -308,6 +308,9 @@ pub fn hash_combine(lhs: u64, rhs: u64) -> u64 {
 /// The last component of the path is permitted to not exist, so long as the rest of the path exists.
 pub fn make_relative_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, std::io::Error> {
     let path = path.as_ref();
+    if path.as_os_str() == "." {
+        return Ok(path.to_path_buf());
+    }
     // Canonicalization requires the full path to exist, so remove the file name before
     // calling canonicalize.
     let file_name = path.file_name().ok_or(std::io::Error::new(
@@ -324,6 +327,23 @@ pub fn make_relative_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, std::io::E
     } else {
         Path::new(".")
     };
+
+    let cwd = std::env::current_dir()?;
+
+    // Try without canonicalization first to preserve symlinks.
+    let non_canon_dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        cwd.join(dir)
+    };
+    if non_canon_dir.is_dir() {
+        let non_canon_path = non_canon_dir.join(file_name);
+        if let Ok(relative_path) = non_canon_path.strip_prefix(&cwd) {
+            return Ok(replace_slashes(relative_path));
+        }
+    }
+
+    // Canonicalize to resolve `.` and `..` components.
     let canon_path = dir
         .canonicalize()
         .map_err(|err| {
@@ -333,13 +353,49 @@ pub fn make_relative_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, std::io::E
             ))
         })?
         .join(file_name);
-    match canon_path.strip_prefix(std::env::current_dir()?.canonicalize()?) {
-        Ok(relative_path) => Ok(replace_slashes(relative_path)),
-        Err(err) => Err(std::io::Error::other(format!(
-            "unable to strip prefix from '{}'! Reason: {err}",
-            canon_path.display()
-        ))),
+    let canon_cwd = cwd.canonicalize()?;
+    if let Ok(relative_path) = canon_path.strip_prefix(&canon_cwd) {
+        return Ok(replace_slashes(relative_path));
     }
+
+    // Last resort: resolve via symlinks in cwd to map canonical paths back to project-relative paths.
+    if let Some(relative) = find_symlink_relative_path(&cwd, &canon_path) {
+        return Ok(replace_slashes(relative));
+    }
+
+    Err(std::io::Error::other(format!(
+        "unable to strip prefix from '{}'! Reason: prefix not found",
+        canon_path.display()
+    )))
+}
+
+/// Searches `base_dir` (up to 4 levels deep) for a symlink whose target is a prefix of
+/// `canon_path`, returning the relative path through that symlink.
+fn find_symlink_relative_path(base_dir: &Path, canon_path: &Path) -> Option<PathBuf> {
+    fn walk(dir: &Path, prefix: &Path, canon_path: &Path, depth: u32) -> Option<PathBuf> {
+        const MAX_DEPTH: u32 = 4;
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_symlink() {
+                if let Ok(link_target) = entry_path.canonicalize() {
+                    if let Ok(rest) = canon_path.strip_prefix(&link_target) {
+                        let relative_link = entry_path.strip_prefix(prefix).ok()?;
+                        return Some(relative_link.join(rest));
+                    }
+                }
+            } else if entry_path.is_dir() {
+                if let Some(result) = walk(&entry_path, prefix, canon_path, depth + 1) {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+    walk(base_dir, base_dir, canon_path, 0)
 }
 
 /// "Transmutes" array of any sized type to a slice of bytes.
@@ -578,8 +634,9 @@ mod test {
     use std::path::Path;
 
     use crate::{
-        append_extension, cmp_strings_case_insensitive, combine_uuids, hash_combine,
-        make_relative_path, transmute_vec_as_bytes,
+        append_extension, cmp_strings_case_insensitive, hash_combine, make_relative_path,
+        reflect::prelude::*,
+        transmute_vec_as_bytes,
         visitor::{Visit, Visitor},
         BiDirHashMap,
     };
@@ -748,6 +805,47 @@ mod test {
         assert!(make_relative_path(Path::new("fake_dir").join(Path::new("foo.txt"))).is_err());
         make_relative_path(Path::new("Cargo.toml")).unwrap();
         make_relative_path(Path::new("Cargo.toml").canonicalize().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_make_relative_path_with_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let cwd = std::env::current_dir().unwrap();
+        let tmp = std::env::temp_dir().join("fyrox_symlink_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let project_dir = tmp.join("project");
+        let real_assets = tmp.join("real_assets");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&real_assets).unwrap();
+        std::fs::write(real_assets.join("test.txt"), "hello").unwrap();
+        symlink(&real_assets, project_dir.join("data")).unwrap();
+
+        std::env::set_current_dir(&project_dir).unwrap();
+
+        let real_path = real_assets.join("test.txt");
+        let result = make_relative_path(&real_path).unwrap();
+        assert_eq!(result, Path::new("data/test.txt"));
+
+        let symlink_path = project_dir.join("data").join("test.txt");
+        let result = make_relative_path(&symlink_path).unwrap();
+        assert_eq!(result, Path::new("data/test.txt"));
+
+        let real_textures = tmp.join("real_textures");
+        let assets_dir = project_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::create_dir_all(&real_textures).unwrap();
+        std::fs::write(real_textures.join("brick.png"), "img").unwrap();
+        symlink(&real_textures, assets_dir.join("textures")).unwrap();
+
+        let real_path = real_textures.join("brick.png");
+        let result = make_relative_path(&real_path).unwrap();
+        assert_eq!(result, Path::new("assets/textures/brick.png"));
+
+        std::env::set_current_dir(cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

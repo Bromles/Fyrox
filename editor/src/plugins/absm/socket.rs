@@ -20,14 +20,11 @@
 
 use crate::fyrox::core::pool::ErasedHandle;
 use crate::fyrox::{
-    core::{
-        algebra::Vector2, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, visitor::prelude::*,
-    },
+    core::{algebra::Vector2, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     gui::{
-        define_constructor, define_widget_deref,
+        define_widget_deref,
         grid::{Column, GridBuilder, Row},
-        message::{MessageDirection, MouseButton, UiMessage},
+        message::{MouseButton, UiMessage},
         stack_panel::StackPanelBuilder,
         text::TextBuilder,
         vector_image::{Primitive, VectorImageBuilder},
@@ -36,29 +33,31 @@ use crate::fyrox::{
     },
 };
 
+use fyrox::gui::message::MessageData;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
-use std::ops::{Deref, DerefMut};
+use fyrox::gui::vector_image::VectorImage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketMessage {
     // Occurs when user clicks on socket and starts dragging it.
     StartDragging,
 }
-
-impl SocketMessage {
-    define_constructor!(SocketMessage:StartDragging => fn start_dragging(), layout: false);
-}
+impl MessageData for SocketMessage {}
 
 #[derive(Copy, Clone, PartialEq, Hash, Debug, Eq, Visit, Reflect, Default)]
+#[reflect(type_uuid = "c77c74cf-d055-4ab3-8d20-67749e276169")]
 pub enum SocketDirection {
     #[default]
     Input,
     Output,
 }
 
-#[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "a6c0473e-7073-4e91-a681-cf88795af52a"
+)]
 pub struct Socket {
     widget: Widget,
     click_position: Option<Vector2<f32>>,
@@ -66,7 +65,7 @@ pub struct Socket {
     pub direction: SocketDirection,
     #[allow(dead_code)] // TODO
     editor: Handle<UiNode>,
-    pin: Handle<UiNode>,
+    pin: Handle<VectorImage>,
     pub index: usize,
 }
 
@@ -74,57 +73,47 @@ define_widget_deref!(Socket);
 
 const RADIUS: f32 = 8.0;
 
-uuid_provider!(Socket = "a6c0473e-7073-4e91-a681-cf88795af52a");
-
 impl Control for Socket {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
         if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
-                WidgetMessage::MouseDown { button, pos } => {
-                    if *button == MouseButton::Left && message.destination() == self.pin {
-                        self.click_position = Some(*pos);
+                WidgetMessage::MouseDown { button, pos }
+                    if *button == MouseButton::Left && message.destination() == self.pin =>
+                {
+                    self.click_position = Some(*pos);
 
-                        ui.capture_mouse(self.handle());
+                    ui.capture_mouse(self.handle());
 
-                        message.set_handled(true);
-                    }
+                    message.set_handled(true);
                 }
-                WidgetMessage::MouseUp { button, .. } => {
-                    if *button == MouseButton::Left {
-                        self.click_position = None;
+                WidgetMessage::MouseUp { button, .. } if *button == MouseButton::Left => {
+                    self.click_position = None;
 
-                        ui.release_mouse_capture();
+                    ui.release_mouse_capture();
 
-                        message.set_handled(true);
-                    }
+                    message.set_handled(true);
                 }
                 WidgetMessage::MouseMove { pos, .. } => {
                     if let Some(click_position) = self.click_position {
                         if click_position.metric_distance(pos) >= 5.0 {
-                            ui.send_message(SocketMessage::start_dragging(
-                                self.handle(),
-                                MessageDirection::FromWidget,
-                            ));
-
+                            ui.post(self.handle(), SocketMessage::StartDragging);
                             self.click_position = None;
                         }
                     }
                 }
                 WidgetMessage::MouseLeave => {
-                    ui.send_message(WidgetMessage::foreground(
+                    ui.send(
                         self.pin,
-                        MessageDirection::ToWidget,
-                        ui.style.property(Style::BRUSH_BRIGHT),
-                    ));
+                        WidgetMessage::Foreground(ui.style.property(Style::BRUSH_BRIGHT)),
+                    );
                 }
                 WidgetMessage::MouseEnter => {
-                    ui.send_message(WidgetMessage::foreground(
+                    ui.send(
                         self.pin,
-                        MessageDirection::ToWidget,
-                        ui.style.property(Style::BRUSH_BRIGHTEST),
-                    ));
+                        WidgetMessage::Foreground(ui.style.property(Style::BRUSH_BRIGHTEST)),
+                    );
                 }
                 _ => (),
             }
@@ -179,8 +168,8 @@ impl SocketBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        if let Some(editor) = ctx.try_get_node_mut(self.editor) {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Socket> {
+        if let Ok(editor) = ctx.try_get_node_mut(self.editor) {
             editor.set_row(0).set_column(1);
         }
 
@@ -236,7 +225,7 @@ impl SocketBuilder {
             index: self.index,
         };
 
-        ctx.add_node(UiNode::new(socket))
+        ctx.add(socket)
     }
 }
 

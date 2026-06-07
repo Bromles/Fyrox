@@ -24,16 +24,15 @@
 
 use crate::{
     border::BorderBuilder,
-    check_box::CheckBoxBuilder,
+    check_box::{CheckBox, CheckBoxBuilder},
     core::{
         algebra::Vector2,
-        pool::Handle,
+        err,
+        log::Log,
+        pool::{Handle, ObjectOrVariant},
         reflect::{prelude::*, CastError, Reflect},
-        type_traits::prelude::*,
-        uuid_provider,
         visitor::prelude::*,
     },
-    define_constructor,
     expander::ExpanderBuilder,
     formatted_text::WrapMode,
     grid::{Column, GridBuilder, Row},
@@ -41,25 +40,23 @@ use crate::{
         PropertyEditorBuildContext, PropertyEditorDefinitionContainer, PropertyEditorInstance,
         PropertyEditorMessageContext, PropertyEditorTranslationContext,
     },
-    menu::{ContextMenuBuilder, MenuItemBuilder, MenuItemContent, MenuItemMessage},
-    message::{MessageDirection, UiMessage},
+    menu::{ContextMenuBuilder, MenuItem, MenuItemBuilder, MenuItemContent, MenuItemMessage},
+    message::{DeliveryMode, MessageData, MessageDirection, UiMessage},
     popup::{Popup, PopupBuilder, PopupMessage},
-    stack_panel::StackPanelBuilder,
-    text::TextBuilder,
+    stack_panel::{StackPanel, StackPanelBuilder},
+    text::{Text, TextBuilder},
     utils::{make_arrow, make_simple_tooltip, ArrowDirection},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, RcUiNodeHandle, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 use copypasta::ClipboardProvider;
-use fyrox_core::{err, log::Log};
 use fyrox_graph::{
     constructor::{ConstructorProvider, GraphNodeConstructor},
-    BaseSceneGraph, SceneGraph,
+    SceneGraph,
 };
 use std::{
     any::{Any, TypeId},
-    fmt::{Debug, Formatter},
-    ops::{Deref, DerefMut},
+    fmt::{Debug, Display, Formatter},
     sync::Arc,
 };
 
@@ -68,7 +65,7 @@ pub mod editors;
 /// Messages representing a change in a collection:
 /// either adding an item, removing an item, or updating an existing item.
 #[derive(Debug, Clone, PartialEq)]
-pub enum CollectionChanged {
+pub enum CollectionAction {
     /// An item should be added in the collection.
     Add(ObjectValue),
     /// An item in the collection should be removed.
@@ -78,15 +75,10 @@ pub enum CollectionChanged {
         /// Index of an item in the collection.
         index: usize,
         /// The change to the item.
-        property: FieldKind,
+        action: FieldAction,
     },
 }
-
-impl CollectionChanged {
-    define_constructor!(CollectionChanged:Add => fn add(ObjectValue), layout: false);
-    define_constructor!(CollectionChanged:Remove => fn remove(usize), layout: false);
-    define_constructor!(CollectionChanged:ItemChanged => fn item_changed(index: usize, property: FieldKind), layout: false);
-}
+impl MessageData for CollectionAction {}
 
 /// Changes that can happen to inheritable variables.
 #[derive(Debug, Clone)]
@@ -97,16 +89,16 @@ pub enum InheritableAction {
 
 /// An enum of the ways in which a property might be changed by an editor.
 #[derive(Debug, Clone)]
-pub enum FieldKind {
+pub enum FieldAction {
     /// A collection has been changed in the given way.
-    Collection(Box<CollectionChanged>),
+    CollectionAction(Box<CollectionAction>),
     /// A property of a nested object has been changed in the given way.
-    Inspectable(Box<PropertyChanged>),
+    InspectableAction(Box<PropertyChanged>),
     /// A new value is being assigned to the property.
-    Object(ObjectValue),
+    ObjectAction(ObjectValue),
     /// The state of an inheritable property is changing, such as being reverted
     /// to match the value in the original.
-    Inheritable(InheritableAction),
+    InheritableAction(InheritableAction),
 }
 
 /// An action for some property.
@@ -131,26 +123,49 @@ pub enum PropertyAction {
     Revert,
 }
 
+impl Display for PropertyAction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PropertyAction::Modify { value } => write!(
+                f,
+                "A property needs to be modified with given value: {value:?}"
+            ),
+            PropertyAction::AddItem { value } => write!(
+                f,
+                "An item needs to be added to a collection property: {value:?}"
+            ),
+            PropertyAction::RemoveItem { index } => write!(
+                f,
+                "An item needs to be removed from a collection property. Index: {index}"
+            ),
+            PropertyAction::Revert => f.write_str("Revert value to parent"),
+        }
+    }
+}
+
 impl PropertyAction {
     /// Creates action from a field definition. It is recursive action, it traverses the tree
     /// until there is either FieldKind::Object or FieldKind::Collection. FieldKind::Inspectable
     /// forces new iteration.
-    pub fn from_field_kind(field_kind: &FieldKind) -> Self {
-        match field_kind {
-            FieldKind::Object(ref value) => Self::Modify {
+    pub fn from_field_action(field_action: &FieldAction) -> Self {
+        match field_action {
+            FieldAction::ObjectAction(ref value) => Self::Modify {
                 value: value.clone().into_box_reflect(),
             },
-            FieldKind::Collection(ref collection_changed) => match **collection_changed {
-                CollectionChanged::Add(ref value) => Self::AddItem {
+            FieldAction::CollectionAction(ref collection_changed) => match **collection_changed {
+                CollectionAction::Add(ref value) => Self::AddItem {
                     value: value.clone().into_box_reflect(),
                 },
-                CollectionChanged::Remove(index) => Self::RemoveItem { index },
-                CollectionChanged::ItemChanged { ref property, .. } => {
-                    Self::from_field_kind(property)
-                }
+                CollectionAction::Remove(index) => Self::RemoveItem { index },
+                CollectionAction::ItemChanged {
+                    action: ref property,
+                    ..
+                } => Self::from_field_action(property),
             },
-            FieldKind::Inspectable(ref inspectable) => Self::from_field_kind(&inspectable.value),
-            FieldKind::Inheritable { .. } => Self::Revert,
+            FieldAction::InspectableAction(ref inspectable) => {
+                Self::from_field_action(&inspectable.action)
+            }
+            FieldAction::InheritableAction { .. } => Self::Revert,
         }
     }
 
@@ -183,19 +198,17 @@ impl PropertyAction {
                 let mut value = Some(value);
                 target.resolve_path_mut(path, &mut |result| {
                     if let Ok(field) = result {
-                        field.as_list_mut(&mut |result| {
-                            if let Some(list) = result {
-                                if let Err(value) = list.reflect_push(value.take().unwrap()) {
-                                    result_callback(Err(Self::AddItem { value }))
-                                } else {
-                                    result_callback(Ok(None))
-                                }
+                        if let Some(list) = field.as_list_mut() {
+                            if let Err(value) = list.reflect_push(value.take().unwrap()) {
+                                result_callback(Err(Self::AddItem { value }))
                             } else {
-                                result_callback(Err(Self::AddItem {
-                                    value: value.take().unwrap(),
-                                }))
+                                result_callback(Ok(None))
                             }
-                        })
+                        } else {
+                            result_callback(Err(Self::AddItem {
+                                value: value.take().unwrap(),
+                            }))
+                        }
                     } else {
                         result_callback(Err(Self::AddItem {
                             value: value.take().unwrap(),
@@ -205,17 +218,15 @@ impl PropertyAction {
             }
             PropertyAction::RemoveItem { index } => target.resolve_path_mut(path, &mut |result| {
                 if let Ok(field) = result {
-                    field.as_list_mut(&mut |result| {
-                        if let Some(list) = result {
-                            if let Some(value) = list.reflect_remove(index) {
-                                result_callback(Ok(Some(value)))
-                            } else {
-                                result_callback(Err(Self::RemoveItem { index }))
-                            }
+                    if let Some(list) = field.as_list_mut() {
+                        if let Some(value) = list.reflect_remove(index) {
+                            result_callback(Ok(Some(value)))
                         } else {
                             result_callback(Err(Self::RemoveItem { index }))
                         }
-                    })
+                    } else {
+                        result_callback(Err(Self::RemoveItem { index }))
+                    }
                 } else {
                     result_callback(Err(Self::RemoveItem { index }))
                 }
@@ -244,7 +255,7 @@ where
     }
 
     fn into_box_reflect(self: Box<Self>) -> Box<dyn Reflect> {
-        Box::new(*self.into_any().downcast::<T>().unwrap())
+        Box::new(*(self as Box<dyn Reflect>).downcast::<T>().unwrap())
     }
 }
 
@@ -274,23 +285,21 @@ impl PartialEq for ObjectValue {
 }
 
 impl ObjectValue {
-    pub fn cast_value<T: 'static>(&self, func: &mut dyn FnMut(Option<&T>)) {
-        (*self.value).as_any(&mut |any| func(any.downcast_ref::<T>()))
+    pub fn cast_value<T: Reflect>(&self) -> Option<&T> {
+        (&*self.value as &dyn Reflect).downcast_ref::<T>()
     }
 
-    pub fn cast_clone<T: Clone + 'static>(&self, func: &mut dyn FnMut(Option<T>)) {
-        (*self.value).as_any(&mut |any| func(any.downcast_ref::<T>().cloned()))
+    pub fn cast_clone<T: Clone + Reflect>(&self) -> Option<T> {
+        (&*self.value as &dyn Reflect).downcast_ref::<T>().cloned()
     }
 
-    pub fn try_override<T: Clone + 'static>(&self, value: &mut T) -> bool {
-        let mut result = false;
-        (*self.value).as_any(&mut |any| {
-            if let Some(self_value) = any.downcast_ref::<T>() {
-                *value = self_value.clone();
-                result = true;
-            }
-        });
-        false
+    pub fn try_override<T: Clone + Reflect>(&self, value: &mut T) -> bool {
+        if let Some(self_value) = (&*self.value as &dyn Reflect).downcast_ref::<T>() {
+            *value = self_value.clone();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn into_box_reflect(self) -> Box<dyn Reflect> {
@@ -298,20 +307,24 @@ impl ObjectValue {
     }
 }
 
-impl PartialEq for FieldKind {
+impl PartialEq for FieldAction {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (FieldKind::Collection(l), FieldKind::Collection(r)) => std::ptr::eq(&**l, &**r),
-            (FieldKind::Inspectable(l), FieldKind::Inspectable(r)) => std::ptr::eq(&**l, &**r),
-            (FieldKind::Object(l), FieldKind::Object(r)) => l == r,
+            (FieldAction::CollectionAction(l), FieldAction::CollectionAction(r)) => {
+                std::ptr::eq(&**l, &**r)
+            }
+            (FieldAction::InspectableAction(l), FieldAction::InspectableAction(r)) => {
+                std::ptr::eq(&**l, &**r)
+            }
+            (FieldAction::ObjectAction(l), FieldAction::ObjectAction(r)) => l == r,
             _ => false,
         }
     }
 }
 
-impl FieldKind {
+impl FieldAction {
     pub fn object<T: Value>(value: T) -> Self {
-        Self::Object(ObjectValue {
+        Self::ObjectAction(ObjectValue {
             value: Box::new(value),
         })
     }
@@ -323,49 +336,52 @@ pub struct PropertyChanged {
     /// The name of the edited property.
     pub name: String,
     /// The details of the change.
-    pub value: FieldKind,
+    pub action: FieldAction,
 }
 
 impl PropertyChanged {
     pub fn path(&self) -> String {
         let mut path = self.name.clone();
-        match self.value {
-            FieldKind::Collection(ref collection_changed) => {
-                if let CollectionChanged::ItemChanged {
-                    ref property,
+        match self.action {
+            FieldAction::CollectionAction(ref collection_changed) => {
+                if let CollectionAction::ItemChanged {
+                    action: ref property,
                     index,
                 } = **collection_changed
                 {
                     match property {
-                        FieldKind::Inspectable(inspectable) => {
+                        FieldAction::InspectableAction(inspectable) => {
                             path += format!("[{}].{}", index, inspectable.path()).as_ref();
                         }
                         _ => path += format!("[{index}]").as_ref(),
                     }
                 }
             }
-            FieldKind::Inspectable(ref inspectable) => {
+            FieldAction::InspectableAction(ref inspectable) => {
                 path += format!(".{}", inspectable.path()).as_ref();
             }
-            FieldKind::Object(_) | FieldKind::Inheritable { .. } => {}
+            FieldAction::ObjectAction(_) | FieldAction::InheritableAction { .. } => {}
         }
         path
     }
 
     pub fn is_inheritable(&self) -> bool {
-        match self.value {
-            FieldKind::Collection(ref collection_changed) => match **collection_changed {
-                CollectionChanged::Add(_) => false,
-                CollectionChanged::Remove(_) => false,
-                CollectionChanged::ItemChanged { ref property, .. } => match property {
-                    FieldKind::Inspectable(inspectable) => inspectable.is_inheritable(),
-                    FieldKind::Inheritable(_) => true,
+        match self.action {
+            FieldAction::CollectionAction(ref collection_changed) => match **collection_changed {
+                CollectionAction::Add(_) => false,
+                CollectionAction::Remove(_) => false,
+                CollectionAction::ItemChanged {
+                    action: ref property,
+                    ..
+                } => match property {
+                    FieldAction::InspectableAction(inspectable) => inspectable.is_inheritable(),
+                    FieldAction::InheritableAction(_) => true,
                     _ => false,
                 },
             },
-            FieldKind::Inspectable(ref inspectable) => inspectable.is_inheritable(),
-            FieldKind::Object(_) => false,
-            FieldKind::Inheritable(_) => true,
+            FieldAction::InspectableAction(ref inspectable) => inspectable.is_inheritable(),
+            FieldAction::ObjectAction(_) => false,
+            FieldAction::InheritableAction(_) => true,
         }
     }
 }
@@ -403,15 +419,7 @@ pub enum InspectorMessage {
         dest: String,
     },
 }
-
-impl InspectorMessage {
-    define_constructor!(InspectorMessage:Context => fn context(InspectorContext), layout: false);
-    define_constructor!(InspectorMessage:PropertyChanged => fn property_changed(PropertyChanged), layout: false);
-    define_constructor!(InspectorMessage:CopyValue => fn copy_value(path: String), layout: false);
-    define_constructor!(InspectorMessage:PasteValue => fn paste_value(dest: String), layout: false);
-    define_constructor!(InspectorMessage:PropertyContextMenuOpened => fn property_context_menu_opened(path: String), layout: false);
-    define_constructor!(InspectorMessage:PropertyContextMenuStatus => fn property_context_menu_status(can_clone: bool, can_paste: bool), layout: false);
-}
+impl MessageData for InspectorMessage {}
 
 /// This trait allows dynamically typed context information to be
 /// passed to an [Inspector] widget.
@@ -420,9 +428,8 @@ impl InspectorMessage {
 /// [fyroxed_base::inspector::EditorEnvironment](https://docs.rs/fyroxed_base/latest/fyroxed_base/inspector/struct.EditorEnvironment.html).
 /// Instead, when a property editor needs to talk to the application using the Inspector,
 /// it can attempt to cast InspectorEnvironment to whatever type it might be.
-pub trait InspectorEnvironment: Any + Send + Sync {
+pub trait InspectorEnvironment: Send + Sync + Reflect {
     fn name(&self) -> String;
-    fn as_any(&self) -> &dyn Any;
 }
 
 /// Inspector is a widget, that allows you to generate visual representation for internal fields an arbitrary
@@ -448,29 +455,26 @@ pub trait InspectorEnvironment: Any + Send + Sync {
 /// # };
 /// # use std::sync::Arc;
 /// # use strum_macros::{AsRefStr, EnumString, VariantNames};
-/// # use fyrox_core::uuid_provider;
-/// # use fyrox_ui::inspector::InspectorContextArgs;
+/// # use fyrox_ui::inspector::{Inspector, InspectorContextArgs};
 ///
 /// #[derive(Reflect, Debug, Clone)]
+/// #[reflect(type_uuid = "391b9424-8fe2-4525-a98e-3c930487fcf1")]
 /// struct MyObject {
 ///     foo: String,
 ///     bar: u32,
 ///     stuff: MyEnum,
 /// }
 ///
-/// uuid_provider!(MyObject = "391b9424-8fe2-4525-a98e-3c930487fcf1");
-///
 /// // Enumeration requires a bit more traits to be implemented. It must provide a way to turn
 /// // enum into a string.
 /// #[derive(Reflect, Debug, Clone, AsRefStr, EnumString, VariantNames)]
+/// #[reflect(type_uuid = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd")]
 /// enum MyEnum {
 ///     SomeVariant,
 ///     YetAnotherVariant { baz: f32 },
 /// }
 ///
-/// uuid_provider!(MyEnum = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd");
-///
-/// fn create_inspector(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_inspector(ctx: &mut BuildContext) -> Handle<Inspector> {
 ///     // Initialize an object first.
 ///     let my_object = MyObject {
 ///         foo: "Some string".to_string(),
@@ -493,12 +497,13 @@ pub trait InspectorEnvironment: Any + Send + Sync {
 ///         ctx,
 ///         definition_container: Arc::new(definition_container),
 ///         environment: None,
-///         sync_flag: 1,
 ///         layer_index: 0,
 ///         generate_property_string_values: true,
 ///         filter: Default::default(),
 ///         name_column_width: 150.0,
+///         hide_name_column: false,
 ///         base_path: Default::default(),
+///         has_parent_object: false
 ///     });
 ///
 ///     InspectorBuilder::new(WidgetBuilder::new())
@@ -506,8 +511,11 @@ pub trait InspectorEnvironment: Any + Send + Sync {
 ///         .build(ctx)
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "c599c0f5-f749-4033-afed-1a9949c937a1"
+)]
 pub struct Inspector {
     pub widget: Widget,
     #[reflect(hidden)]
@@ -520,6 +528,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Inspector {
         GraphNodeConstructor::new::<Self>().with_variant("Inspector", |ui| {
             InspectorBuilder::new(WidgetBuilder::new().with_name("Inspector"))
                 .build(&mut ui.build_ctx())
+                .to_base()
                 .into()
         })
     }
@@ -529,7 +538,7 @@ crate::define_widget_deref!(Inspector);
 
 impl Inspector {
     pub fn handle_context_menu_message(
-        inspector: Handle<UiNode>,
+        inspector: Handle<Inspector>,
         message: &UiMessage,
         ui: &mut UserInterface,
         object: &mut dyn Reflect,
@@ -549,39 +558,36 @@ impl Inspector {
     }
 
     pub fn handle_context_menu_message_ex(
-        inspector: Handle<UiNode>,
+        inspector: Handle<Inspector>,
         msg: &InspectorMessage,
         ui: &mut UserInterface,
         object: &mut dyn Reflect,
         clipboard_value: &mut Option<Box<dyn Reflect>>,
     ) {
-        let object_type_name = object.type_name();
+        let object_type_name = object.type_info_ref().type_name;
 
         match msg {
             InspectorMessage::PropertyContextMenuOpened { path } => {
-                let mut can_copy = false;
+                let mut can_clone = false;
                 let mut can_paste = false;
 
                 object.resolve_path(path, &mut |result| {
                     if let Ok(field) = result {
-                        can_copy = field.try_clone_box().is_some();
+                        can_clone = field.try_clone_box().is_some();
 
                         if let Some(clipboard_value) = clipboard_value {
-                            clipboard_value.as_any(&mut |clipboard_value| {
-                                field.as_any(&mut |field| {
-                                    can_paste = field.type_id() == clipboard_value.type_id();
-                                })
-                            });
+                            can_paste = field.type_id() == (**clipboard_value).type_id();
                         }
                     }
                 });
 
-                ui.send_message(InspectorMessage::property_context_menu_status(
+                ui.send(
                     inspector,
-                    MessageDirection::ToWidget,
-                    can_copy,
-                    can_paste,
-                ));
+                    InspectorMessage::PropertyContextMenuStatus {
+                        can_clone,
+                        can_paste,
+                    },
+                );
             }
             InspectorMessage::CopyValue { path } => {
                 object.resolve_path(path, &mut |field| {
@@ -593,7 +599,7 @@ impl Inspector {
                                 "Unable to clone the field {}, because it is non-cloneable! \
                             Field type is: {}",
                                 path,
-                                field.type_name()
+                                field.type_info_ref().type_name
                             );
                         }
                     } else {
@@ -635,7 +641,7 @@ impl Inspector {
                             "Unable to clone the field {}, because it is non-cloneable! \
                             Field type is: {}",
                             dest,
-                            value.type_name()
+                            value.type_info_ref().type_name
                         );
                     }
                 } else {
@@ -643,16 +649,16 @@ impl Inspector {
                 }
 
                 if pasted {
-                    if let Some(inspector) = ui.try_get_of_type::<Inspector>(inspector) {
+                    if let Ok(inspector) = ui.try_get(inspector) {
                         let ctx = inspector.context.clone();
-                        Log::verify(ctx.sync(
-                            object,
-                            ui,
-                            0,
-                            true,
-                            Default::default(),
-                            Default::default(),
-                        ));
+
+                        if let Err(errs) =
+                            ctx.sync(object, ui, 0, true, Default::default(), Default::default())
+                        {
+                            for err in errs {
+                                Log::err(err.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -671,7 +677,7 @@ impl Inspector {
     ) -> Option<&ContextEntry> {
         let mut parent_handle = from;
 
-        while let Some(parent) = ui.try_get(parent_handle) {
+        while let Ok(parent) = ui.try_get_node(parent_handle) {
             for entry in self.context.entries.iter() {
                 if entry.property_container == parent_handle {
                     return Some(entry);
@@ -685,7 +691,7 @@ impl Inspector {
     }
 }
 
-/// Default margines for editor containers.
+/// Default margins for editor containers.
 pub const HEADER_MARGIN: Thickness = Thickness {
     left: 2.0,
     top: 1.0,
@@ -706,6 +712,27 @@ pub enum InspectorError {
     Custom(String),
     /// As an inspector contains multiple editors, it can potentially produce multiple errors.
     Group(Vec<InspectorError>),
+}
+
+impl std::error::Error for InspectorError {}
+
+impl Display for InspectorError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InspectorError::CastError(cast_error) => Display::fmt(cast_error, f),
+            InspectorError::OutOfSync => f.write_str(
+                "The object type has changed and the inspector context is no longer valid.",
+            ),
+            InspectorError::Custom(message) => f.write_str(message),
+            InspectorError::Group(inspector_errors) => {
+                f.write_str("Multiple errors:\n")?;
+                for err in inspector_errors {
+                    writeln!(f, "  {err}")?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl From<CastError> for InspectorError {
@@ -757,9 +784,9 @@ impl PartialEq for ContextEntry {
 #[derive(Default, Clone)]
 pub struct Menu {
     /// The handle of the "Copy Value as String" menu item.
-    pub copy_value_as_string: Handle<UiNode>,
-    pub copy_value: Handle<UiNode>,
-    pub paste_value: Handle<UiNode>,
+    pub copy_value_as_string: Handle<MenuItem>,
+    pub copy_value: Handle<MenuItem>,
+    pub paste_value: Handle<MenuItem>,
     /// The reference-counted handle of the menu as a whole.
     pub menu: Option<RcUiNodeHandle>,
 }
@@ -775,7 +802,7 @@ pub struct InspectorContext {
     ///
     /// To ensure this, the widget should be composed of widgets produced by
     /// [PropertyEditorDefinition::create_instance](crate::inspector::editors::PropertyEditorDefinition::create_instance).
-    pub stack_panel: Handle<UiNode>,
+    pub stack_panel: Handle<StackPanel>,
     /// The context menu that opens when right-clicking on the inspector.
     pub menu: Menu,
     /// List of the editors in this inspector, in order, with each entry giving the editor widget handle, the name of the field being edited,
@@ -787,14 +814,16 @@ pub struct InspectorContext {
     /// Untyped information from the application that is using the inspector. This can be used by editors that may be
     /// supplied by that application, if those editors know the actual type of this value to be able to successfully cast it.
     pub environment: Option<Arc<dyn InspectorEnvironment>>,
-    /// The value given to [UiMessage::flags] when [sync](InspectorContext::sync) is generating update messages for
-    /// editor widgets. This identifies sync messages and prevents the Inspector from trying to translate them,
-    /// and thereby it prevents sync messages from potentially creating an infinite message loop.
-    pub sync_flag: u64,
     /// Type id of the object for which the context was created.
     pub object_type_id: TypeId,
     /// A width of the property name column.
     pub name_column_width: f32,
+    pub hide_name_column: bool,
+    /// A flag, that defines whether the inspectable object has a parent object from which it can
+    /// obtain initial property values when clicking on "Revert" button. This flag is used only for
+    /// [`crate::core::variable::InheritableVariable`] properties, primarily to hide "Revert" button
+    /// when it does nothing (when there's no parent object).
+    pub has_parent_object: bool,
 }
 
 impl PartialEq for InspectorContext {
@@ -804,9 +833,7 @@ impl PartialEq for InspectorContext {
 }
 
 fn object_type_id(object: &dyn Reflect) -> TypeId {
-    let mut object_type_id = None;
-    object.as_any(&mut |any| object_type_id = Some(any.type_id()));
-    object_type_id.unwrap()
+    object.type_id()
 }
 
 impl Default for InspectorContext {
@@ -819,9 +846,10 @@ impl Default for InspectorContext {
                 PropertyEditorDefinitionContainer::with_default_editors(),
             ),
             environment: None,
-            sync_flag: 0,
             object_type_id: ().type_id(),
             name_column_width: 150.0,
+            hide_name_column: false,
+            has_parent_object: false,
         }
     }
 }
@@ -853,14 +881,9 @@ fn make_expander_check_box(
     layer_index: usize,
     property_name: &str,
     property_description: &str,
+    hide_name: bool,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
-    let description = if property_description.is_empty() {
-        property_name.to_string()
-    } else {
-        format!("{property_name}\n\n{property_description}")
-    };
-
+) -> Handle<CheckBox> {
     let handle = CheckBoxBuilder::new(
         WidgetBuilder::new()
             .with_vertical_alignment(VerticalAlignment::Center)
@@ -875,7 +898,14 @@ fn make_expander_check_box(
         .with_stroke_thickness(Thickness::zero().into())
         .build(ctx),
     )
-    .with_content(
+    .with_content(if hide_name {
+        Handle::NONE
+    } else {
+        let description = if property_description.is_empty() {
+            property_name.to_string()
+        } else {
+            format!("{property_name}\n\n{property_description}")
+        };
         TextBuilder::new(
             WidgetBuilder::new()
                 .with_opt_tooltip(make_tooltip(ctx, &description))
@@ -884,8 +914,8 @@ fn make_expander_check_box(
         )
         .with_vertical_text_alignment(VerticalAlignment::Center)
         .with_text(property_name)
-        .build(ctx),
-    )
+        .build(ctx)
+    })
     .checked(Some(true))
     .with_check_mark(make_arrow(ctx, ArrowDirection::Bottom, 8.0))
     .with_uncheck_mark(make_arrow(ctx, ArrowDirection::Right, 8.0))
@@ -908,9 +938,10 @@ pub fn make_expander_container(
     layer_index: usize,
     property_name: &str,
     description: &str,
-    header: Handle<UiNode>,
-    content: Handle<UiNode>,
+    header: Handle<impl ObjectOrVariant<UiNode>>,
+    content: Handle<impl ObjectOrVariant<UiNode>>,
     width: f32,
+    hide_name_column: bool,
     ctx: &mut BuildContext,
 ) -> Handle<UiNode> {
     ExpanderBuilder::new(WidgetBuilder::new())
@@ -918,16 +949,22 @@ pub fn make_expander_container(
             layer_index,
             property_name,
             description,
+            hide_name_column,
             ctx,
         ))
-        .with_expander_column(Column::strict(width))
+        .with_expander_column(if hide_name_column {
+            Column::strict(0.0)
+        } else {
+            Column::strict(width)
+        })
         .with_expanded(true)
         .with_header(header)
         .with_content(content)
         .build(ctx)
+        .to_base()
 }
 
-fn create_header(ctx: &mut BuildContext, text: &str, layer_index: usize) -> Handle<UiNode> {
+fn create_header(ctx: &mut BuildContext, text: &str, layer_index: usize) -> Handle<Text> {
     TextBuilder::new(WidgetBuilder::new().with_margin(make_property_margin(layer_index)))
         .with_text(text)
         .with_vertical_text_alignment(VerticalAlignment::Center)
@@ -943,21 +980,28 @@ fn make_tooltip(ctx: &mut BuildContext, text: &str) -> Option<RcUiNodeHandle> {
 }
 
 fn make_simple_property_container(
-    title: Handle<UiNode>,
-    editor: Handle<UiNode>,
+    title: Handle<Text>,
+    editor: Handle<impl ObjectOrVariant<UiNode>>,
     description: &str,
     width: f32,
+    hide_name_column: bool,
     ctx: &mut BuildContext,
 ) -> Handle<UiNode> {
-    ctx[editor].set_row(0).set_column(1);
+    ctx[editor.to_base()].set_row(0).set_column(1);
 
-    let tooltip = make_tooltip(ctx, description);
-    ctx[title].set_tooltip(tooltip);
+    if title.is_some() {
+        let tooltip = make_tooltip(ctx, description);
+        ctx[title].set_tooltip(tooltip);
+    }
 
     GridBuilder::new(WidgetBuilder::new().with_child(title).with_child(editor))
         .add_row(Row::auto())
-        .add_columns(vec![Column::strict(width), Column::stretch()])
+        .add_columns(vec![
+            Column::strict(if hide_name_column { 0.0 } else { width }),
+            Column::stretch(),
+        ])
         .build(ctx)
+        .to_base()
 }
 
 /// Filter function for determining which fields of an object should be included in an Inspector.
@@ -981,7 +1025,7 @@ impl PropertyFilter {
     }
 }
 
-fn assign_tab_indices(container: Handle<UiNode>, ui: &mut UserInterface) {
+fn assign_tab_indices(container: Handle<impl ObjectOrVariant<UiNode>>, ui: &mut UserInterface) {
     let mut counter = 0;
     let mut widgets_list = Vec::new();
     for (descendant_handle, descendant_ref) in ui.traverse_iter(container) {
@@ -1003,12 +1047,17 @@ pub struct InspectorContextArgs<'a, 'b, 'c> {
     pub ctx: &'b mut BuildContext<'c>,
     pub definition_container: Arc<PropertyEditorDefinitionContainer>,
     pub environment: Option<Arc<dyn InspectorEnvironment>>,
-    pub sync_flag: u64,
     pub layer_index: usize,
     pub generate_property_string_values: bool,
     pub filter: PropertyFilter,
     pub name_column_width: f32,
+    pub hide_name_column: bool,
     pub base_path: String,
+    /// A flag, that defines whether the inspectable object has a parent object from which it can
+    /// obtain initial property values when clicking on "Revert" button. This flag is used only for
+    /// [`crate::core::variable::InheritableVariable`] properties, primarily to hide "Revert" button
+    /// when it does nothing (when there's no parent object).
+    pub has_parent_object: bool,
 }
 
 impl InspectorContext {
@@ -1020,9 +1069,6 @@ impl InspectorContext {
     /// based on the type of each field.
     /// * environment: Untyped optional generic information about the application using the inspector,
     /// which may be useful to some editors. Often this will be Fyroxed's EditorEnvironment.
-    /// * sync_flag: Flag bits to identify messages that are sent by the `sync` method to
-    /// update an editor with the current value of the property that it is editing.
-    /// This becomes the value of [UiMessage::flags].
     /// * layer_index: Inspectors can be nested within the editors of other inspectors.
     /// The layer_index is the count of how deeply nested this inspector will be.
     /// * generate_property_string_values: Should we use `format!("{:?}", field)` to construct string representations
@@ -1034,12 +1080,13 @@ impl InspectorContext {
             ctx,
             definition_container,
             environment,
-            sync_flag,
             layer_index,
             generate_property_string_values,
             filter,
             name_column_width,
+            hide_name_column,
             base_path,
+            has_parent_object,
         } = context;
 
         let mut entries = Vec::new();
@@ -1048,19 +1095,19 @@ impl InspectorContext {
         object.fields_ref(&mut |fields_ref| {
             for (i, info) in fields_ref.iter().enumerate() {
                 let field_text = if generate_property_string_values {
-                    format!("{:?}", info.value.field_value_as_reflect())
+                    format!("{:?}", info.value)
                 } else {
                     Default::default()
                 };
 
-                if !filter.pass(info.value.field_value_as_reflect()) {
+                if !filter.pass(info.value) {
                     continue;
                 }
 
-                let description = if info.description.is_empty() {
+                let description = if info.doc.is_empty() {
                     info.display_name.to_string()
                 } else {
-                    format!("{}\n\n{}", info.display_name, info.description)
+                    format!("{}\n\n{}", info.display_name, info.doc)
                 };
 
                 if let Some(definition) = definition_container
@@ -1079,22 +1126,28 @@ impl InspectorContext {
                             property_info: info,
                             environment: environment.clone(),
                             definition_container: definition_container.clone(),
-                            sync_flag,
                             layer_index,
                             generate_property_string_values,
                             filter: filter.clone(),
                             name_column_width,
+                            hide_name_column,
                             base_path: property_path.clone(),
+                            has_parent_object,
                         },
                     ) {
                         Ok(instance) => {
                             let (container, editor) = match instance {
                                 PropertyEditorInstance::Simple { editor } => (
                                     make_simple_property_container(
-                                        create_header(ctx, info.display_name, layer_index),
+                                        if hide_name_column {
+                                            Handle::NONE
+                                        } else {
+                                            create_header(ctx, info.display_name, layer_index)
+                                        },
                                         editor,
                                         &description,
                                         name_column_width,
+                                        hide_name_column,
                                         ctx,
                                     ),
                                     editor,
@@ -1138,6 +1191,7 @@ impl InspectorContext {
                                     .build(ctx),
                                 &description,
                                 name_column_width,
+                                false,
                                 ctx,
                             )
                         }
@@ -1152,11 +1206,12 @@ impl InspectorContext {
                             .with_vertical_text_alignment(VerticalAlignment::Center)
                             .with_text(format!(
                                 "Property Editor Is Missing For Type {}!",
-                                info.value.type_name()
+                                info.value.type_info_ref().type_name
                             ))
                             .build(ctx),
                         &description,
                         name_column_width,
+                        false,
                         ctx,
                     ));
                 }
@@ -1167,30 +1222,32 @@ impl InspectorContext {
         let copy_value;
         let paste_value;
         let menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new().with_visibility(false)).with_content(
-                StackPanelBuilder::new(
-                    WidgetBuilder::new()
-                        .with_child({
-                            copy_value_as_string = MenuItemBuilder::new(WidgetBuilder::new())
-                                .with_content(MenuItemContent::text("Copy Value as String"))
-                                .build(ctx);
-                            copy_value_as_string
-                        })
-                        .with_child({
-                            copy_value = MenuItemBuilder::new(WidgetBuilder::new())
-                                .with_content(MenuItemContent::text("Copy Value"))
-                                .build(ctx);
-                            copy_value
-                        })
-                        .with_child({
-                            paste_value = MenuItemBuilder::new(WidgetBuilder::new())
-                                .with_content(MenuItemContent::text("Paste Value"))
-                                .build(ctx);
-                            paste_value
-                        }),
+            PopupBuilder::new(WidgetBuilder::new().with_visibility(false))
+                .with_content(
+                    StackPanelBuilder::new(
+                        WidgetBuilder::new()
+                            .with_child({
+                                copy_value_as_string = MenuItemBuilder::new(WidgetBuilder::new())
+                                    .with_content(MenuItemContent::text("Copy Value as String"))
+                                    .build(ctx);
+                                copy_value_as_string
+                            })
+                            .with_child({
+                                copy_value = MenuItemBuilder::new(WidgetBuilder::new())
+                                    .with_content(MenuItemContent::text("Copy Value"))
+                                    .build(ctx);
+                                copy_value
+                            })
+                            .with_child({
+                                paste_value = MenuItemBuilder::new(WidgetBuilder::new())
+                                    .with_content(MenuItemContent::text("Paste Value"))
+                                    .build(ctx);
+                                paste_value
+                            }),
+                    )
+                    .build(ctx),
                 )
-                .build(ctx),
-            ),
+                .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -1217,18 +1274,18 @@ impl InspectorContext {
             },
             entries,
             property_definitions: definition_container,
-            sync_flag,
             environment,
             object_type_id: object_type_id(object),
             name_column_width,
+            hide_name_column,
+            has_parent_object,
         }
     }
 
-    /// Update the widgest to reflect the value of the given object.
+    /// Update the widgets to reflect the value of the given object.
     /// We will iterate through the fields and find the appropriate [PropertyEditorDefinition](editors::PropertyEditorDefinition)
     /// for each field. We call [create_message](editors::PropertyEditorDefinition::create_message) to get each property editor
-    /// definition to generate the appropriate message to get the editor widget to update itself, and we set the [flags](UiMessage::flags)
-    /// of each message to [InspectorContext::sync_flag] before sending the message.
+    /// definition to generate the appropriate message to get the editor widget to update itself.
     /// * object: The object to take the property values from.
     /// * ui: The UserInterface to include in the [PropertyEditorMessageContext].
     /// * layer_index: The depth of the nesting of this inspector.
@@ -1252,7 +1309,7 @@ impl InspectorContext {
 
         object.fields_ref(&mut |fields_ref| {
             for info in fields_ref {
-                if !filter.pass(info.value.field_value_as_reflect()) {
+                if !filter.pass(info.value) {
                     continue;
                 }
 
@@ -1263,7 +1320,6 @@ impl InspectorContext {
                 {
                     if let Some(property_editor) = self.find_property_editor(info.name) {
                         let ctx = PropertyEditorMessageContext {
-                            sync_flag: self.sync_flag,
                             instance: property_editor.property_editor,
                             ui,
                             property_info: info,
@@ -1273,13 +1329,15 @@ impl InspectorContext {
                             generate_property_string_values,
                             filter: filter.clone(),
                             name_column_width: self.name_column_width,
+                            hide_name_column: self.hide_name_column,
                             base_path: base_path.clone(),
+                            has_parent_object: self.has_parent_object,
                         };
 
                         match constructor.property_editor.create_message(ctx) {
                             Ok(message) => {
                                 if let Some(mut message) = message {
-                                    message.flags = self.sync_flag;
+                                    message.delivery_mode = DeliveryMode::SyncOnly;
                                     ui.send_message(message);
                                 }
                             }
@@ -1331,51 +1389,37 @@ impl InspectorContext {
     }
 }
 
-uuid_provider!(Inspector = "c599c0f5-f749-4033-afed-1a9949c937a1");
-
 impl Control for Inspector {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if message.destination() == self.handle && message.direction() == MessageDirection::ToWidget
-        {
-            if let Some(msg) = message.data::<InspectorMessage>() {
-                match msg {
-                    InspectorMessage::Context(ctx) => {
-                        // Remove previous content.
-                        for child in self.children() {
-                            ui.send_message(WidgetMessage::remove(
-                                *child,
-                                MessageDirection::ToWidget,
-                            ));
-                        }
-
-                        // Link new panel.
-                        ui.send_message(WidgetMessage::link(
-                            ctx.stack_panel,
-                            MessageDirection::ToWidget,
-                            self.handle,
-                        ));
-
-                        self.context = ctx.clone();
+        if let Some(msg) = message.data_for::<InspectorMessage>(self.handle) {
+            match msg {
+                InspectorMessage::Context(ctx) => {
+                    // Remove previous content.
+                    for child in self.children() {
+                        ui.send(*child, WidgetMessage::Remove);
                     }
-                    InspectorMessage::PropertyContextMenuStatus {
-                        can_clone,
-                        can_paste,
-                    } => {
-                        ui.send_message(WidgetMessage::enabled(
-                            self.context.menu.copy_value,
-                            MessageDirection::ToWidget,
-                            *can_clone,
-                        ));
-                        ui.send_message(WidgetMessage::enabled(
-                            self.context.menu.paste_value,
-                            MessageDirection::ToWidget,
-                            *can_paste,
-                        ));
-                    }
-                    _ => (),
+
+                    // Link new panel.
+                    ui.send(ctx.stack_panel, WidgetMessage::LinkWith(self.handle));
+
+                    self.context = ctx.clone();
                 }
+                InspectorMessage::PropertyContextMenuStatus {
+                    can_clone,
+                    can_paste,
+                } => {
+                    ui.send(
+                        self.context.menu.copy_value,
+                        WidgetMessage::Enabled(*can_clone),
+                    );
+                    ui.send(
+                        self.context.menu.paste_value,
+                        WidgetMessage::Enabled(*can_paste),
+                    );
+                }
+                _ => (),
             }
         }
 
@@ -1392,20 +1436,22 @@ impl Control for Inspector {
                     } else if popup_message.destination() == self.context.menu.copy_value {
                         if let Some(entry) = self.find_property_container(message.destination(), ui)
                         {
-                            ui.send_message(InspectorMessage::copy_value(
+                            ui.post(
                                 self.handle,
-                                MessageDirection::FromWidget,
-                                entry.property_path.clone(),
-                            ));
+                                InspectorMessage::CopyValue {
+                                    path: entry.property_path.clone(),
+                                },
+                            );
                         }
                     } else if popup_message.destination() == self.context.menu.paste_value {
                         if let Some(entry) = self.find_property_container(message.destination(), ui)
                         {
-                            ui.send_message(InspectorMessage::paste_value(
+                            ui.post(
                                 self.handle,
-                                MessageDirection::FromWidget,
-                                entry.property_path.clone(),
-                            ));
+                                InspectorMessage::PasteValue {
+                                    dest: entry.property_path.clone(),
+                                },
+                            );
                         }
                     }
                 }
@@ -1414,7 +1460,7 @@ impl Control for Inspector {
 
         // Check each message from descendant widget and try to translate it to
         // PropertyChanged message.
-        if message.flags != self.context.sync_flag {
+        if message.delivery_mode != DeliveryMode::SyncOnly {
             let env = self.context.environment.clone();
             for entry in self.context.entries.iter() {
                 if message.destination() == entry.property_editor {
@@ -1432,11 +1478,7 @@ impl Control for Inspector {
                                 })
                         })
                     {
-                        ui.send_message(InspectorMessage::property_changed(
-                            self.handle,
-                            MessageDirection::FromWidget,
-                            args,
-                        ));
+                        ui.post(self.handle, InspectorMessage::PropertyChanged(args));
                     }
                 }
             }
@@ -1449,13 +1491,14 @@ impl Control for Inspector {
                 if message.direction() == MessageDirection::FromWidget
                     && menu.handle() == message.destination()
                 {
-                    if let Some(popup) = ui.try_get_of_type::<Popup>(menu.handle()) {
+                    if let Ok(popup) = ui.try_get_of_type::<Popup>(menu.handle()) {
                         if let Some(entry) = self.find_property_container(popup.owner, ui) {
-                            ui.send_message(InspectorMessage::property_context_menu_opened(
+                            ui.post(
                                 self.handle,
-                                MessageDirection::FromWidget,
-                                entry.property_path.clone(),
-                            ));
+                                InspectorMessage::PropertyContextMenuOpened {
+                                    path: entry.property_path.clone(),
+                                },
+                            );
                         }
                     }
                 }
@@ -1493,7 +1536,7 @@ impl InspectorBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Inspector> {
         let canvas = Inspector {
             widget: self
                 .widget_builder
@@ -1502,7 +1545,7 @@ impl InspectorBuilder {
                 .build(ctx),
             context: self.context,
         };
-        ctx.add_node(UiNode::new(canvas))
+        ctx.add(canvas)
     }
 }
 

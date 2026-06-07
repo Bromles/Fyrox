@@ -18,11 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::BaseSceneGraph;
+use crate::fyrox::graph::SceneGraph;
 use crate::fyrox::{
     core::{
         algebra::Vector2, parking_lot::Mutex, pool::Handle, reflect::prelude::*,
-        type_traits::prelude::*, uuid_provider, visitor::prelude::*,
+        visitor::prelude::*,
     },
     gui::{
         border::BorderBuilder,
@@ -45,6 +45,13 @@ use crate::fyrox::{
 };
 use crate::plugins::inspector::editors::spritesheet::SpriteSheetFramesPropertyEditorMessage;
 
+use fyrox::core::pool::HandlesVecExtension;
+use fyrox::gui::border::Border;
+use fyrox::gui::button::Button;
+use fyrox::gui::check_box::CheckBox;
+use fyrox::gui::grid::Grid;
+use fyrox::gui::image::Image;
+use fyrox::gui::numeric::NumericUpDown;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use std::{
@@ -52,21 +59,23 @@ use std::{
     sync::{mpsc::Sender, Arc},
 };
 
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "55607fe0-2996-418d-ad31-a5b96fdfa4b7"
+)]
 pub struct SpriteSheetFramesEditorWindow {
-    #[component(include)]
     window: Window,
     editor: Handle<UiNode>,
-    ok: Handle<UiNode>,
-    cancel: Handle<UiNode>,
-    width: Handle<UiNode>,
-    height: Handle<UiNode>,
-    grid: Handle<UiNode>,
-    preview_container: Handle<UiNode>,
-    cells: Vec<Handle<UiNode>>,
+    ok: Handle<Button>,
+    cancel: Handle<Button>,
+    width: Handle<NumericUpDown<u32>>,
+    height: Handle<NumericUpDown<u32>>,
+    grid: Handle<Grid>,
+    preview_container: Handle<Border>,
+    cells: Vec<Handle<CheckBox>>,
     animation: SpriteSheetAnimation,
-    preview_image: Handle<UiNode>,
+    preview_image: Handle<Image>,
 }
 
 impl Deref for SpriteSheetFramesEditorWindow {
@@ -82,8 +91,6 @@ impl DerefMut for SpriteSheetFramesEditorWindow {
         &mut self.window.widget
     }
 }
-
-uuid_provider!(SpriteSheetFramesEditorWindow = "55607fe0-2996-418d-ad31-a5b96fdfa4b7");
 
 impl Control for SpriteSheetFramesEditorWindow {
     fn on_remove(&self, sender: &Sender<UiMessage>) {
@@ -107,11 +114,10 @@ impl Control for SpriteSheetFramesEditorWindow {
 
         self.animation.update(dt);
         self.animation.play();
-        ui.send_message(ImageMessage::uv_rect(
+        ui.send(
             self.preview_image,
-            MessageDirection::ToWidget,
-            self.animation.current_frame_uv_rect().unwrap_or_default(),
-        ));
+            ImageMessage::UvRect(self.animation.current_frame_uv_rect().unwrap_or_default()),
+        );
     }
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -119,28 +125,18 @@ impl Control for SpriteSheetFramesEditorWindow {
 
         if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == self.handle {
-                ui.send_message(WidgetMessage::remove(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, WidgetMessage::Remove);
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.ok {
-                ui.send_message(WindowMessage::close(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, WindowMessage::Close);
 
-                ui.send_message(SpriteSheetFramesPropertyEditorMessage::value(
+                ui.post(
                     self.editor,
-                    MessageDirection::FromWidget,
-                    self.animation.frames().clone(),
-                ));
+                    SpriteSheetFramesPropertyEditorMessage::Value(self.animation.frames().clone()),
+                );
             } else if message.destination() == self.cancel {
-                ui.send_message(WindowMessage::close(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, WindowMessage::Close);
             }
         } else if let Some(NumericUpDownMessage::Value(value)) = message.data() {
             if message.destination() == self.width {
@@ -151,7 +147,7 @@ impl Control for SpriteSheetFramesEditorWindow {
                 self.resize(Vector2::new(width, *value), ui);
             }
         } else if let Some(CheckBoxMessage::Check(Some(value))) = message.data() {
-            if self.cells.contains(&message.destination())
+            if self.cells.contains(&message.destination().to_variant())
                 && message.direction == MessageDirection::FromWidget
             {
                 let cell_position = ui
@@ -194,7 +190,7 @@ impl Control for SpriteSheetFramesEditorWindow {
 fn make_grid(
     ctx: &mut BuildContext,
     container: &SpriteSheetFramesContainer,
-) -> (Handle<UiNode>, Vec<Handle<UiNode>>) {
+) -> (Handle<Grid>, Vec<Handle<CheckBox>>) {
     let mut cells = Vec::new();
     for i in 0..container.size().y {
         for j in 0..container.size().x {
@@ -222,7 +218,7 @@ fn make_grid(
         WidgetBuilder::new()
             .with_margin(Thickness::uniform(1.0))
             .with_foreground(ctx.style.property(Style::BRUSH_BRIGHT))
-            .with_children(cells.clone()),
+            .with_children(cells.clone().to_base()),
     )
     .add_columns((0..container.size().x).map(|_| Column::stretch()).collect())
     .add_rows((0..container.size().y).map(|_| Row::stretch()).collect())
@@ -236,25 +232,21 @@ impl SpriteSheetFramesEditorWindow {
     fn resize(&mut self, size: Vector2<u32>, ui: &mut UserInterface) {
         self.animation.frames_mut().set_size(size);
 
-        ui.send_message(WidgetMessage::remove(self.grid, MessageDirection::ToWidget));
+        ui.send(self.grid, WidgetMessage::Remove);
 
         let (grid, cells) = make_grid(&mut ui.build_ctx(), self.animation.frames());
 
         self.grid = grid;
         self.cells = cells;
 
-        ui.send_message(WidgetMessage::link(
-            self.grid,
-            MessageDirection::ToWidget,
-            self.preview_container,
-        ));
+        ui.send(self.grid, WidgetMessage::link_with(self.preview_container));
     }
 
     pub fn build(
         ctx: &mut BuildContext,
         container: SpriteSheetFramesContainer,
         editor: Handle<UiNode>,
-    ) -> Handle<UiNode> {
+    ) -> Handle<SpriteSheetFramesEditorWindow> {
         let ok;
         let cancel;
         let width;
@@ -423,6 +415,6 @@ impl SpriteSheetFramesEditorWindow {
             preview_image,
         };
 
-        ctx.add_node(UiNode::new(editor))
+        ctx.add(editor)
     }
 }

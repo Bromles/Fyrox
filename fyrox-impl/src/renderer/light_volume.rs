@@ -24,16 +24,17 @@ use crate::{
         math::Rect,
         sstorage::ImmutableString,
     },
+    graphics::{
+        buffer::BufferUsage, error::FrameworkError, framebuffer::GpuFrameBuffer,
+        geometry_buffer::GpuGeometryBuffer, server::GraphicsServer,
+    },
     renderer::{
         bundle::{LightSource, LightSourceKind},
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
         },
-        framework::{
-            buffer::BufferUsage, error::FrameworkError, framebuffer::GpuFrameBuffer,
-            geometry_buffer::GpuGeometryBuffer, server::GraphicsServer, GeometryBufferExt,
-        },
+        framework::GeometryBufferExt,
         gbuffer::GBuffer,
         make_viewport_matrix,
         resources::RendererResources,
@@ -73,6 +74,7 @@ impl LightVolumeRenderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_volume(
         &mut self,
+        server: &dyn GraphicsServer,
         light: &LightSource,
         gbuffer: &GBuffer,
         view: Matrix4<f32>,
@@ -84,6 +86,8 @@ impl LightVolumeRenderer {
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("LightVolume");
+
         let mut stats = RenderPassStatistics::default();
 
         let frame_matrix = make_viewport_matrix(viewport);

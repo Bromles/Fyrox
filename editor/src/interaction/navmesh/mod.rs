@@ -18,33 +18,32 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::command::{Command, CommandGroup};
-use crate::fyrox::graph::SceneGraph;
-use crate::fyrox::{
-    core::{
-        algebra::{Vector2, Vector3},
-        color::Color,
-        math::{ray::CylinderKind, TriangleEdge},
-        pool::Handle,
-        uuid::{uuid, Uuid},
-        TypeUuidProvider,
-    },
-    engine::Engine,
-    gui::{
-        button::{ButtonBuilder, ButtonMessage},
-        grid::{Column, GridBuilder, Row},
-        message::{KeyCode, MessageDirection, UiMessage},
-        stack_panel::StackPanelBuilder,
-        widget::{WidgetBuilder, WidgetMessage},
-        window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, Orientation, Thickness, UiNode, UserInterface,
-    },
-    gui::{HorizontalAlignment, VerticalAlignment},
-    scene::{camera::Camera, navmesh::NavigationalMesh},
-};
-use crate::scene::SelectionContainer;
 use crate::{
     camera::PickingOptions,
+    command::{Command, CommandGroup},
+    fyrox::{
+        core::{
+            algebra::{Vector2, Vector3},
+            color::Color,
+            math::{ray::CylinderKind, TriangleEdge},
+            pool::Handle,
+            reflect::prelude::*,
+            uuid::{uuid, Uuid},
+        },
+        engine::Engine,
+        graph::SceneGraph,
+        gui::{
+            button::{ButtonBuilder, ButtonMessage},
+            grid::{Column, GridBuilder, Row},
+            message::{KeyCode, UiMessage},
+            stack_panel::StackPanelBuilder,
+            widget::{WidgetBuilder, WidgetMessage},
+            window::{WindowBuilder, WindowMessage, WindowTitle},
+            BuildContext, Orientation, Thickness, UserInterface,
+        },
+        gui::{HorizontalAlignment, VerticalAlignment},
+        scene::navmesh::NavigationalMesh,
+    },
     interaction::{
         calculate_gizmo_distance_scaling,
         gizmo::move_gizmo::MoveGizmo,
@@ -63,21 +62,24 @@ use crate::{
             ChangeSelectionCommand,
         },
         controller::SceneController,
-        GameScene, Selection,
+        GameScene, Selection, SelectionContainer,
     },
     settings::Settings,
     utils::window_content,
     Mode,
 };
+use fyrox::gui::button::Button;
+use fyrox::gui::image::Image;
+use fyrox::gui::window::{Window, WindowAlignment};
 use std::collections::HashMap;
 
 pub mod selection;
 
 pub struct NavmeshPanel {
-    pub window: Handle<UiNode>,
-    connect_edges: Handle<UiNode>,
+    pub window: Handle<Window>,
+    connect_edges: Handle<Button>,
     sender: MessageSender,
-    scene_frame: Handle<UiNode>,
+    scene_frame: Handle<Image>,
 }
 
 fn fetch_selection(editor_selection: &Selection) -> Option<NavmeshSelection> {
@@ -91,7 +93,7 @@ fn fetch_selection(editor_selection: &Selection) -> Option<NavmeshSelection> {
 }
 
 impl NavmeshPanel {
-    pub fn new(scene_frame: Handle<UiNode>, ctx: &mut BuildContext, sender: MessageSender) -> Self {
+    pub fn new(scene_frame: Handle<Image>, ctx: &mut BuildContext, sender: MessageSender) -> Self {
         let connect_edges;
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("NavmeshPanel"))
             .open(false)
@@ -163,43 +165,45 @@ impl NavmeshPanel {
         if let Some(selection) = fetch_selection(editor_selection) {
             navmesh_selected = graph
                 .try_get_of_type::<NavigationalMesh>(selection.navmesh_node())
-                .is_some();
+                .is_ok();
         }
 
         if navmesh_selected {
-            engine
-                .user_interfaces
-                .first()
-                .send_message(WindowMessage::open_and_align(
-                    self.window,
-                    MessageDirection::ToWidget,
-                    self.scene_frame,
-                    HorizontalAlignment::Right,
-                    VerticalAlignment::Top,
-                    Thickness::uniform(1.0),
-                    false,
-                    false,
-                ));
+            engine.user_interfaces.first().send(
+                self.window,
+                WindowMessage::Open {
+                    alignment: WindowAlignment::Relative {
+                        relative_to: self.scene_frame.to_base(),
+                        horizontal_alignment: HorizontalAlignment::Right,
+                        vertical_alignment: VerticalAlignment::Top,
+                        margin: Thickness::uniform(1.0),
+                    },
+                    modal: false,
+                    focus_content: false,
+                },
+            );
         } else {
             engine
                 .user_interfaces
                 .first()
-                .send_message(WindowMessage::close(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                .send(self.window, WindowMessage::Close);
         }
     }
 
     pub fn on_mode_changed(&mut self, ui: &UserInterface, mode: &Mode) {
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             window_content(self.window, ui),
-            MessageDirection::ToWidget,
-            mode.is_edit(),
-        ));
+            WidgetMessage::Enabled(mode.is_edit()),
+        );
     }
 }
 
+#[derive(Reflect, Debug)]
+#[reflect(
+    non_cloneable,
+    type_uuid = "986eb5f1-5f17-4373-bffb-1e213e7c97e5",
+    hide_all
+)]
 enum DragContext {
     MoveSelection {
         initial_positions: HashMap<usize, Vector3<f32>>,
@@ -216,9 +220,12 @@ impl DragContext {
     }
 }
 
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable, type_uuid = "a8ed875d-0932-400d-b5b0-e0dcfb78c6c1")]
 pub struct EditNavmeshMode {
     move_gizmo: MoveGizmo,
     message_sender: MessageSender,
+    #[reflect(hidden)]
     drag_context: Option<DragContext>,
     plane_kind: PlaneKind,
 }
@@ -231,12 +238,6 @@ impl EditNavmeshMode {
             drag_context: None,
             plane_kind: PlaneKind::X,
         }
-    }
-}
-
-impl TypeUuidProvider for EditNavmeshMode {
-    fn type_uuid() -> Uuid {
-        uuid!("a8ed875d-0932-400d-b5b0-e0dcfb78c6c1")
     }
 }
 
@@ -255,7 +256,7 @@ impl InteractionMode for EditNavmeshMode {
         };
 
         let scene = &mut engine.scenes[game_scene.scene];
-        let camera: &Camera = scene.graph[game_scene.camera_controller.camera].as_camera();
+        let camera = &scene.graph[game_scene.camera_controller.camera];
         let ray = camera.make_ray(mouse_pos, frame_size);
 
         let gizmo_origin = self.move_gizmo.origin;
@@ -269,7 +270,7 @@ impl InteractionMode for EditNavmeshMode {
                     filter: Some(&mut |handle, _| handle != gizmo_origin),
                     ignore_back_faces: false,
                     use_picking_loop: true,
-                    only_meshes: false,
+                    method: Default::default(),
                     settings: &settings.selection,
                 },
             )
@@ -280,7 +281,7 @@ impl InteractionMode for EditNavmeshMode {
             let graph = &mut engine.scenes[game_scene.scene].graph;
 
             if let Some(plane_kind) = self.move_gizmo.handle_pick(editor_node, graph) {
-                if let Some(navmesh) = graph
+                if let Ok(navmesh) = graph
                     .try_get_of_type::<NavigationalMesh>(selection.navmesh_node())
                     .map(|n| n.navmesh_ref())
                 {
@@ -291,7 +292,7 @@ impl InteractionMode for EditNavmeshMode {
                     self.plane_kind = plane_kind;
                     self.drag_context = Some(DragContext::MoveSelection { initial_positions });
                 }
-            } else if let Some(navmesh) = graph
+            } else if let Ok(navmesh) = graph
                 .try_get_of_type::<NavigationalMesh>(selection.navmesh_node())
                 .map(|n| n.navmesh_ref())
             {
@@ -367,7 +368,7 @@ impl InteractionMode for EditNavmeshMode {
         self.move_gizmo.reset_state(graph);
 
         if let Some(selection) = fetch_selection(editor_selection) {
-            if let Some(navmesh) = graph
+            if let Ok(navmesh) = graph
                 .try_get_of_type::<NavigationalMesh>(selection.navmesh_node())
                 .map(|n| n.navmesh_ref())
             {
@@ -435,7 +436,7 @@ impl InteractionMode for EditNavmeshMode {
                         filter: Some(&mut |handle, _| handle != gizmo_origin),
                         ignore_back_faces: false,
                         use_picking_loop: true,
-                        only_meshes: false,
+                        method: Default::default(),
                         settings: &settings.selection,
                     },
                 )
@@ -458,7 +459,7 @@ impl InteractionMode for EditNavmeshMode {
         );
 
         if let Some(selection) = fetch_selection(editor_selection) {
-            if let Some(mut navmesh) = graph
+            if let Ok(mut navmesh) = graph
                 .try_get_mut_of_type::<NavigationalMesh>(selection.navmesh_node())
                 .map(|n| n.navmesh_mut())
             {
@@ -532,7 +533,7 @@ impl InteractionMode for EditNavmeshMode {
             let mut gizmo_visible = false;
             let mut gizmo_position = Default::default();
 
-            if let Some(navmesh) = scene
+            if let Ok(navmesh) = scene
                 .graph
                 .try_get_mut_of_type::<NavigationalMesh>(selection.navmesh_node())
                 .map(|n| n.navmesh_mut())
@@ -625,7 +626,7 @@ impl InteractionMode for EditNavmeshMode {
                         .graph
                         .try_get_of_type::<NavigationalMesh>(selection.navmesh_node())
                         .map(|n| n.navmesh_ref())
-                        .is_some()
+                        .is_ok()
                         && !selection.is_empty()
                     {
                         let mut commands = Vec::new();
@@ -653,7 +654,7 @@ impl InteractionMode for EditNavmeshMode {
                         .keyboard_modifiers()
                         .control =>
                 {
-                    if let Some(navmesh) = scene
+                    if let Ok(navmesh) = scene
                         .graph
                         .try_get_of_type::<NavigationalMesh>(selection.navmesh_node())
                         .map(|n| n.navmesh_ref())
@@ -681,7 +682,7 @@ impl InteractionMode for EditNavmeshMode {
         }
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         let navmesh_mode_tooltip =
             "Edit Navmesh - Shortcut: [5]\n\nNavmesh edit mode allows you to modify selected \
         navigational mesh.";
@@ -695,6 +696,6 @@ impl InteractionMode for EditNavmeshMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        Self::type_info().type_uuid
     }
 }

@@ -32,8 +32,9 @@ use crate::{
     Animation, AnimationContainer, AnimationPose, EntityId,
 };
 use fxhash::FxHashSet;
-use fyrox_core::uuid::{uuid, Uuid};
-use fyrox_core::{NameProvider, TypeUuidProvider};
+use fyrox_core::pool::PoolError;
+use fyrox_core::uuid::uuid;
+use fyrox_core::NameProvider;
 use std::{
     cell::Ref,
     ops::{Deref, DerefMut},
@@ -42,13 +43,8 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 #[doc(hidden)]
 #[derive(Default, Debug, Visit, Reflect, Clone, PartialEq)]
+#[reflect(type_uuid = "d686fac8-5cc1-46b1-82a4-7f4438cc078d")]
 pub struct StateActionWrapper<T: EntityId>(pub StateAction<T>);
-
-impl<T: EntityId> TypeUuidProvider for StateActionWrapper<T> {
-    fn type_uuid() -> Uuid {
-        uuid!("d686fac8-5cc1-46b1-82a4-7f4438cc078d")
-    }
-}
 
 impl<T: EntityId> Deref for StateActionWrapper<T> {
     type Target = StateAction<T>;
@@ -71,6 +67,7 @@ impl<T: EntityId> DerefMut for StateActionWrapper<T> {
 /// to tell the engine to automatically rewind the animation before using it. Otherwise, when the
 /// transition will happen, the animation could be ended already and you'll get "frozen" animation.
 #[derive(Default, Debug, Visit, Reflect, Clone, PartialEq, VariantNames, EnumString, AsRefStr)]
+#[reflect(type_uuid = "c50a15cc-0f63-4409-bbe0-74b9d3e94755")]
 pub enum StateAction<T: EntityId> {
     /// No action.
     #[default]
@@ -88,35 +85,29 @@ pub enum StateAction<T: EntityId> {
     EnableRandomAnimation(Vec<Handle<Animation<T>>>),
 }
 
-impl<T: EntityId> TypeUuidProvider for StateAction<T> {
-    fn type_uuid() -> Uuid {
-        uuid!("c50a15cc-0f63-4409-bbe0-74b9d3e94755")
-    }
-}
-
 impl<T: EntityId> StateAction<T> {
     /// Applies the action to the given animation container.
     pub fn apply(&self, animations: &mut AnimationContainer<T>) {
         match self {
             StateAction::None => {}
             StateAction::RewindAnimation(animation) => {
-                if let Some(animation) = animations.try_get_mut(*animation) {
+                if let Ok(animation) = animations.try_get_mut(*animation) {
                     animation.rewind();
                 }
             }
             StateAction::EnableAnimation(animation) => {
-                if let Some(animation) = animations.try_get_mut(*animation) {
+                if let Ok(animation) = animations.try_get_mut(*animation) {
                     animation.set_enabled(true);
                 }
             }
             StateAction::DisableAnimation(animation) => {
-                if let Some(animation) = animations.try_get_mut(*animation) {
+                if let Ok(animation) = animations.try_get_mut(*animation) {
                     animation.set_enabled(false);
                 }
             }
             StateAction::EnableRandomAnimation(animation_handles) => {
                 if let Some(animation) = animation_handles.iter().choose(&mut rand::thread_rng()) {
-                    if let Some(animation) = animations.try_get_mut(*animation) {
+                    if let Ok(animation) = animations.try_get_mut(*animation) {
                         animation.set_enabled(true);
                     }
                 }
@@ -128,6 +119,7 @@ impl<T: EntityId> StateAction<T> {
 /// State is a final "container" for animation pose. It has backing pose node which provides a set of values.
 /// States can be connected with each other using _transitions_, states with transitions form a state graph.
 #[derive(Default, Debug, Visit, Clone, Reflect, PartialEq)]
+#[reflect(type_uuid = "0d78e1e8-ca1e-4155-9af1-17e379d13a02")]
 pub struct State<T: EntityId> {
     /// Position of state on the canvas. It is editor-specific data.
     pub position: Vector2<f32>,
@@ -167,7 +159,10 @@ impl<T: EntityId> State<T> {
     }
 
     /// Returns a final pose of the state.
-    pub fn pose<'a>(&self, nodes: &'a Pool<PoseNode<T>>) -> Option<Ref<'a, AnimationPose<T>>> {
+    pub fn pose<'a>(
+        &self,
+        nodes: &'a Pool<PoseNode<T>>,
+    ) -> Result<Ref<'a, AnimationPose<T>>, PoolError> {
         nodes.try_borrow(self.root).map(|root| root.pose())
     }
 
@@ -177,7 +172,7 @@ impl<T: EntityId> State<T> {
         nodes: &Pool<PoseNode<T>>,
         animations: &mut FxHashSet<Handle<Animation<T>>>,
     ) {
-        if let Some(root) = nodes.try_borrow(self.root) {
+        if let Ok(root) = nodes.try_borrow(self.root) {
             root.collect_animations(nodes, animations);
         }
     }
@@ -189,7 +184,7 @@ impl<T: EntityId> State<T> {
         animations: &AnimationContainer<T>,
         dt: f32,
     ) {
-        if let Some(root) = nodes.try_borrow(self.root) {
+        if let Ok(root) = nodes.try_borrow(self.root) {
             root.eval_pose(nodes, params, animations, dt);
         }
     }

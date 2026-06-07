@@ -80,12 +80,6 @@ impl SoundContextGuard<'_> {
         self.guard.distance_model()
     }
 
-    /// Normalizes given frequency using context's sampling rate. Normalized frequency then can be used
-    /// to create filters.
-    pub fn normalize_frequency(&self, f: f32) -> f32 {
-        self.guard.normalize_frequency(f)
-    }
-
     /// Returns amount of time context spent on rendering all sound sources.
     pub fn full_render_duration(&self) -> Duration {
         self.guard.full_render_duration()
@@ -157,13 +151,13 @@ impl SoundContext {
     }
 
     pub(crate) fn set_sound_position(&mut self, sound: &Sound) {
-        if let Some(source) = self.native.state().try_get_source_mut(sound.native.get()) {
+        if let Ok(source) = self.native.state().try_get_source_mut(sound.native.get()) {
             source.set_position(sound.global_position());
         }
     }
 
     pub(crate) fn sync_with_sound(&self, sound: &mut Sound) {
-        if let Some(source) = self.native.state().try_get_source_mut(sound.native.get()) {
+        if let Ok(source) = self.native.state().try_get_source_mut(sound.native.get()) {
             // Sync back.
             sound.status.set_value_silent(source.status());
             sound

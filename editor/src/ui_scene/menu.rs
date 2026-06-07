@@ -18,19 +18,19 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::{BaseSceneGraph, SceneGraphNode};
-use crate::fyrox::{
-    core::pool::Handle,
-    gui::{
-        menu::MenuItemMessage,
-        message::UiMessage,
-        popup::{Placement, PopupBuilder, PopupMessage},
-        stack_panel::StackPanelBuilder,
-        widget::{WidgetBuilder, WidgetMessage},
-        BuildContext, RcUiNodeHandle, UiNode,
-    },
-};
 use crate::{
+    fyrox::graph::{NodeWrapper, SceneGraph},
+    fyrox::{
+        core::pool::Handle,
+        gui::{
+            menu::MenuItemMessage,
+            message::UiMessage,
+            popup::{Placement, PopupBuilder, PopupMessage},
+            stack_panel::StackPanelBuilder,
+            widget::{WidgetBuilder, WidgetMessage},
+            BuildContext, RcUiNodeHandle, UiNode,
+        },
+    },
     menu::{create_menu_item, create_menu_item_shortcut, ui::UiMenu},
     message::MessageSender,
     scene::{controller::SceneController, Selection},
@@ -40,22 +40,23 @@ use crate::{
     },
     utils,
     world::WorldViewerItemContextMenu,
-    Engine, Message, MessageDirection,
+    Engine, Message,
 };
 use fyrox::asset::manager::ResourceManager;
+use fyrox::core::uuid::{uuid, Uuid};
 use fyrox::gui::constructor::WidgetConstructorContainer;
-use fyrox::gui::menu::ContextMenuBuilder;
+use fyrox::gui::menu::{ContextMenuBuilder, MenuItem};
 use std::path::PathBuf;
 
 pub struct WidgetContextMenu {
     menu: RcUiNodeHandle,
-    delete_selection: Handle<UiNode>,
-    copy_selection: Handle<UiNode>,
+    delete_selection: Handle<MenuItem>,
+    copy_selection: Handle<MenuItem>,
     widgets_menu: UiMenu,
     placement_target: Handle<UiNode>,
-    paste: Handle<UiNode>,
-    make_root: Handle<UiNode>,
-    open_asset: Handle<UiNode>,
+    paste: Handle<MenuItem>,
+    make_root: Handle<MenuItem>,
+    open_asset: Handle<MenuItem>,
 }
 
 impl WorldViewerItemContextMenu for WidgetContextMenu {
@@ -71,7 +72,12 @@ fn resource_path_of_first_selected_node(
 ) -> Option<PathBuf> {
     if let Some(ui_selection) = editor_selection.as_ui() {
         if let Some(first) = ui_selection.widgets.first() {
-            if let Some(resource) = ui_scene.ui.try_get(*first).and_then(|n| n.resource()) {
+            if let Some(resource) = ui_scene
+                .ui
+                .try_get_node(*first)
+                .ok()
+                .and_then(|n| n.resource())
+            {
                 return resource_manager.resource_path(resource.as_ref());
             }
         }
@@ -80,6 +86,12 @@ fn resource_path_of_first_selected_node(
 }
 
 impl WidgetContextMenu {
+    pub const DELETE_SELECTION: Uuid = uuid!("30eef2a7-9f12-4e64-9142-b604f25e9e06");
+    pub const COPY_SELECTION: Uuid = uuid!("0a2d10bc-de1e-4196-aba6-0a51c54eb238");
+    pub const PASTE_AS_CHILD: Uuid = uuid!("d3b86c8c-1efd-4917-9543-b0f5f32f8cbd");
+    pub const MAKE_ROOT: Uuid = uuid!("968318f6-21c7-430f-a13d-36aefb61cde2");
+    pub const OPEN_ASSET: Uuid = uuid!("f3f7d0fa-e905-4371-8973-dfc1eb758e5a");
+
     pub fn new(
         widget_constructors_container: &WidgetConstructorContainer,
         ctx: &mut BuildContext,
@@ -93,35 +105,56 @@ impl WidgetContextMenu {
         let widgets_menu = UiMenu::new(widget_constructors_container, "Create Child Widget", ctx);
 
         let menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new().with_visibility(false)).with_content(
-                StackPanelBuilder::new(
-                    WidgetBuilder::new()
-                        .with_child({
-                            delete_selection =
-                                create_menu_item_shortcut("Delete Selection", "Del", vec![], ctx);
-                            delete_selection
-                        })
-                        .with_child({
-                            copy_selection =
-                                create_menu_item_shortcut("Copy Selection", "Ctrl+C", vec![], ctx);
-                            copy_selection
-                        })
-                        .with_child({
-                            paste = create_menu_item("Paste As Child", vec![], ctx);
-                            paste
-                        })
-                        .with_child({
-                            make_root = create_menu_item("Make Root", vec![], ctx);
-                            make_root
-                        })
-                        .with_child({
-                            open_asset = create_menu_item("Open Asset", vec![], ctx);
-                            open_asset
-                        })
-                        .with_child(widgets_menu.menu),
+            PopupBuilder::new(WidgetBuilder::new().with_visibility(false))
+                .with_content(
+                    StackPanelBuilder::new(
+                        WidgetBuilder::new()
+                            .with_child({
+                                delete_selection = create_menu_item_shortcut(
+                                    "Delete Selection",
+                                    None,
+                                    Self::DELETE_SELECTION,
+                                    "Del",
+                                    vec![],
+                                    ctx,
+                                );
+                                delete_selection
+                            })
+                            .with_child({
+                                copy_selection = create_menu_item_shortcut(
+                                    "Copy Selection",
+                                    None,
+                                    Self::COPY_SELECTION,
+                                    "Ctrl+C",
+                                    vec![],
+                                    ctx,
+                                );
+                                copy_selection
+                            })
+                            .with_child({
+                                paste = create_menu_item(
+                                    "Paste As Child",
+                                    Self::PASTE_AS_CHILD,
+                                    vec![],
+                                    ctx,
+                                );
+                                paste
+                            })
+                            .with_child({
+                                make_root =
+                                    create_menu_item("Make Root", Self::MAKE_ROOT, vec![], ctx);
+                                make_root
+                            })
+                            .with_child({
+                                open_asset =
+                                    create_menu_item("Open Asset", Self::OPEN_ASSET, vec![], ctx);
+                                open_asset
+                            })
+                            .with_child(widgets_menu.menu),
+                    )
+                    .build(ctx),
                 )
-                .build(ctx),
-            ),
+                .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -197,14 +230,10 @@ impl WidgetContextMenu {
                     self.placement_target = *target;
 
                     // Check if there's something to paste and deactivate "Paste" if nothing.
-                    engine
-                        .user_interfaces
-                        .first_mut()
-                        .send_message(WidgetMessage::enabled(
-                            self.paste,
-                            MessageDirection::ToWidget,
-                            !ui_scene.clipboard.is_empty(),
-                        ));
+                    engine.user_interfaces.first_mut().send(
+                        self.paste,
+                        WidgetMessage::Enabled(!ui_scene.clipboard.is_empty()),
+                    );
                 }
             }
         }

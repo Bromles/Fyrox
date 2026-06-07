@@ -25,7 +25,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     MessageDirection, Thickness, UiMessage, WidgetBuilder,
 };
@@ -65,13 +65,11 @@ where
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<T>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: BitFieldBuilder::new(
-                WidgetBuilder::new().with_margin(Thickness::top_bottom(1.0)),
-            )
-            .with_value(*value)
-            .build(ctx.build_context),
-        })
+        Ok(PropertyEditorInstance::simple(
+            BitFieldBuilder::new(WidgetBuilder::new().with_margin(Thickness::top_bottom(1.0)))
+                .with_value(*value)
+                .build(ctx.build_context),
+        ))
     }
 
     fn create_message(
@@ -79,10 +77,9 @@ where
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<T>()?;
-        Ok(Some(BitFieldMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            *value,
+            BitFieldMessage::Value(*value),
         )))
     }
 
@@ -91,7 +88,7 @@ where
             if let Some(BitFieldMessage::Value(value)) = ctx.message.data::<BitFieldMessage<T>>() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(*value),
+                    action: FieldAction::object(*value),
                 });
             }
         }

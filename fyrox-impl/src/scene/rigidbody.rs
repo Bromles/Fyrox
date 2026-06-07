@@ -28,6 +28,7 @@
 //! using [`RigidBody::wake_up`]. By default any external action does **not** wakes up rigid body.
 //! You can also explicitly tell to rigid body that it cannot sleep, by calling
 //! [`RigidBody::set_can_sleep`] with `false` value.
+use crate::scene::collider::ColliderShape;
 use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
@@ -37,7 +38,6 @@ use crate::{
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -50,9 +50,9 @@ use crate::{
         Scene,
     },
 };
-use fyrox_core::uuid_provider;
+
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::{BaseSceneGraph, SceneGraph};
+use fyrox_graph::SceneGraph;
 use rapier3d::{dynamics, prelude::RigidBodyHandle};
 use std::{
     cell::Cell,
@@ -67,8 +67,11 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
     Copy, Clone, Debug, Reflect, Visit, PartialEq, Eq, Hash, AsRefStr, EnumString, VariantNames,
 )]
 #[repr(u32)]
+#[derive(Default)]
+#[reflect(type_uuid = "562d2907-1b41-483a-8ca2-12eebaff7f5d")]
 pub enum RigidBodyType {
     /// Dynamic rigid bodies can be affected by external forces.
+    #[default]
     Dynamic = 0,
     /// Static rigid bodies cannot be affected by external forces.
     Static = 1,
@@ -78,14 +81,6 @@ pub enum RigidBodyType {
     /// Kinematic rigid body cannot be affected by external forces, but can push other rigid bodies.
     /// It also does not have any dynamic, you are able to control the position by changing velocity.
     KinematicVelocityBased = 3,
-}
-
-uuid_provider!(RigidBodyType = "562d2907-1b41-483a-8ca2-12eebaff7f5d");
-
-impl Default for RigidBodyType {
-    fn default() -> Self {
-        Self::Dynamic
-    }
 }
 
 impl From<dynamics::RigidBodyType> for RigidBodyType {
@@ -149,8 +144,9 @@ pub(crate) enum ApplyAction {
     NextPosition(Isometry3<f32>),
 }
 
-#[derive(Copy, Clone, Debug, Reflect, Visit, PartialEq, AsRefStr, EnumString, VariantNames)]
 /// Possible types of rigidbody mass properties
+#[derive(Copy, Clone, Debug, Reflect, Visit, PartialEq, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "663b6a92-9c0f-4f47-b66a-6b4293312a5d")]
 pub enum RigidBodyMassPropertiesType {
     /// Use default mass properties
     Default,
@@ -162,7 +158,6 @@ pub enum RigidBodyMassPropertiesType {
         principal_inertia: Vector3<f32>,
     },
 }
-uuid_provider!(RigidBodyMassPropertiesType = "663b6a92-9c0f-4f47-b66a-6b4293312a5d");
 
 /// Rigid body is a physics entity that responsible for the dynamics and kinematics of the solid.
 /// Use this node when you need to simulate real-world physics in your game.
@@ -171,8 +166,11 @@ uuid_provider!(RigidBodyMassPropertiesType = "663b6a92-9c0f-4f47-b66a-6b4293312a
 ///
 /// Rigid body that does not move for some time will go asleep. This means that the body will not
 /// move unless it is woken up by some other moving body. This feature allows to save CPU resources.
-#[derive(Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Visit, Reflect)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "4be15a7c-3566-49c4-bba8-2f4ccc57ffed"
+)]
 pub struct RigidBody {
     base: Base,
 
@@ -314,17 +312,29 @@ impl Clone for RigidBody {
     }
 }
 
-impl TypeUuidProvider for RigidBody {
-    fn type_uuid() -> Uuid {
-        uuid!("4be15a7c-3566-49c4-bba8-2f4ccc57ffed")
-    }
-}
-
 impl RigidBody {
     /// Sets new linear velocity of the rigid body. Changing this parameter will wake up the rigid
     /// body!
     pub fn set_lin_vel(&mut self, lin_vel: Vector3<f32>) -> Vector3<f32> {
         self.lin_vel.set_value_and_mark_modified(lin_vel)
+    }
+
+    /// Sets new linear velocity along the X axis of the rigid body. Changing this parameter will wake
+    /// up the rigid body!
+    pub fn set_lin_vel_x(&mut self, x_vel: f32) {
+        self.lin_vel.x = x_vel;
+    }
+
+    /// Sets new linear velocity along the Y axis of the rigid body. Changing this parameter will wake
+    /// up the rigid body!
+    pub fn set_lin_vel_y(&mut self, y_vel: f32) {
+        self.lin_vel.y = y_vel;
+    }
+
+    /// Sets new linear velocity along the Z axis of the rigid body. Changing this parameter will wake
+    /// up the rigid body!
+    pub fn set_lin_vel_z(&mut self, z_vel: f32) {
+        self.lin_vel.z = z_vel;
     }
 
     /// Returns current linear velocity of the rigid body.
@@ -615,7 +625,7 @@ impl NodeTrait for RigidBody {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn on_removed_from_graph(&mut self, graph: &mut Graph) {
@@ -651,6 +661,7 @@ impl NodeTrait for RigidBody {
             context
                 .nodes
                 .try_borrow(self.parent)
+                .ok()
                 .map(|p| p.global_transform())
                 .unwrap_or_else(Matrix4::identity),
         );
@@ -658,7 +669,20 @@ impl NodeTrait for RigidBody {
 
     fn validate(&self, scene: &Scene) -> Result<(), String> {
         for &child in self.children() {
-            if scene.graph.try_get_of_type::<Collider>(child).is_some() {
+            if let Ok(collider) = scene.graph.try_get_of_type::<Collider>(child) {
+                match collider.shape() {
+                    ColliderShape::Trimesh(_) | ColliderShape::Heightfield(_)
+                        if *self.body_type == RigidBodyType::Dynamic =>
+                    {
+                        return Err(
+                            "The 3D rigid body is marked as dynamic, but uses the collider \
+                        that cannot be dynamic. Consider making the rigid body static."
+                                .to_string(),
+                        )
+                    }
+                    _ => (),
+                }
+
                 return Ok(());
             }
         }
@@ -853,7 +877,7 @@ impl RigidBodyBuilder {
     }
 
     /// Creates RigidBody node and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<RigidBody> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

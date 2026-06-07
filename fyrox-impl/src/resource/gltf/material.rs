@@ -18,7 +18,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use std::path::{Path, PathBuf};
+#![allow(missing_docs)]
+
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use crate::{
     asset::{manager::ResourceManager, state::LoadError, untyped::ResourceKind, Resource},
@@ -33,7 +39,6 @@ use crate::{
     },
 };
 use gltf::{buffer::View, image, Document};
-use lazy_static::lazy_static;
 
 use super::uri;
 
@@ -44,15 +49,19 @@ use crate::resource::texture::TextureMinificationFilter as FyroxMinFilter;
 use gltf::texture::MagFilter as GltfMagFilter;
 use gltf::texture::MinFilter as GltfMinFilter;
 
-pub const SHADER_SRC: &str = include_str!("gltf_standard.shader");
-
-lazy_static! {
-    static ref GLTF_SHADER: ShaderResource = ShaderResource::new_ok(
-        uuid!("33ee0142-f345-4c0a-9aca-d1f684a3485b"),
-        ResourceKind::External,
-        Shader::from_string(SHADER_SRC).unwrap()
-    );
-}
+pub static GLTF_SHADER: LazyLock<BuiltInResource<Shader>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "GltfShader",
+        embedded_data_source!("gltf_standard.shader"),
+        |data| {
+            ShaderResource::new_ok(
+                uuid!("33ee0142-f345-4c0a-9aca-d1f684a3485b"),
+                ResourceKind::External,
+                Shader::from_string_bytes(data).unwrap(),
+            )
+        },
+    )
+});
 
 fn convert_mini(filter: GltfMinFilter) -> FyroxMinFilter {
     match filter {
@@ -74,9 +83,10 @@ fn convert_mag(filter: GltfMagFilter) -> FyroxMagFilter {
 
 use crate::material::{MaterialResourceBinding, MaterialTextureBinding};
 use crate::resource::texture::TextureWrapMode as FyroxWrapMode;
-use fyrox_core::Uuid;
+use fyrox_resource::builtin::BuiltInResource;
+use fyrox_resource::embedded_data_source;
 use gltf::texture::WrappingMode as GltfWrapMode;
-use uuid::uuid;
+use uuid::{uuid, Uuid};
 
 fn convert_wrap(mode: GltfWrapMode) -> FyroxWrapMode {
     match mode {
@@ -96,6 +106,24 @@ pub enum GltfMaterialError {
     Load(LoadError),
     Base64(base64::DecodeError),
     Texture(TextureError),
+}
+
+impl std::error::Error for GltfMaterialError {}
+
+impl Display for GltfMaterialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GltfMaterialError::ShaderLoadFailed => f.write_str("Shader load failed"),
+            GltfMaterialError::InvalidIndex => f.write_str("Invalid material index"),
+            GltfMaterialError::UnsupportedURI(uri) => {
+                write!(f, "Unsupported material URI {uri:?}")
+            }
+            GltfMaterialError::TextureNotFound(uri) => write!(f, "Texture not found: {uri:?}"),
+            GltfMaterialError::Load(error) => Display::fmt(error, f),
+            GltfMaterialError::Base64(error) => Display::fmt(error, f),
+            GltfMaterialError::Texture(error) => Display::fmt(error, f),
+        }
+    }
 }
 
 impl From<LoadError> for GltfMaterialError {
@@ -152,7 +180,7 @@ pub async fn import_materials(
         match import_material(mat, textures).await {
             Ok(res) => result.push(res),
             Err(err) => {
-                Log::err(format!("glTF material failed to import. Reason: {:?}", err));
+                Log::err(format!("glTF material failed to import. Reason: {err:?}"));
                 result.push(MaterialResource::new_ok(
                     Uuid::new_v4(),
                     ResourceKind::Embedded,
@@ -168,7 +196,7 @@ async fn import_material(
     mat: gltf::Material<'_>,
     textures: &[TextureResource],
 ) -> Result<MaterialResource> {
-    let shader: ShaderResource = GLTF_SHADER.clone(); //resource_manager.request(SHADER_PATH).await?;
+    let shader: ShaderResource = GLTF_SHADER.resource.clone();
     if !shader.is_ok() {
         return Err(GltfMaterialError::ShaderLoadFailed);
     }
@@ -214,7 +242,12 @@ async fn import_material(
         "diffuseColor",
         Vector4::<f32>::from(pbr.base_color_factor()).into(),
     );
-    set_material_vector3(&mut result, "emissionStrength", mat.emissive_factor());
+    let mut emission_strength = mat.emissive_factor();
+    let emission_factor = mat.emissive_strength().unwrap_or(1.0);
+    for c in emission_strength.iter_mut() {
+        *c *= emission_factor;
+    }
+    set_material_vector3(&mut result, "emissionStrength", emission_strength);
     set_material_scalar(&mut result, "metallicFactor", pbr.metallic_factor());
     set_material_scalar(&mut result, "roughnessFactor", pbr.roughness_factor());
     Ok(Resource::new_ok(
@@ -382,7 +415,7 @@ async fn search_for_path(filename: &str, context: &TextureContext<'_>) -> Option
             let io = context.resource_manager.resource_io();
             let mut texture_path = None;
             let path = Path::new(".");
-            if let Ok(iter) = io.walk_directory(path).await {
+            if let Ok(iter) = io.walk_directory(path, usize::MAX).await {
                 for dir in iter {
                     if io.is_dir(&dir).await {
                         let candidate = dir.join(filename);

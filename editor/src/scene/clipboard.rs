@@ -20,14 +20,21 @@
 
 use crate::fyrox::{
     core::pool::Handle,
+    core::reflect::prelude::*,
     scene::{graph::Graph, node::Node, Scene},
 };
 use crate::{scene::GraphSelection, Engine};
+use fyrox::core::blank_reflect_ref;
 use std::collections::HashMap;
 
+#[derive(Debug)]
 pub struct Clipboard {
     graph: Graph,
     empty: bool,
+}
+
+impl Reflect for &'static mut Clipboard {
+    blank_reflect_ref!("ab09394a-ad19-477b-85cb-5dccf7401c80");
 }
 
 impl Default for Clipboard {
@@ -57,6 +64,7 @@ fn deep_clone_nodes(
         let (_, old_to_new) = source_graph.copy_node(
             root_node,
             dest_graph,
+            false,
             &mut |_, _| true,
             &mut |_, _| {},
             &mut |_, _, _| {},

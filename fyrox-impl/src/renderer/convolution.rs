@@ -25,7 +25,15 @@ use crate::{
         algebra::{Matrix4, Point3},
         color::Color,
         math::Rect,
-        ImmutableString,
+        some_or_break, ImmutableString,
+    },
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, GpuFrameBuffer},
+        gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
+        server::GraphicsServer,
+        stats::RenderPassStatistics,
+        ElementRange,
     },
     renderer::{
         cache::{
@@ -35,15 +43,6 @@ use crate::{
         resources::RendererResources,
         utils::CubeMapFaceDescriptor,
     },
-};
-use fyrox_core::some_or_break;
-use fyrox_graphics::{
-    error::FrameworkError,
-    framebuffer::{Attachment, GpuFrameBuffer},
-    gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
-    server::GraphicsServer,
-    stats::RenderPassStatistics,
-    ElementRange,
 };
 
 pub struct EnvironmentMapSpecularConvolution {
@@ -77,10 +76,13 @@ impl EnvironmentMapSpecularConvolution {
 
     pub fn render(
         &self,
+        server: &dyn GraphicsServer,
         environment_map: &GpuTexture,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("EnvironmentMapSpecularConvolution");
+
         let mut stats = RenderPassStatistics::default();
 
         let projection_matrix =
@@ -160,10 +162,13 @@ impl EnvironmentMapIrradianceConvolution {
 
     pub fn render(
         &self,
+        server: &dyn GraphicsServer,
         environment_map: &GpuTexture,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("EnvironmentMapIrradianceConvolution");
+
         let mut stats = RenderPassStatistics::default();
 
         let projection_matrix =

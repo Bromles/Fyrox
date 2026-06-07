@@ -21,7 +21,8 @@
 //! Material loader.
 
 use crate::Material;
-use fyrox_core::{uuid::Uuid, TypeUuidProvider};
+use fyrox_core::reflect::Reflect;
+use fyrox_core::uuid::Uuid;
 use fyrox_resource::state::LoadError;
 use fyrox_resource::{
     io::ResourceIo,
@@ -41,8 +42,12 @@ impl ResourceLoader for MaterialLoader {
         &["material"]
     }
 
+    fn is_native_extension(&self, ext: &str) -> bool {
+        fyrox_core::cmp_strings_case_insensitive(ext, "material")
+    }
+
     fn data_type_uuid(&self) -> Uuid {
-        Material::type_uuid()
+        <Material as Reflect>::type_info().type_uuid
     }
 
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {

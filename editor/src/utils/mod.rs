@@ -18,20 +18,52 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::{
-    core::{algebra::Vector2, pool::ErasedHandle, pool::Handle, visitor::Visitor},
-    graph::BaseSceneGraph,
-    gui::{
-        file_browser::{FileBrowserMode, FileSelectorBuilder, Filter},
-        message::MessageDirection,
-        widget::{WidgetBuilder, WidgetMessage},
-        window::{Window, WindowBuilder},
-        BuildContext, UiNode, UserInterface,
+use crate::{
+    fyrox::{
+        core::{
+            algebra::Vector2, color::Color, pool::ErasedHandle, pool::Handle, visitor::Visitor,
+        },
+        graph::SceneGraph,
+        gui::{
+            brush::Brush,
+            button::ButtonBuilder,
+            file_browser::{FileSelectorBuilder, PathFilter},
+            image::ImageBuilder,
+            widget::{WidgetBuilder, WidgetMessage},
+            window::{Window, WindowBuilder},
+            BuildContext, HorizontalAlignment, Thickness, UiNode, UserInterface, VerticalAlignment,
+        },
     },
+    load_image,
 };
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::button::Button;
+use fyrox::gui::file_browser::{FileSelector, FileSelectorMode, FileType};
 use std::{fs::File, path::Path};
 
 pub mod doc;
+
+pub fn make_pick_button(column: usize, ctx: &mut BuildContext) -> Handle<Button> {
+    ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_width(22.0)
+            .with_height(22.0)
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .on_column(column)
+            .with_margin(Thickness::uniform(1.0)),
+    )
+    .with_content(
+        ImageBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(3.0))
+                .with_background(Brush::Solid(Color::opaque(0, 180, 0)).into()),
+        )
+        .with_opt_texture(load_image!("../../resources/pick.png"))
+        .build(ctx),
+    )
+    .build(ctx)
+}
 
 /// True if `a` and `b` have the same length, and every element of `a` is equal to some element of `b`
 /// and every element of `b` is equal to some element of `a`.
@@ -39,7 +71,7 @@ pub fn is_slice_equal_permutation<T: PartialEq>(a: &[T], b: &[T]) -> bool {
     a.len() == b.len() && is_slice_subset_permutation(a, b) && is_slice_subset_permutation(b, a)
 }
 
-/// True if every elmenet of `a` is equal to some element of `b`.
+/// True if every element of `a` is equal to some element of `b`.
 pub fn is_slice_subset_permutation<T: PartialEq>(a: &[T], b: &[T]) -> bool {
     for source in a.iter() {
         let mut found = false;
@@ -56,35 +88,30 @@ pub fn is_slice_subset_permutation<T: PartialEq>(a: &[T], b: &[T]) -> bool {
     true
 }
 
-pub fn window_content(window: Handle<UiNode>, ui: &UserInterface) -> Handle<UiNode> {
-    ui.node(window)
-        .cast::<Window>()
+pub fn window_content(window: Handle<Window>, ui: &UserInterface) -> Handle<UiNode> {
+    ui.try_get(window)
+        .ok()
         .map(|w| w.content)
         .unwrap_or_default()
 }
 
-pub fn enable_widget(handle: Handle<UiNode>, state: bool, ui: &UserInterface) {
-    ui.send_message(WidgetMessage::enabled(
-        handle,
-        MessageDirection::ToWidget,
-        state,
-    ));
+pub fn enable_widget(
+    handle: Handle<impl ObjectOrVariant<UiNode>>,
+    state: bool,
+    ui: &UserInterface,
+) {
+    ui.send(handle, WidgetMessage::Enabled(state));
 }
 
 pub fn create_file_selector(
     ctx: &mut BuildContext,
-    extension: &'static str,
-    mode: FileBrowserMode,
-) -> Handle<UiNode> {
+    file_type: FileType,
+    mode: FileSelectorMode,
+) -> Handle<FileSelector> {
     FileSelectorBuilder::new(
         WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(400.0)).open(false),
     )
-    .with_filter(Filter::new(move |path| {
-        path.is_dir()
-            || path
-                .extension()
-                .is_some_and(|ext| ext.to_string_lossy().as_ref() == extension)
-    }))
+    .with_filter(PathFilter::new().with_file_type(file_type))
     .with_mode(mode)
     .build(ctx)
 }
@@ -95,14 +122,17 @@ pub fn fetch_node_center(handle: Handle<UiNode>, ctx: &BuildContext) -> Vector2<
         .unwrap_or_default()
 }
 
-pub fn fetch_node_screen_center(handle: Handle<UiNode>, ctx: &BuildContext) -> Vector2<f32> {
-    ctx.try_get_node(handle)
+pub fn fetch_node_screen_center(
+    handle: Handle<impl ObjectOrVariant<UiNode>>,
+    ctx: &BuildContext,
+) -> Vector2<f32> {
+    ctx.try_get_node(handle.to_base())
         .map(|node| node.screen_bounds().center())
         .unwrap_or_default()
 }
 
 pub fn fetch_node_screen_center_ui(handle: Handle<UiNode>, ui: &UserInterface) -> Vector2<f32> {
-    ui.try_get(handle)
+    ui.try_get_node(handle)
         .map(|node| node.screen_bounds().center())
         .unwrap_or_default()
 }
@@ -129,11 +159,7 @@ where
         if let Some(has_match) = filter(node_ref) {
             is_any_match |= has_match;
 
-            ui.send_message(WidgetMessage::visibility(
-                node,
-                MessageDirection::ToWidget,
-                is_any_match,
-            ));
+            ui.send(node, WidgetMessage::Visibility(is_any_match));
         }
 
         is_any_match

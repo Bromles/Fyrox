@@ -24,9 +24,11 @@ use crate::{
     core::{append_extension, log::Log},
     io::ResourceIo,
 };
+use fyrox_core::io::FileError;
 use fyrox_core::reflect::Reflect;
 use ron::ser::PrettyConfig;
 use serde::{de::DeserializeOwned, Serialize};
+use std::io::{ErrorKind, Write};
 use std::{fs::File, path::Path};
 
 /// Extension of import options file.
@@ -45,12 +47,17 @@ pub trait ImportOptions:
 {
     /// Saves import options into a specified file.
     fn save_internal(&self, path: &Path) -> bool {
-        if let Ok(file) = File::create(path) {
-            if ron::ser::to_writer_pretty(file, self, PrettyConfig::default()).is_ok() {
-                return true;
-            }
+        fn write<T: Serialize>(this: &T, path: &Path) -> std::io::Result<()> {
+            let mut file = File::create(path)?;
+            let string = ron::ser::to_string_pretty(this, PrettyConfig::default())
+                .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+            file.write_all(string.as_bytes())?;
+            Ok(())
         }
-        false
+        let result = write(self, path);
+        let is_ok = result.is_ok();
+        Log::verify(result);
+        is_ok
     }
 }
 
@@ -76,21 +83,26 @@ where
             Ok(options) => Some(options),
             Err(e) => {
                 Log::warn(format!(
-                    "Malformed options file {} for {} resource, fallback to defaults! Reason: {:?}",
-                    settings_path.display(),
-                    resource_path.display(),
-                    e
+                    "Malformed options file {:?}, fallback to defaults! Reason: {}",
+                    settings_path, e
                 ));
 
                 None
             }
         },
         Err(e) => {
+            // Missing options file is a normal situation, the engine will use default import options
+            // instead. Any other error indicates a real issue that needs to be highlighted to the
+            // user.
+            if let FileError::Io(ref err) = e {
+                if err.kind() == ErrorKind::NotFound {
+                    return None;
+                }
+            }
+
             Log::warn(format!(
-                "Unable to load options file {} for {} resource, fallback to defaults! Reason: {:?}",
-                settings_path.display(),
-                resource_path.display(),
-                e
+                "Unable to load options file {:?}, fallback to defaults! Reason: {}",
+                settings_path, e
             ));
 
             None

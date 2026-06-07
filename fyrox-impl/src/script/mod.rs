@@ -22,38 +22,37 @@
 
 //! Script is used to add custom logic to scene nodes. See [ScriptTrait] for more info.
 
+use crate::plugin::error::GameResult;
 use crate::{
     asset::manager::ResourceManager,
     core::{
         log::Log,
-        pool::Handle,
-        reflect::{FieldRef, Reflect, ReflectArray, ReflectList},
-        type_traits::ComponentProvider,
+        pool::{Handle, PoolError},
+        reflect::prelude::*,
         uuid::Uuid,
         visitor::{Visit, VisitResult, Visitor},
-        TypeUuidProvider,
     },
-    engine::{task::TaskPoolHandler, GraphicsContext, ScriptMessageDispatcher},
+    engine::{input::InputState, task::TaskPoolHandler, GraphicsContext, ScriptMessageDispatcher},
     event::Event,
     gui::UiContainer,
     plugin::{Plugin, PluginContainer},
     scene::{base::NodeScriptMessage, node::Node, Scene},
 };
-use fyrox_core::reflect::FieldMut;
+use fyrox_core::pool::ObjectOrVariant;
+use fyrox_core::reflect::{FieldMetadata, TypeInfo};
+pub use fyrox_core_derive::ScriptMessagePayload;
+use fyrox_graph::SceneGraph;
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
-    str::FromStr,
     sync::mpsc::Sender,
 };
-
-pub use fyrox_core_derive::ScriptMessagePayload;
 
 pub mod constructor;
 
 pub(crate) trait UniversalScriptContext {
-    fn node(&mut self) -> Option<&mut Node>;
+    fn node(&mut self) -> Result<&mut Node, PoolError>;
     fn destroy_script_deferred(&self, script: Script, index: usize);
     fn set_script_index(&mut self, index: usize);
 }
@@ -71,13 +70,7 @@ pub type DynamicTypeId = i64;
 ///     }
 /// ```
 pub trait ScriptMessagePayload: Any + Send + Debug {
-    /// Returns `self` as `&dyn Any`
-    fn as_any_ref(&self) -> &dyn Any;
-
-    /// Returns `self` as `&dyn Any`
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-
-    /// By default messages are dispatched by [`TypeId::of`]`::<Self>()`.
+    /// By default messages are dispatched by `TypeId::of::<Self>()`.
     ///
     /// If this method returns [`Some`], then the message become dynamically typed.
     /// Dynamically typed messages are dispatched by the returned type identifier instead of static type.
@@ -92,12 +85,12 @@ pub trait ScriptMessagePayload: Any + Send + Debug {
 impl dyn ScriptMessagePayload {
     /// Tries to cast the payload to a particular type.
     pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
-        self.as_any_ref().downcast_ref::<T>()
+        (self as &dyn Any).downcast_ref::<T>()
     }
 
     /// Tries to cast the payload to a particular type.
     pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.as_any_mut().downcast_mut::<T>()
+        (self as &mut dyn Any).downcast_mut::<T>()
     }
 }
 
@@ -162,13 +155,13 @@ impl ScriptMessageSender {
     }
 
     /// Sends a targeted script message with the given payload.
-    pub fn send_to_target<T>(&self, target: Handle<Node>, payload: T)
+    pub fn send_to_target<T>(&self, target: Handle<impl ObjectOrVariant<Node>>, payload: T)
     where
         T: ScriptMessagePayload,
     {
         self.send(ScriptMessage {
             payload: Box::new(payload),
-            kind: ScriptMessageKind::Targeted(target),
+            kind: ScriptMessageKind::Targeted(target.transmute()),
         })
     }
 
@@ -184,13 +177,20 @@ impl ScriptMessageSender {
     }
 
     /// Sends a hierarchical script message with the given payload.
-    pub fn send_hierarchical<T>(&self, root: Handle<Node>, routing: RoutingStrategy, payload: T)
-    where
+    pub fn send_hierarchical<T>(
+        &self,
+        root: Handle<impl ObjectOrVariant<Node>>,
+        routing: RoutingStrategy,
+        payload: T,
+    ) where
         T: ScriptMessagePayload,
     {
         self.send(ScriptMessage {
             payload: Box::new(payload),
-            kind: ScriptMessageKind::Hierarchical { root, routing },
+            kind: ScriptMessageKind::Hierarchical {
+                root: root.transmute(),
+                routing,
+            },
         })
     }
 }
@@ -225,22 +225,13 @@ pub trait BaseScript: Visit + Reflect + Send + Debug + 'static {
     ///     core::reflect::prelude::*,
     ///     core::uuid::Uuid,
     ///     script::ScriptTrait,
-    ///     core::TypeUuidProvider,
-    ///     core::uuid::uuid, core::type_traits::prelude::*
+    ///     core::uuid::uuid,
     /// };
     ///
-    /// #[derive(Reflect, Visit, Debug, Clone, ComponentProvider)]
+    /// #[derive(Reflect, Visit, Debug, Clone)]
+    /// // Use https://www.uuidgenerator.net/ to generate new UUID or an extension for your IDE.
+    /// #[reflect(type_uuid = "4cfbe65e-a2c1-474f-b123-57516d80b1f8")]
     /// struct MyScript { }
-    ///
-    /// // Implement TypeUuidProvider trait that will return type uuid of the type.
-    /// // Every script must implement the trait so the script can be registered in
-    /// // serialization context of the engine.
-    /// impl TypeUuidProvider for MyScript {
-    ///     fn type_uuid() -> Uuid {
-    ///         // Use https://www.uuidgenerator.net/ to generate new UUID.
-    ///         uuid!("4cfbe65e-a2c1-474f-b123-57516d80b1f8")
-    ///     }
-    /// }
     ///
     /// impl ScriptTrait for MyScript { }
     /// ```
@@ -249,7 +240,7 @@ pub trait BaseScript: Visit + Reflect + Send + Debug + 'static {
 
 impl<T> BaseScript for T
 where
-    T: Clone + ScriptTrait + Any + TypeUuidProvider,
+    T: Clone + ScriptTrait + Any,
 {
     fn clone_box(&self) -> Box<dyn ScriptTrait> {
         Box::new(self.clone())
@@ -264,7 +255,7 @@ where
     }
 
     fn id(&self) -> Uuid {
-        T::type_uuid()
+        <T as Reflect>::type_info().type_uuid
     }
 }
 
@@ -339,28 +330,30 @@ pub struct ScriptContext<'a, 'b, 'c> {
     ///
     /// ```rust
     /// # use fyrox_impl::{
-    /// #     core::{reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
-    /// #     plugin::Plugin,
+    /// #     core::{reflect::prelude::*,  visitor::prelude::*},
+    /// #     plugin::{Plugin, error::GameResult},
     /// #     script::{ScriptContext, ScriptTrait},
     /// # };
     /// #
     /// #[derive(Visit, Reflect, Default, Debug)]
-    /// #[reflect(non_cloneable)]
+    /// #[reflect(non_cloneable, type_uuid = "bf06a1f4-5e76-4560-a260-e64187a9484b")]
     /// struct Game {
     ///     player_name: String,
     /// }
     ///
     /// impl Plugin for Game {}
     ///
-    /// #[derive(Visit, Reflect, Clone, Default, Debug, TypeUuidProvider, ComponentProvider)]
-    /// #[type_uuid(id = "f732654e-5e3c-4b52-9a3d-44c0cfb14e18")]
+    /// #[derive(Visit, Reflect, Clone, Default, Debug)]
+    /// #[reflect(type_uuid = "f732654e-5e3c-4b52-9a3d-44c0cfb14e18")]
     /// struct MyScript {}
     ///
     /// impl ScriptTrait for MyScript {
-    ///     fn on_update(&mut self, ctx: &mut ScriptContext) {
+    ///     fn on_update(&mut self, ctx: &mut ScriptContext) -> GameResult {
     ///         let game = ctx.plugins.get::<Game>();
     ///
     ///         println!("Player name is: {}", game.player_name);
+    ///
+    ///         Ok(())
     ///     }
     /// }
     /// ```
@@ -411,11 +404,19 @@ pub struct ScriptContext<'a, 'b, 'c> {
 
     /// Index of the script. Never save this index, it is only valid while this context exists!
     pub script_index: usize,
+
+    /// A stored state of most common input events. It is used a "shortcut" in cases where event-based
+    /// approach is too verbose. It may be useful in simple scenarios where you just need to know
+    /// if a button (on keyboard, mouse) was pressed and do something.
+    ///
+    /// **Important:** this structure does not track from which device the corresponding event has
+    /// come from, if you have more than one keyboard and/or mouse, use event-based approach instead!
+    pub input_state: &'a InputState,
 }
 
 impl UniversalScriptContext for ScriptContext<'_, '_, '_> {
-    fn node(&mut self) -> Option<&mut Node> {
-        self.scene.graph.try_get_mut(self.handle)
+    fn node(&mut self) -> Result<&mut Node, PoolError> {
+        self.scene.graph.try_get_node_mut(self.handle)
     }
 
     fn destroy_script_deferred(&self, script: Script, index: usize) {
@@ -487,11 +488,19 @@ pub struct ScriptMessageContext<'a, 'b, 'c> {
 
     /// Index of the script. Never save this index, it is only valid while this context exists!
     pub script_index: usize,
+
+    /// A stored state of most common input events. It is used a "shortcut" in cases where event-based
+    /// approach is too verbose. It may be useful in simple scenarios where you just need to know
+    /// if a button (on keyboard, mouse) was pressed and do something.
+    ///
+    /// **Important:** this structure does not track from which device the corresponding event has
+    /// come from, if you have more than one keyboard and/or mouse, use event-based approach instead!
+    pub input_state: &'a InputState,
 }
 
 impl UniversalScriptContext for ScriptMessageContext<'_, '_, '_> {
-    fn node(&mut self) -> Option<&mut Node> {
-        self.scene.graph.try_get_mut(self.handle)
+    fn node(&mut self) -> Result<&mut Node, PoolError> {
+        self.scene.graph.try_get_node_mut(self.handle)
     }
 
     fn destroy_script_deferred(&self, script: Script, index: usize) {
@@ -554,11 +563,19 @@ pub struct ScriptDeinitContext<'a, 'b, 'c> {
 
     /// Index of the script. Never save this index, it is only valid while this context exists!
     pub script_index: usize,
+
+    /// A stored state of most common input events. It is used a "shortcut" in cases where event-based
+    /// approach is too verbose. It may be useful in simple scenarios where you just need to know
+    /// if a button (on keyboard, mouse) was pressed and do something.
+    ///
+    /// **Important:** this structure does not track from which device the corresponding event has
+    /// come from, if you have more than one keyboard and/or mouse, use event-based approach instead!
+    pub input_state: &'a InputState,
 }
 
 impl UniversalScriptContext for ScriptDeinitContext<'_, '_, '_> {
-    fn node(&mut self) -> Option<&mut Node> {
-        self.scene.graph.try_get_mut(self.node_handle)
+    fn node(&mut self) -> Result<&mut Node, PoolError> {
+        self.scene.graph.try_get_node_mut(self.node_handle)
     }
 
     fn destroy_script_deferred(&self, script: Script, index: usize) {
@@ -581,7 +598,7 @@ impl UniversalScriptContext for ScriptDeinitContext<'_, '_, '_> {
 
 /// Script is a set predefined methods that are called on various stages by the engine. It is used to add
 /// custom behaviour to game entities.
-pub trait ScriptTrait: BaseScript + ComponentProvider {
+pub trait ScriptTrait: BaseScript {
     /// The method is called when the script wasn't initialized yet. It is guaranteed to be called once,
     /// and before any other methods of the script.
     ///
@@ -591,16 +608,25 @@ pub trait ScriptTrait: BaseScript + ComponentProvider {
     /// loaded the instance. Internal flag will tell the engine that the script is initialized and this
     /// method **will not** be called. This is intentional design decision to be able to create save files
     /// in games. If you need a method that will be called in any case, use [`ScriptTrait::on_start`].
-    fn on_init(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) {}
+    fn on_init(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) -> GameResult {
+        Ok(())
+    }
 
     /// The method is called after [`ScriptTrait::on_init`], but in separate pass, which means that all
     /// script instances are already initialized. However, if implementor of this method creates a new
     /// node with a script, there will be a second pass of initialization. The method is guaranteed to
     /// be called once.
-    fn on_start(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) {}
+    fn on_start(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) -> GameResult {
+        Ok(())
+    }
 
     /// The method is called when the script is about to be destroyed. It is guaranteed to be called last.
-    fn on_deinit(&mut self, #[allow(unused_variables)] ctx: &mut ScriptDeinitContext) {}
+    fn on_deinit(
+        &mut self,
+        #[allow(unused_variables)] ctx: &mut ScriptDeinitContext,
+    ) -> GameResult {
+        Ok(())
+    }
 
     /// Called when there is an event from the OS. The method allows you to "listen" for events
     /// coming from the main window of your game. It could be used to react to pressed keys, mouse movements,
@@ -609,13 +635,16 @@ pub trait ScriptTrait: BaseScript + ComponentProvider {
         &mut self,
         #[allow(unused_variables)] event: &Event<()>,
         #[allow(unused_variables)] ctx: &mut ScriptContext,
-    ) {
+    ) -> GameResult {
+        Ok(())
     }
 
     /// Performs a single update tick of the script. The method may be called multiple times per frame, but it is guaranteed
     /// that the rate of call is stable and by default it will be called 60 times per second, but can be changed by using
     /// [`crate::engine::executor::Executor::set_desired_update_rate`] method.
-    fn on_update(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) {}
+    fn on_update(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) -> GameResult {
+        Ok(())
+    }
 
     /// Allows you to react to certain script messages. It could be used for communication between scripts; to
     /// bypass borrowing issues. If you need to receive messages of a particular type, you must subscribe to a type
@@ -623,37 +652,34 @@ pub trait ScriptTrait: BaseScript + ComponentProvider {
     ///
     /// ```rust
     /// use fyrox_impl::{
-    ///     core::{reflect::prelude::*, uuid::Uuid, visitor::prelude::*, type_traits::prelude::*},
-    ///     core::TypeUuidProvider,
+    ///     core::{reflect::prelude::*, uuid::Uuid, visitor::prelude::*},
     ///     script::ScriptTrait,
+    ///     plugin::error::GameResult,
     ///     script::{ScriptContext, ScriptMessageContext, ScriptMessagePayload},
     /// };
     ///
     /// struct Message;
     ///
-    /// #[derive(Reflect, Visit, Debug, Clone, ComponentProvider)]
+    /// #[derive(Reflect, Visit, Debug, Clone)]
+    /// #[reflect(type_uuid = "2649187c-46c2-485f-bf62-c9d3aef0c432")]
     /// struct MyScript {}
     ///
-    /// # impl TypeUuidProvider for MyScript {
-    /// #     fn type_uuid() -> Uuid {
-    /// #         todo!();
-    /// #     }
-    /// # }
-    ///
     /// impl ScriptTrait for MyScript {
-    ///     fn on_start(&mut self, ctx: &mut ScriptContext) {
+    ///     fn on_start(&mut self, ctx: &mut ScriptContext) -> GameResult {
     ///         // Subscription is mandatory to receive any message of the type!
-    ///         ctx.message_dispatcher.subscribe_to::<Message>(ctx.handle)
+    ///         ctx.message_dispatcher.subscribe_to::<Message>(ctx.handle);
+    ///         Ok(())
     ///     }
     ///
     ///     fn on_message(
     ///         &mut self,
     ///         message: &mut dyn ScriptMessagePayload,
     ///         ctx: &mut ScriptMessageContext,
-    ///     ) {
+    ///     ) -> GameResult {
     ///         if let Some(message) = message.downcast_ref::<Message>() {
     ///             // Do something.
     ///         }
+    ///         Ok(())
     ///     }
     /// }
     /// ```
@@ -661,112 +687,21 @@ pub trait ScriptTrait: BaseScript + ComponentProvider {
         &mut self,
         #[allow(unused_variables)] message: &mut dyn ScriptMessagePayload,
         #[allow(unused_variables)] ctx: &mut ScriptMessageContext,
-    ) {
+    ) -> GameResult {
+        Ok(())
     }
 }
 
 /// A wrapper for actual script instance internals, it used by the engine.
-#[derive(Debug)]
+#[derive(Debug, Reflect)]
+#[reflect(type_uuid = "24ecd17d-9b46-4cc8-9d07-a1273e50a20e")]
 pub struct Script {
+    #[reflect(deref, display_name = "Script")]
     instance: Box<dyn ScriptTrait>,
+    #[reflect(hidden)]
     pub(crate) initialized: bool,
+    #[reflect(hidden)]
     pub(crate) started: bool,
-}
-
-impl TypeUuidProvider for Script {
-    fn type_uuid() -> Uuid {
-        Uuid::from_str("24ecd17d-9b46-4cc8-9d07-a1273e50a20e").unwrap()
-    }
-}
-
-impl Reflect for Script {
-    fn source_path() -> &'static str {
-        file!()
-    }
-
-    fn derived_types() -> &'static [TypeId] {
-        &[]
-    }
-
-    fn query_derived_types(&self) -> &'static [TypeId] {
-        Self::derived_types()
-    }
-
-    fn type_name(&self) -> &'static str {
-        self.instance.type_name()
-    }
-
-    fn doc(&self) -> &'static str {
-        self.instance.doc()
-    }
-
-    fn assembly_name(&self) -> &'static str {
-        self.instance.assembly_name()
-    }
-
-    fn type_assembly_name() -> &'static str {
-        env!("CARGO_PKG_NAME")
-    }
-
-    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
-        self.instance.fields_ref(func)
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
-        self.instance.fields_mut(func)
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self.instance.into_any()
-    }
-
-    fn as_any(&self, func: &mut dyn FnMut(&dyn Any)) {
-        self.instance.deref().as_any(func)
-    }
-
-    fn as_any_mut(&mut self, func: &mut dyn FnMut(&mut dyn Any)) {
-        self.instance.deref_mut().as_any_mut(func)
-    }
-
-    fn as_reflect(&self, func: &mut dyn FnMut(&dyn Reflect)) {
-        self.instance.deref().as_reflect(func)
-    }
-
-    fn as_reflect_mut(&mut self, func: &mut dyn FnMut(&mut dyn Reflect)) {
-        self.instance.deref_mut().as_reflect_mut(func)
-    }
-
-    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-        self.instance.deref_mut().set(value)
-    }
-
-    fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
-        self.instance.deref().field(name, func)
-    }
-
-    fn field_mut(&mut self, name: &str, func: &mut dyn FnMut(Option<&mut dyn Reflect>)) {
-        self.instance.deref_mut().field_mut(name, func)
-    }
-
-    fn as_array(&self, func: &mut dyn FnMut(Option<&dyn ReflectArray>)) {
-        self.instance.deref().as_array(func)
-    }
-
-    fn as_array_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectArray>)) {
-        self.instance.deref_mut().as_array_mut(func)
-    }
-
-    fn as_list(&self, func: &mut dyn FnMut(Option<&dyn ReflectList>)) {
-        self.instance.deref().as_list(func)
-    }
-
-    fn as_list_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectList>)) {
-        self.instance.deref_mut().as_list_mut(func)
-    }
-
-    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
-        Some(Box::new(self.clone()))
-    }
 }
 
 impl Deref for Script {
@@ -834,6 +769,20 @@ impl Script {
         }
     }
 
+    /// Generate a brief summary of this script for debugging purposes.
+    pub fn summary(&self) -> String {
+        let mut summary = String::new();
+        if self.initialized {
+            summary.push_str("init ");
+        }
+        if self.started {
+            summary.push_str("start ");
+        }
+        use std::fmt::Write;
+        write!(summary, "{:?}", self.instance).unwrap();
+        summary
+    }
+
     /// Performs downcasting to a particular type.
     #[inline]
     pub fn cast<T: ScriptTrait>(&self) -> Option<&T> {
@@ -851,18 +800,14 @@ impl Script {
 
     /// Tries to borrow a component of given type.
     #[inline]
-    pub fn query_component_ref<T: Any>(&self) -> Option<&T> {
-        self.instance
-            .query_component_ref(TypeId::of::<T>())
-            .and_then(|c| c.downcast_ref())
+    pub fn self_or_field_ref<T: Reflect>(&self) -> Option<&T> {
+        (self.instance.deref() as &dyn Reflect).self_or_field_ref()
     }
 
     /// Tries to borrow a component of given type.
     #[inline]
-    pub fn query_component_mut<T: Any>(&mut self) -> Option<&mut T> {
-        self.instance
-            .query_component_mut(TypeId::of::<T>())
-            .and_then(|c| c.downcast_mut())
+    pub fn self_or_field_mut<T: Reflect>(&mut self) -> Option<&mut T> {
+        (self.instance.deref_mut() as &mut dyn Reflect).self_or_field_mut()
     }
 }
 
@@ -871,21 +816,18 @@ mod test {
     use crate::scene::base::ScriptRecord;
     use crate::{
         core::{
-            impl_component_provider, reflect::prelude::*, variable::try_inherit_properties,
-            variable::InheritableVariable, visitor::prelude::*,
+            reflect::prelude::*, variable::try_inherit_properties, variable::InheritableVariable,
+            visitor::prelude::*,
         },
         scene::base::Base,
         script::{Script, ScriptTrait},
     };
-    use fyrox_core::uuid_provider;
 
     #[derive(Reflect, Visit, Debug, Clone, Default)]
+    #[reflect(type_uuid = "eed9bf56-7d71-44a0-ba8e-0f3163c59669")]
     struct MyScript {
         field: InheritableVariable<f32>,
     }
-
-    impl_component_provider!(MyScript);
-    uuid_provider!(MyScript = "eed9bf56-7d71-44a0-ba8e-0f3163c59669");
 
     impl ScriptTrait for MyScript {}
 
@@ -903,11 +845,7 @@ mod test {
             field: InheritableVariable::new_non_modified(3.21),
         })));
 
-        child.as_reflect_mut(&mut |child| {
-            parent.as_reflect(&mut |parent| {
-                try_inherit_properties(child, parent, &[]).unwrap();
-            })
-        });
+        try_inherit_properties(&mut child, &parent, &[]).unwrap();
 
         assert_eq!(
             *child.script(0).unwrap().cast::<MyScript>().unwrap().field,
@@ -925,11 +863,7 @@ mod test {
             field: InheritableVariable::new_non_modified(3.21),
         });
 
-        child.as_reflect_mut(&mut |child| {
-            parent.as_reflect(&mut |parent| {
-                try_inherit_properties(child, parent, &[]).unwrap();
-            })
-        });
+        try_inherit_properties(&mut child, &parent, &[]).unwrap();
 
         assert_eq!(*child.cast::<MyScript>().unwrap().field, 3.21);
     }
@@ -944,11 +878,7 @@ mod test {
             field: InheritableVariable::new_non_modified(3.21),
         }));
 
-        child.as_reflect_mut(&mut |child| {
-            parent.as_reflect(&mut |parent| {
-                try_inherit_properties(child, parent, &[]).unwrap();
-            })
-        });
+        try_inherit_properties(&mut child, &parent, &[]).unwrap();
 
         assert_eq!(
             *child.as_ref().unwrap().cast::<MyScript>().unwrap().field,

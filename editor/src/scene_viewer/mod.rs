@@ -23,7 +23,8 @@ use crate::{
         core::{color::Color, math::Rect, pool::Handle, uuid::Uuid},
         engine::Engine,
         fxhash::FxHashMap,
-        graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+        graph::SceneGraph,
+        graphics::PolygonFillMode,
         gui::{
             border::BorderBuilder,
             brush::Brush,
@@ -44,16 +45,13 @@ use crate::{
             text::{TextBuilder, TextMessage},
             utils::{
                 make_dropdown_list_option, make_dropdown_list_option_universal,
-                make_dropdown_list_option_with_height, make_image_button_with_tooltip,
-                make_simple_tooltip,
+                make_dropdown_list_option_with_height, make_simple_tooltip,
             },
-            vec::{Vec3EditorBuilder, Vec3EditorMessage},
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
             VerticalAlignment,
         },
-        renderer::framework::PolygonFillMode,
         resource::texture::TextureResource,
         scene::camera::Projection,
     },
@@ -61,13 +59,21 @@ use crate::{
     message::MessageSender,
     scene::container::EditorSceneEntry,
     scene_viewer::gizmo::{SceneGizmo, SceneGizmoAction},
-    send_sync_message,
     settings::SettingsMessage,
     utils::enable_widget,
     DropdownListBuilder, GameScene, Message, Mode, SaveSceneConfirmationDialogAction,
     SceneContainer, Settings,
 };
 use fyrox::core::algebra::Vector2;
+use fyrox::gui::border::Border;
+use fyrox::gui::check_box::CheckBox;
+use fyrox::gui::dropdown_menu::DropdownMenu;
+use fyrox::gui::image::Image;
+use fyrox::gui::numeric::NumericUpDown;
+use fyrox::gui::stack_panel::StackPanel;
+use fyrox::gui::text::Text;
+use fyrox::gui::utils::ImageButtonBuilder;
+use fyrox::gui::window::Window;
 use std::{
     ops::Deref,
     sync::mpsc::{self, Receiver},
@@ -85,12 +91,12 @@ pub enum GraphicsDebugSwitches {
 }
 
 struct GridSnappingMenu {
-    menu: Handle<UiNode>,
-    button: Handle<UiNode>,
-    enabled: Handle<UiNode>,
-    x_step: Handle<UiNode>,
-    y_step: Handle<UiNode>,
-    z_step: Handle<UiNode>,
+    menu: Handle<DropdownMenu>,
+    button: Handle<Button>,
+    enabled: Handle<CheckBox>,
+    x_step: Handle<NumericUpDown<f32>>,
+    y_step: Handle<NumericUpDown<f32>>,
+    z_step: Handle<NumericUpDown<f32>>,
     receiver: Receiver<SettingsMessage>,
 }
 
@@ -107,15 +113,11 @@ impl GridSnappingMenu {
         let z_step;
         let grid_snap_menu = DropdownMenuBuilder::new(WidgetBuilder::new())
             .with_header({
-                button = make_image_button_with_tooltip(
-                    ctx,
-                    22.0,
-                    22.0,
-                    load_image!("../../resources/grid_snapping.png"),
-                    "Snapping Options",
-                    None,
-                );
-                button
+                button = ImageButtonBuilder::default()
+                    .with_image(load_image!("../../resources/grid_snapping.png"))
+                    .with_tooltip("Snapping Options")
+                    .build_button(ctx);
+                button.to_base()
             })
             .with_content(
                 GridBuilder::new(
@@ -190,7 +192,7 @@ impl GridSnappingMenu {
                 .add_row(Row::auto())
                 .add_row(Row::auto())
                 .add_row(Row::auto())
-                .add_column(Column::stretch())
+                .add_column(Column::auto())
                 .add_column(Column::auto())
                 .build(ctx),
             )
@@ -211,41 +213,32 @@ impl GridSnappingMenu {
         for message in self.receiver.try_iter() {
             match message {
                 SettingsMessage::Changed => {
-                    if let Some(button) = ui.try_get_of_type::<Button>(self.button) {
-                        ui.send_message(DecoratorMessage::selected_brush(
-                            *button.decorator,
-                            MessageDirection::ToWidget,
-                            ui.style.property(Style::BRUSH_BRIGHT_BLUE),
-                        ));
+                    ui.send_many(
+                        *ui[self.button].decorator,
+                        [
+                            DecoratorMessage::SelectedBrush(
+                                ui.style.property(Style::BRUSH_BRIGHT_BLUE),
+                            ),
+                            DecoratorMessage::Select(settings.move_mode_settings.grid_snapping),
+                        ],
+                    );
 
-                        ui.send_message(DecoratorMessage::select(
-                            *button.decorator,
-                            MessageDirection::ToWidget,
-                            settings.move_mode_settings.grid_snapping,
-                        ));
-                    }
-
-                    ui.send_message(CheckBoxMessage::checked(
+                    ui.send(
                         self.enabled,
-                        MessageDirection::ToWidget,
-                        Some(settings.move_mode_settings.grid_snapping),
-                    ));
-
-                    ui.send_message(NumericUpDownMessage::value(
+                        CheckBoxMessage::Check(Some(settings.move_mode_settings.grid_snapping)),
+                    );
+                    ui.send(
                         self.x_step,
-                        MessageDirection::ToWidget,
-                        settings.move_mode_settings.x_snap_step,
-                    ));
-                    ui.send_message(NumericUpDownMessage::value(
+                        NumericUpDownMessage::Value(settings.move_mode_settings.x_snap_step),
+                    );
+                    ui.send(
                         self.y_step,
-                        MessageDirection::ToWidget,
-                        settings.move_mode_settings.y_snap_step,
-                    ));
-                    ui.send_message(NumericUpDownMessage::value(
+                        NumericUpDownMessage::Value(settings.move_mode_settings.y_snap_step),
+                    );
+                    ui.send(
                         self.z_step,
-                        MessageDirection::ToWidget,
-                        settings.move_mode_settings.z_snap_step,
-                    ));
+                        NumericUpDownMessage::Value(settings.move_mode_settings.z_snap_step),
+                    );
                 }
             }
         }
@@ -273,24 +266,23 @@ impl GridSnappingMenu {
 }
 
 pub struct SceneViewer {
-    frame: Handle<UiNode>,
-    window: Handle<UiNode>,
-    selection_frame: Handle<UiNode>,
-    interaction_modes: FxHashMap<Uuid, Handle<UiNode>>,
-    camera_projection: Handle<UiNode>,
-    play: Handle<UiNode>,
-    build: Handle<UiNode>,
-    stop: Handle<UiNode>,
-    build_profile: Handle<UiNode>,
+    frame: Handle<Image>,
+    window: Handle<Window>,
+    selection_frame: Handle<Border>,
+    interaction_modes: FxHashMap<Uuid, Handle<Button>>,
+    camera_projection: Handle<DropdownList>,
+    play: Handle<Button>,
+    build: Handle<Button>,
+    stop: Handle<Button>,
+    build_profile: Handle<DropdownList>,
     sender: MessageSender,
-    interaction_mode_panel: Handle<UiNode>,
-    contextual_actions: Handle<UiNode>,
-    global_position_display: Handle<UiNode>,
-    no_scene_reminder: Handle<UiNode>,
-    tab_control: Handle<UiNode>,
+    interaction_mode_panel: Handle<StackPanel>,
+    contextual_actions: Handle<StackPanel>,
+    no_scene_reminder: Handle<Text>,
+    tab_control: Handle<TabControl>,
     scene_gizmo: SceneGizmo,
-    scene_gizmo_image: Handle<UiNode>,
-    debug_switches: Handle<UiNode>,
+    scene_gizmo_image: Handle<Image>,
+    debug_switches: Handle<DropdownList>,
     grid_snap_menu: GridSnappingMenu,
 }
 
@@ -319,18 +311,15 @@ impl SceneViewer {
 
         let grid_snap_menu = GridSnappingMenu::new(ctx, settings);
 
-        let global_position_display;
         let debug_switches;
         let contextual_actions = StackPanelBuilder::new(
             WidgetBuilder::new()
-                .with_height(25.0)
+                .with_height(27.0)
                 .on_column(1)
                 .with_horizontal_alignment(HorizontalAlignment::Right)
                 .with_child({
                     camera_projection = DropdownListBuilder::new(
-                        WidgetBuilder::new()
-                            .with_margin(Thickness::uniform(1.0))
-                            .with_width(40.0),
+                        WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
                     )
                     .with_items(vec![
                         make_dropdown_list_option_with_height(ctx, "3D", 22.0),
@@ -343,33 +332,20 @@ impl SceneViewer {
                 })
                 .with_child(grid_snap_menu.menu)
                 .with_child({
-                    global_position_display = Vec3EditorBuilder::<f32>::new(
-                        WidgetBuilder::new()
-                            .with_margin(Thickness::uniform(1.0))
-                            .with_tooltip(make_simple_tooltip(
-                                ctx,
-                                "Global Coordinates of the Current Selection",
-                            ))
-                            .with_width(160.0),
+                    debug_switches = DropdownListBuilder::new(
+                        WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
                     )
-                    .with_precision(1)
-                    .with_editable(false)
+                    .with_items(
+                        GraphicsDebugSwitches::iter()
+                            .zip(GraphicsDebugSwitches::VARIANTS.iter())
+                            .map(|(variant, v)| {
+                                make_dropdown_list_option_universal(ctx, v, 22.0, variant)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .with_close_on_selection(true)
+                    .with_selected(0)
                     .build(ctx);
-                    global_position_display
-                })
-                .with_child({
-                    debug_switches =
-                        DropdownListBuilder::new(WidgetBuilder::new().with_width(120.0))
-                            .with_items(
-                                GraphicsDebugSwitches::iter()
-                                    .zip(GraphicsDebugSwitches::VARIANTS.iter())
-                                    .map(|(variant, v)| {
-                                        make_dropdown_list_option_universal(ctx, v, 22.0, variant)
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                            .with_selected(0)
-                            .build(ctx);
                     debug_switches
                 }),
         )
@@ -386,7 +362,7 @@ impl SceneViewer {
                 .with_child({
                     StackPanelBuilder::new(
                         WidgetBuilder::new()
-                            .with_height(25.0)
+                            .with_height(27.0)
                             .with_horizontal_alignment(HorizontalAlignment::Right)
                             .with_child({
                                 build_profile = DropdownListBuilder::new(
@@ -396,8 +372,7 @@ impl SceneViewer {
                                             "Current Build Profile\nYou can configure \
                                             build profiles in editor settings.",
                                         ))
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_width(90.0),
+                                        .with_margin(Thickness::uniform(1.0)),
                                 )
                                 .with_items(
                                     settings
@@ -407,6 +382,7 @@ impl SceneViewer {
                                         .map(|p| make_dropdown_list_option(ctx, &p.name))
                                         .collect::<Vec<_>>(),
                                 )
+                                .with_close_on_selection(true)
                                 .with_selected(settings.build.selected_profile)
                                 .build(ctx);
                                 build_profile
@@ -518,7 +494,6 @@ impl SceneViewer {
         let tab_control;
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("SceneViewer"))
             .can_close(false)
-            .can_minimize(false)
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new()
@@ -593,7 +568,6 @@ impl SceneViewer {
             play,
             interaction_mode_panel,
             contextual_actions,
-            global_position_display,
             build_profile,
             stop,
             no_scene_reminder,
@@ -608,15 +582,15 @@ impl SceneViewer {
 }
 
 impl SceneViewer {
-    pub fn window(&self) -> Handle<UiNode> {
+    pub fn window(&self) -> Handle<Window> {
         self.window
     }
 
-    pub fn frame(&self) -> Handle<UiNode> {
+    pub fn frame(&self) -> Handle<Image> {
         self.frame
     }
 
-    pub fn selection_frame(&self) -> Handle<UiNode> {
+    pub fn selection_frame(&self) -> Handle<Border> {
         self.selection_frame
     }
 
@@ -624,81 +598,60 @@ impl SceneViewer {
         if let Message::SetInteractionMode(mode) = message {
             if let Some(&active_button) = self.interaction_modes.get(mode) {
                 for &mode_button in self.interaction_modes.values() {
-                    let decorator = *engine
-                        .user_interfaces
-                        .first_mut()
-                        .node(mode_button)
-                        .query_component::<Button>()
-                        .unwrap()
-                        .decorator;
-
-                    engine
-                        .user_interfaces
-                        .first_mut()
-                        .send_message(DecoratorMessage::select(
-                            decorator,
-                            MessageDirection::ToWidget,
-                            mode_button == active_button,
-                        ));
+                    let decorator = *engine.user_interfaces.first_mut()[mode_button].decorator;
+                    engine.user_interfaces.first().send(
+                        decorator,
+                        DecoratorMessage::Select(mode_button == active_button),
+                    );
                 }
             }
         }
     }
 
-    pub fn sync_interaction_modes(
-        &mut self,
-        scene: Option<&mut EditorSceneEntry>,
-        ui: &mut UserInterface,
-    ) {
+    pub fn sync_interaction_modes(&mut self, scene: &mut EditorSceneEntry, ui: &mut UserInterface) {
         // Remove interaction mode buttons first.
         for (_, button) in self.interaction_modes.drain() {
-            ui.send_message(WidgetMessage::remove(button, MessageDirection::ToWidget));
+            ui.send(button, WidgetMessage::Remove);
         }
 
         // Create new buttons for each mode.
-        if let Some(scene_entry) = scene {
-            for mode in scene_entry.interaction_modes.iter_mut() {
-                let button = mode.make_button(
-                    &mut ui.build_ctx(),
-                    scene_entry.current_interaction_mode.unwrap_or_default() == mode.uuid(),
-                );
-                ui.send_message(WidgetMessage::link(
-                    button,
-                    MessageDirection::ToWidget,
-                    self.interaction_mode_panel,
-                ));
-                self.interaction_modes.insert(mode.uuid(), button);
-            }
+        let scene_entry = scene;
+        for mode in scene_entry.interaction_modes.iter_mut() {
+            let button = mode.make_button(
+                &mut ui.build_ctx(),
+                scene_entry.current_interaction_mode.unwrap_or_default() == mode.uuid(),
+            );
+            ui.send(
+                button,
+                WidgetMessage::link_with(self.interaction_mode_panel),
+            );
+            self.interaction_modes.insert(mode.uuid(), button);
         }
     }
 
     pub fn on_current_scene_changed(
         &mut self,
-        new_scene: Option<&mut EditorSceneEntry>,
+        new_scene: &mut EditorSceneEntry,
         engine: &mut Engine,
     ) {
         let ui = engine.user_interfaces.first_mut();
         let index = new_scene
-            .as_ref()
-            .and_then(|entry| entry.controller.downcast_ref::<GameScene>())
+            .controller
+            .downcast_ref::<GameScene>()
             .map(|game_scene| {
                 let scene = &engine.scenes[game_scene.scene];
-                match scene.graph[game_scene.camera_controller.camera]
-                    .as_camera()
-                    .projection()
-                {
+                match scene.graph[game_scene.camera_controller.camera].projection() {
                     Projection::Perspective(_) => 0,
                     Projection::Orthographic(_) => 1,
                 }
             });
-        ui.send_message(DropdownListMessage::selection(
+        ui.send(
             self.camera_projection,
-            MessageDirection::ToWidget,
-            index,
-        ));
+            DropdownListMessage::Selection(index),
+        );
         let debug_mode_index = new_scene
-            .as_ref()
-            .and_then(|s| s.controller.downcast_ref::<GameScene>())
+            .controller
+            .downcast_ref::<GameScene>()
             .map(|s| {
                 engine.scenes[s.scene]
                     .rendering_options
@@ -710,11 +663,10 @@ impl SceneViewer {
                 _ => 0,
             });
         if let Some(debug_mode_index) = debug_mode_index {
-            ui.send_message(DropdownListMessage::selection(
+            ui.send(
                 self.debug_switches,
-                MessageDirection::ToWidget,
-                Some(debug_mode_index),
-            ));
+                DropdownListMessage::Selection(Some(debug_mode_index)),
+            );
         }
         self.sync_interaction_modes(new_scene, ui)
     }
@@ -749,7 +701,7 @@ impl SceneViewer {
             } else if message.destination() == self.stop {
                 self.sender.send(Message::SwitchToEditMode);
             }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+        } else if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
             if message.direction == MessageDirection::FromWidget {
                 if message.destination() == self.camera_projection {
                     if *index == 0 {
@@ -764,30 +716,22 @@ impl SceneViewer {
                 } else if message.destination() == self.build_profile {
                     settings.build.selected_profile = *index;
                 } else if message.destination() == self.debug_switches {
-                    let items = ui
-                        .node(self.debug_switches)
-                        .component_ref::<DropdownList>()
-                        .unwrap()
-                        .items
-                        .deref();
+                    let items = ui[self.debug_switches].items.deref();
                     if let Some(item) = items.get(*index) {
                         if let Some(variant) =
                             ui.node(*item).user_data_cloned::<GraphicsDebugSwitches>()
                         {
-                            if let Some(entry) = scenes.current_scene_entry_mut() {
-                                if let Some(game_scene) =
-                                    entry.controller.downcast_ref::<GameScene>()
-                                {
-                                    let scene = &mut engine.scenes[game_scene.scene];
-                                    match variant {
-                                        GraphicsDebugSwitches::Shaded => {
-                                            scene.rendering_options.polygon_rasterization_mode =
-                                                PolygonFillMode::Fill;
-                                        }
-                                        GraphicsDebugSwitches::Wireframe => {
-                                            scene.rendering_options.polygon_rasterization_mode =
-                                                PolygonFillMode::Line;
-                                        }
+                            let entry = scenes.current_scene_entry_mut();
+                            if let Some(game_scene) = entry.controller.downcast_ref::<GameScene>() {
+                                let scene = &mut engine.scenes[game_scene.scene];
+                                match variant {
+                                    GraphicsDebugSwitches::Shaded => {
+                                        scene.rendering_options.polygon_rasterization_mode =
+                                            PolygonFillMode::Fill;
+                                    }
+                                    GraphicsDebugSwitches::Wireframe => {
+                                        scene.rendering_options.polygon_rasterization_mode =
+                                            PolygonFillMode::Line;
                                     }
                                 }
                             }
@@ -800,7 +744,7 @@ impl SceneViewer {
                 && message.direction() == MessageDirection::FromWidget
             {
                 match msg {
-                    TabControlMessage::CloseTabByUuid(uuid) => {
+                    TabControlMessage::CloseTab(uuid) => {
                         if let Some(entry) = scenes.entry_by_scene_id(*uuid) {
                             if entry.need_save() {
                                 self.sender.send(Message::OpenSaveSceneConfirmationDialog {
@@ -812,7 +756,7 @@ impl SceneViewer {
                             }
                         }
                     }
-                    TabControlMessage::ActiveTabUuid(Some(uuid)) => {
+                    TabControlMessage::ActiveTab(Some(uuid)) => {
                         if let Some(entry) = scenes.entry_by_scene_id(*uuid) {
                             self.sender.send(Message::SetCurrentScene(entry.id));
                         }
@@ -822,129 +766,117 @@ impl SceneViewer {
             }
         }
 
-        if let Some(entry) = scenes.current_scene_entry_mut() {
-            if let (Some(msg), Mode::Edit) = (message.data::<WidgetMessage>(), mode) {
-                if message.destination() == self.frame() {
-                    let screen_bounds = self.frame_bounds(engine.user_interfaces.first());
-                    match *msg {
-                        WidgetMessage::MouseDown { button, pos, .. } => {
-                            engine
-                                .user_interfaces
-                                .first_mut()
-                                .capture_mouse(self.frame());
+        let entry = scenes.current_scene_entry_mut();
+        if let (Some(msg), Mode::Edit) = (message.data::<WidgetMessage>(), mode) {
+            if message.destination() == self.frame() {
+                let screen_bounds = self.frame_bounds(engine.user_interfaces.first());
+                match *msg {
+                    WidgetMessage::MouseDown { button, pos, .. } => {
+                        engine
+                            .user_interfaces
+                            .first_mut()
+                            .capture_mouse(self.frame());
 
-                            entry.on_mouse_down(button, pos, screen_bounds, engine, settings)
-                        }
-                        WidgetMessage::MouseUp { button, pos, .. } => {
-                            engine.user_interfaces.first_mut().release_mouse_capture();
-                            entry.on_mouse_up(button, pos, screen_bounds, engine, settings)
-                        }
-                        WidgetMessage::MouseWheel { amount, .. } => {
-                            entry.on_mouse_wheel(amount, engine, settings);
-                        }
-                        WidgetMessage::MouseMove { pos, .. } => {
-                            entry.on_mouse_move(pos, screen_bounds, engine, settings);
-                        }
-                        WidgetMessage::KeyUp(key) => {
-                            if entry.on_key_up(key, engine, &settings.key_bindings) {
-                                message.set_handled(true);
-                            }
-                        }
-                        WidgetMessage::KeyDown(key) => {
-                            if entry.on_key_down(key, engine, &settings.key_bindings) {
-                                message.set_handled(true);
-                            }
-                        }
-                        WidgetMessage::MouseEnter => {
-                            entry.on_mouse_enter(screen_bounds, engine, settings);
-                        }
-                        WidgetMessage::MouseLeave => {
-                            entry.on_mouse_leave(screen_bounds, engine, settings);
-                        }
-                        WidgetMessage::DragOver(handle) => {
-                            entry.on_drag_over(handle, screen_bounds, engine, settings);
-                        }
-                        WidgetMessage::Drop(handle) => {
-                            entry.on_drop(handle, screen_bounds, engine, settings);
-                        }
-                        _ => {}
+                        entry.on_mouse_down(button, pos, screen_bounds, engine, settings)
                     }
-                } else if message.destination() == self.scene_gizmo_image {
-                    if let Some(game_scene) = entry.controller.downcast_mut::<GameScene>() {
-                        match *msg {
-                            WidgetMessage::MouseDown { button, pos, .. } => {
-                                if button == MouseButton::Left {
-                                    let rel_pos =
-                                        pos - ui.node(self.scene_gizmo_image).screen_position();
-                                    self.scene_gizmo.drag_context = Some(gizmo::DragContext {
-                                        initial_click_pos: rel_pos,
-                                        initial_rotation: gizmo::CameraRotation {
-                                            pitch: game_scene.camera_controller.pitch(),
-                                            yaw: game_scene.camera_controller.yaw(),
-                                        },
-                                    });
-                                    ui.capture_mouse(self.scene_gizmo_image);
-                                }
+                    WidgetMessage::MouseUp { button, pos, .. } => {
+                        engine.user_interfaces.first_mut().release_mouse_capture();
+                        entry.on_mouse_up(button, pos, screen_bounds, engine, settings)
+                    }
+                    WidgetMessage::MouseWheel { amount, .. } => {
+                        entry.on_mouse_wheel(amount, engine, settings);
+                    }
+                    WidgetMessage::MouseMove { pos, .. } => {
+                        entry.on_mouse_move(pos, screen_bounds, engine, settings);
+                    }
+                    WidgetMessage::KeyUp(key)
+                        if entry.on_key_up(key, engine, &settings.key_bindings) =>
+                    {
+                        message.set_handled(true);
+                    }
+                    WidgetMessage::KeyDown(key)
+                        if entry.on_key_down(key, engine, &settings.key_bindings) =>
+                    {
+                        message.set_handled(true);
+                    }
+                    WidgetMessage::MouseEnter => {
+                        entry.on_mouse_enter(screen_bounds, engine, settings);
+                    }
+                    WidgetMessage::MouseLeave => {
+                        entry.on_mouse_leave(screen_bounds, engine, settings);
+                    }
+                    WidgetMessage::DragOver(handle) => {
+                        entry.on_drag_over(handle, screen_bounds, engine, settings);
+                    }
+                    WidgetMessage::Drop(handle) => {
+                        entry.on_drop(handle, screen_bounds, engine, settings);
+                    }
+                    _ => {}
+                }
+            } else if message.destination() == self.scene_gizmo_image {
+                if let Some(game_scene) = entry.controller.downcast_mut::<GameScene>() {
+                    match *msg {
+                        WidgetMessage::MouseDown {
+                            button: MouseButton::Left,
+                            pos,
+                            ..
+                        } => {
+                            let rel_pos = pos - ui[self.scene_gizmo_image].screen_position();
+                            self.scene_gizmo.drag_context = Some(gizmo::DragContext {
+                                initial_click_pos: rel_pos,
+                                initial_rotation: gizmo::CameraRotation {
+                                    pitch: game_scene.camera_controller.pitch(),
+                                    yaw: game_scene.camera_controller.yaw(),
+                                },
+                            });
+                            ui.capture_mouse(self.scene_gizmo_image);
+                        }
+                        WidgetMessage::MouseUp { pos, button } => {
+                            if button == MouseButton::Left {
+                                self.scene_gizmo.drag_context = None;
+                                ui.release_mouse_capture();
                             }
-                            WidgetMessage::MouseUp { pos, button } => {
-                                if button == MouseButton::Left {
-                                    self.scene_gizmo.drag_context = None;
-                                    ui.release_mouse_capture();
-                                }
-                                let rel_pos =
-                                    pos - ui.node(self.scene_gizmo_image).screen_position();
-                                if let Some(action) =
-                                    self.scene_gizmo.on_click(rel_pos, &engine.scenes)
-                                {
-                                    match action {
-                                        SceneGizmoAction::Rotate(rotation) => {
-                                            game_scene.camera_controller.set_pitch(rotation.pitch);
-                                            game_scene.camera_controller.set_yaw(rotation.yaw);
-                                        }
-                                        SceneGizmoAction::SwitchProjection => {
-                                            let graph = &engine.scenes[game_scene.scene].graph;
-                                            match graph[game_scene.camera_controller.camera]
-                                                .as_camera()
-                                                .projection()
-                                            {
-                                                Projection::Perspective(_) => {
-                                                    ui.send_message(
-                                                        DropdownListMessage::selection(
-                                                            self.camera_projection,
-                                                            MessageDirection::ToWidget,
-                                                            Some(1),
-                                                        ),
-                                                    );
-                                                }
-                                                Projection::Orthographic(_) => {
-                                                    ui.send_message(
-                                                        DropdownListMessage::selection(
-                                                            self.camera_projection,
-                                                            MessageDirection::ToWidget,
-                                                            Some(0),
-                                                        ),
-                                                    );
-                                                }
+                            let rel_pos = pos - ui[self.scene_gizmo_image].screen_position();
+                            if let Some(action) = self.scene_gizmo.on_click(rel_pos, &engine.scenes)
+                            {
+                                match action {
+                                    SceneGizmoAction::Rotate(rotation) => {
+                                        game_scene.camera_controller.set_pitch(rotation.pitch);
+                                        game_scene.camera_controller.set_yaw(rotation.yaw);
+                                    }
+                                    SceneGizmoAction::SwitchProjection => {
+                                        let graph = &engine.scenes[game_scene.scene].graph;
+                                        match graph[game_scene.camera_controller.camera]
+                                            .projection()
+                                        {
+                                            Projection::Perspective(_) => {
+                                                ui.send(
+                                                    self.camera_projection,
+                                                    DropdownListMessage::Selection(Some(1)),
+                                                );
+                                            }
+                                            Projection::Orthographic(_) => {
+                                                ui.send(
+                                                    self.camera_projection,
+                                                    DropdownListMessage::Selection(Some(0)),
+                                                );
                                             }
                                         }
                                     }
                                 }
                             }
-                            WidgetMessage::MouseMove { pos, .. } => {
-                                let rel_pos = pos
-                                    - engine
-                                        .user_interfaces
-                                        .first()
-                                        .node(self.scene_gizmo_image)
-                                        .screen_position();
-                                self.scene_gizmo.on_mouse_move(
-                                    rel_pos,
-                                    engine,
-                                    &mut game_scene.camera_controller,
-                                );
-                            }
-                            _ => (),
                         }
+                        WidgetMessage::MouseMove { pos, .. } => {
+                            let rel_pos = pos
+                                - engine.user_interfaces.first()[self.scene_gizmo_image]
+                                    .screen_position();
+                            self.scene_gizmo.on_mouse_move(
+                                rel_pos,
+                                engine,
+                                &mut game_scene.camera_controller,
+                            );
+                        }
+                        _ => (),
                     }
                 }
             }
@@ -954,25 +886,16 @@ impl SceneViewer {
     pub fn sync_to_model(&self, scenes: &SceneContainer, engine: &mut Engine) {
         // Sync tabs first.
 
-        let tabs = engine
-            .user_interfaces
-            .first_mut()
-            .node(self.tab_control)
-            .query_component::<TabControl>()
-            .expect("Must be TabControl!")
+        let tabs = engine.user_interfaces.first_mut()[self.tab_control]
             .tabs
             .clone();
         // Remove any excess tabs.
         for tab in tabs.iter() {
             if scenes.iter().all(|s| tab.uuid != s.id) {
-                send_sync_message(
-                    engine.user_interfaces.first(),
-                    TabControlMessage::remove_tab_by_uuid(
-                        self.tab_control,
-                        MessageDirection::ToWidget,
-                        tab.uuid,
-                    ),
-                );
+                engine
+                    .user_interfaces
+                    .first()
+                    .send_sync(self.tab_control, TabControlMessage::RemoveTab(tab.uuid));
             }
         }
         // Add any missing tabs.
@@ -985,104 +908,66 @@ impl SceneViewer {
                     bottom: 2.0,
                 }))
                 .with_text(entry.name())
-                .build(&mut engine.user_interfaces.first_mut().build_ctx());
+                .build(&mut engine.user_interfaces.first_mut().build_ctx())
+                .to_base();
 
-                send_sync_message(
-                    engine.user_interfaces.first(),
-                    TabControlMessage::add_tab_with_uuid(
-                        self.tab_control,
-                        MessageDirection::ToWidget,
-                        entry.id,
-                        TabDefinition {
-                            header,
-                            content: Default::default(),
-                            can_be_closed: true,
-                            user_data: None,
-                        },
-                    ),
+                engine.user_interfaces.first().send_sync(
+                    self.tab_control,
+                    TabControlMessage::AddTab(TabDefinition {
+                        uuid: entry.id,
+                        header,
+                        content: Default::default(),
+                        can_be_closed: true,
+                        user_data: None,
+                    }),
                 );
             }
         }
         for tab in tabs.iter() {
             if let Some(scene) = scenes.entry_by_scene_id(tab.uuid) {
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(TextMessage::text(
-                        tab.header_content,
-                        MessageDirection::ToWidget,
-                        format!(
-                            "{}{}",
-                            scene.name(),
-                            if scene.need_save() { "*" } else { "" }
-                        ),
-                    ));
+                engine.user_interfaces.first().send(
+                    tab.header_content,
+                    TextMessage::Text(format!(
+                        "{}{}",
+                        scene.name(),
+                        if scene.need_save() { "*" } else { "" }
+                    )),
+                );
             }
         }
 
-        send_sync_message(
+        engine.user_interfaces.first().send_sync(
+            self.tab_control,
+            TabControlMessage::ActiveTab(Some(scenes.current_scene_entry_ref().id)),
+        );
+        // Then sync to the current scene.
+        let entry = scenes.current_scene_entry_ref();
+        let title = if scenes.has_active_scene() {
+            let path = entry
+                .path
+                .as_ref()
+                .map_or("Unnamed Scene".to_string(), |p| {
+                    p.to_string_lossy().to_string()
+                });
+            format!("Scene Preview - {path}")
+        } else {
+            "Scene Preview".into()
+        };
+        self.set_title(engine.user_interfaces.first(), title);
+
+        self.set_render_target(
             engine.user_interfaces.first(),
-            TabControlMessage::active_tab_uuid(
-                self.tab_control,
-                MessageDirection::ToWidget,
-                scenes.current_scene_entry_ref().map(|e| e.id),
-            ),
+            entry.controller.render_target(engine),
         );
 
-        // Then sync to the current scene.
-        if let Some(entry) = scenes.current_scene_entry_ref() {
-            self.set_title(
-                engine.user_interfaces.first(),
-                format!(
-                    "Scene Preview - {}",
-                    entry
-                        .path
-                        .as_ref()
-                        .map_or("Unnamed Scene".to_string(), |p| p
-                            .to_string_lossy()
-                            .to_string())
-                ),
-            );
+        engine.user_interfaces.first().send_sync(
+            self.scene_gizmo_image,
+            WidgetMessage::Visibility(entry.controller.downcast_ref::<GameScene>().is_some()),
+        );
 
-            self.set_render_target(
-                engine.user_interfaces.first(),
-                entry.controller.render_target(engine),
-            );
-
-            send_sync_message(
-                engine.user_interfaces.first(),
-                WidgetMessage::visibility(
-                    self.scene_gizmo_image,
-                    MessageDirection::ToWidget,
-                    entry.controller.downcast_ref::<GameScene>().is_some(),
-                ),
-            );
-
-            if let (Some(game_scene), Some(selection)) = (
-                entry.controller.downcast_ref::<GameScene>(),
-                entry.selection.as_graph(),
-            ) {
-                let scene = &engine.scenes[game_scene.scene];
-                if let Some((_, position)) = selection.global_rotation_position(&scene.graph) {
-                    engine
-                        .user_interfaces
-                        .first_mut()
-                        .send_message(Vec3EditorMessage::value(
-                            self.global_position_display,
-                            MessageDirection::ToWidget,
-                            position,
-                        ));
-                }
-            }
-        }
-
-        send_sync_message(
-            engine.user_interfaces.first(),
-            WidgetMessage::visibility(
-                self.no_scene_reminder,
-                MessageDirection::ToWidget,
-                scenes.current_scene_controller_ref().is_none(),
-            ),
+        engine.user_interfaces.first().send_sync(
+            self.no_scene_reminder,
+            WidgetMessage::Visibility(!scenes.has_active_scene()),
         );
     }
 
@@ -1092,45 +977,28 @@ impl SceneViewer {
             enable_widget(widget, enabled, ui);
         }
 
-        ui.send_message(WidgetMessage::enabled(
-            self.play,
-            MessageDirection::ToWidget,
-            mode.is_edit(),
-        ));
-        ui.send_message(WidgetMessage::enabled(
-            self.stop,
-            MessageDirection::ToWidget,
-            !mode.is_edit(),
-        ));
+        ui.send(self.play, WidgetMessage::Enabled(mode.is_edit()));
+        ui.send(self.stop, WidgetMessage::Enabled(!mode.is_edit()));
     }
 
     pub fn set_render_target(&self, ui: &UserInterface, render_target: Option<TextureResource>) {
-        ui.send_message(ImageMessage::texture(
-            self.frame,
-            MessageDirection::ToWidget,
-            render_target,
-        ));
+        ui.send(self.frame, ImageMessage::Texture(render_target));
     }
 
     pub fn set_title(&self, ui: &UserInterface, title: String) {
-        ui.send_message(WindowMessage::title(
-            self.window,
-            MessageDirection::ToWidget,
-            WindowTitle::text(title),
-        ));
+        ui.send(self.window, WindowMessage::Title(WindowTitle::text(title)));
     }
 
     pub fn reset_camera_projection(&self, ui: &UserInterface) {
         // Default camera projection is Perspective.
-        ui.send_message(DropdownListMessage::selection(
+        ui.send(
             self.camera_projection,
-            MessageDirection::ToWidget,
-            Some(0),
-        ));
+            DropdownListMessage::Selection(Some(0)),
+        );
     }
 
     pub fn frame_bounds(&self, ui: &UserInterface) -> Rect<f32> {
-        ui.node(self.frame).screen_bounds()
+        ui[self.frame].screen_bounds()
     }
 
     pub fn pre_update(&self, settings: &Settings, engine: &mut Engine) {

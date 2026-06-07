@@ -53,6 +53,8 @@
                 (name: "ambientColor", kind: Vector4()),
                 (name: "cameraPosition", kind: Vector3()),
                 (name: "invViewProj", kind: Matrix4()),
+                (name: "skyboxLighting", kind: Bool()),
+                (name: "environmentLightingBrightness", kind: Float()),
             ]),
             binding: 0
         ),
@@ -133,7 +135,7 @@
 
                         ivec2 cubeMapSize = textureSize(prefilteredSpecularMap, 0);
                         float mip = roughness * (floor(log2(float(cubeMapSize.x))) + 1.0);
-                        vec3 reflection = textureLod(prefilteredSpecularMap, reflectionVector, mip).rgb;
+                        vec3 reflection = properties.skyboxLighting ? S_SRGBToLinear(textureLod(prefilteredSpecularMap, reflectionVector, mip)).rgb : properties.ambientColor.rgb;
 
                         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
                         vec3 F = S_FresnelSchlickRoughness(clampedCosViewAngle, F0, roughness);
@@ -145,10 +147,10 @@
                         float ambientOcclusion = texture(aoSampler, texCoord).r * materialAo;
                         vec4 bakedLighting = texture(bakedLightingTexture, texCoord);
 
-                        vec3 irradiance = texture(irradianceMap, fragmentNormal).rgb;
-                        vec3 diffuse = irradiance * albedo.rgb;
+                        vec3 irradiance = S_SRGBToLinear(texture(irradianceMap, fragmentNormal)).rgb;
+                        vec3 diffuse = (bakedLighting.rgb + properties.environmentLightingBrightness * (properties.skyboxLighting ? irradiance : properties.ambientColor.rgb)) * albedo.rgb;
 
-                        FragColor.rgb = bakedLighting.rgb + (kD * diffuse + specular) * ambientOcclusion;
+                        FragColor.rgb = (kD * diffuse + specular) * ambientOcclusion;
                         FragColor.a = bakedLighting.a;
                     }
                 "#,

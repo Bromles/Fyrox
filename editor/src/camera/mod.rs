@@ -29,12 +29,12 @@ use crate::{
             },
             pool::Handle,
         },
-        graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+        graph::{NodeWrapper, SceneGraph},
         gui::message::{KeyCode, KeyboardModifiers, MouseButton},
         renderer::bundle::{RenderContext, RenderDataBundleStorage},
         scene::{
             base::BaseBuilder,
-            camera::{Camera, CameraBuilder, Exposure, FitParameters, Projection},
+            camera::{Camera, CameraBuilder, FitParameters, Projection},
             collider::BitMask,
             graph::Graph,
             mesh::{
@@ -54,8 +54,11 @@ use crate::{
         Settings,
     },
 };
+use bitflags::bitflags;
 use fyrox::renderer::cache::DynamicSurfaceCache;
 use fyrox::renderer::observer::ObserverPosition;
+use fyrox::scene::mesh::Mesh;
+use fyrox::scene::pivot::Pivot;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -80,9 +83,9 @@ enum MouseControlMode {
 }
 
 pub struct CameraController {
-    pub pivot: Handle<Node>,
-    pub camera_hinge: Handle<Node>,
-    pub camera: Handle<Node>,
+    pub pivot: Handle<Pivot>,
+    pub camera_hinge: Handle<Pivot>,
+    pub camera: Handle<Camera>,
     yaw: f32,
     pitch: f32,
     pub z_offset: f32,
@@ -97,8 +100,8 @@ pub struct CameraController {
     editor_context: PickContext,
     scene_context: PickContext,
     prev_interaction_state: bool,
-    pub grid: Handle<Node>,
-    pub editor_objects_root: Handle<Node>,
+    pub grid: Handle<Mesh>,
+    pub editor_objects_root: Handle<Pivot>,
     pub scene_content_root: Handle<Node>,
     pub screen_size: Vector2<f32>,
 }
@@ -120,52 +123,64 @@ struct PickContext {
 
 pub type PickingFilter<'a> = Option<&'a mut dyn FnMut(Handle<Node>, &Node) -> bool>;
 
+bitflags! {
+    pub struct PickMethod: u8 {
+        const DEFAULT = 0b0000_0011;
+        const PRECISE_HULL_RAY_TEST = 0b0000_0001;
+        const COARSE_AABB_RAY_TEST = 0b0000_0010;
+    }
+}
+
+impl Default for PickMethod {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 pub struct PickingOptions<'a> {
     pub cursor_pos: Vector2<f32>,
     pub editor_only: bool,
     pub filter: PickingFilter<'a>,
     pub ignore_back_faces: bool,
     pub use_picking_loop: bool,
-    pub only_meshes: bool,
+    pub method: PickMethod,
     pub settings: &'a SelectionSettings,
 }
 
 impl CameraController {
     pub fn new(
         graph: &mut Graph,
-        root: Handle<Node>,
-        settings: Option<&SceneCameraSettings>,
-        grid: Handle<Node>,
-        editor_objects_root: Handle<Node>,
+        root: Handle<Pivot>,
+        settings: &Settings,
+        camera_settings: SceneCameraSettings,
+        grid: Handle<Mesh>,
+        editor_objects_root: Handle<Pivot>,
         scene_content_root: Handle<Node>,
     ) -> Self {
-        let settings = settings.cloned().unwrap_or_default();
         let camera;
         let camera_hinge;
         let pivot = PivotBuilder::new(
             BaseBuilder::new()
-                .with_children(&[{
-                    camera_hinge = PivotBuilder::new(BaseBuilder::new().with_children(&[{
+                .with_child({
+                    camera_hinge = PivotBuilder::new(BaseBuilder::new().with_child({
                         camera = CameraBuilder::new(
                             BaseBuilder::new()
-                                .with_children(&[
-                                    ListenerBuilder::new(BaseBuilder::new()).build(graph)
-                                ])
+                                .with_child(ListenerBuilder::new(BaseBuilder::new()).build(graph))
                                 .with_name("EditorCamera"),
                         )
-                        .with_projection(settings.projection)
-                        .with_exposure(Exposure::Manual(std::f32::consts::E))
+                        .with_projection(camera_settings.projection)
+                        .with_exposure(settings.camera.exposure)
                         .with_z_far(512.0)
                         .build(graph);
                         camera
-                    }]))
+                    }))
                     .build(graph);
                     camera_hinge
-                }])
+                })
                 .with_name("EditorCameraPivot")
                 .with_local_transform(
                     TransformBuilder::new()
-                        .with_local_position(settings.position)
+                        .with_local_position(camera_settings.position)
                         .build(),
                 ),
         )
@@ -178,8 +193,8 @@ impl CameraController {
             pivot,
             camera_hinge,
             camera,
-            yaw: settings.yaw,
-            pitch: settings.pitch,
+            yaw: camera_settings.yaw,
+            pitch: camera_settings.pitch,
             mouse_control_mode: MouseControlMode::None,
             z_offset: DEFAULT_Z_OFFSET,
             move_left: false,
@@ -233,7 +248,7 @@ impl CameraController {
                 .try_normalize(f32::EPSILON)
                 .unwrap_or_default()
                 .scale(5.0);
-        if let Some(relative_to) = graph.try_get(relative_to) {
+        if let Ok(relative_to) = graph.try_get_node(relative_to) {
             return relative_to
                 .global_transform()
                 .try_inverse()
@@ -263,7 +278,7 @@ impl CameraController {
             aabb.scale(scale);
         }
 
-        let fit_parameters = scene.graph[self.camera].as_camera().fit(
+        let fit_parameters = scene.graph[self.camera].fit(
             &aabb,
             scene
                 .rendering_options
@@ -272,6 +287,7 @@ impl CameraController {
                 .and_then(|rt| rt.data_ref().kind().rectangle_size())
                 .map(|rs| rs.x as f32 / rs.y as f32)
                 .unwrap_or(1.0),
+            1.0,
         );
 
         match fit_parameters {
@@ -285,9 +301,7 @@ impl CameraController {
                 position,
                 vertical_size,
             } => {
-                if let Projection::Orthographic(ortho) =
-                    scene.graph[self.camera].as_camera_mut().projection_mut()
-                {
+                if let Projection::Orthographic(ortho) = scene.graph[self.camera].projection_mut() {
                     ortho.vertical_size = vertical_size;
                 }
                 scene.graph[self.pivot]
@@ -299,9 +313,7 @@ impl CameraController {
     }
 
     pub fn set_projection(&self, graph: &mut Graph, projection: Projection) {
-        graph[self.camera]
-            .as_camera_mut()
-            .set_projection(projection);
+        graph[self.camera].set_projection(projection);
     }
 
     pub fn on_mouse_move(
@@ -326,7 +338,7 @@ impl CameraController {
                 initial_position,
                 initial_mouse_position,
             } => {
-                let camera = &graph[self.camera].as_camera();
+                let camera = &graph[self.camera];
                 let scale = match camera.projection() {
                     Projection::Perspective(perspective) => 2.0 * perspective.fov.tan(),
                     Projection::Orthographic(orthographic) => 2.0 * orthographic.vertical_size,
@@ -350,7 +362,7 @@ impl CameraController {
     }
 
     pub fn on_mouse_wheel(&mut self, delta: f32, graph: &mut Graph, settings: &Settings) {
-        let camera = graph[self.camera].as_camera_mut();
+        let camera = &mut graph[self.camera];
 
         match *camera.projection_mut() {
             Projection::Perspective(_) => {
@@ -378,7 +390,7 @@ impl CameraController {
                 position: self.position(graph),
                 yaw: self.yaw,
                 pitch: self.pitch,
-                projection: graph[self.camera].as_camera().projection().clone(),
+                projection: graph[self.camera].projection().clone(),
             };
 
             if let Some(scene_settings) = settings.scene_settings.get(path) {
@@ -442,23 +454,21 @@ impl CameraController {
         modifiers: KeyboardModifiers,
         graph: &mut Graph,
     ) {
-        let is_perspective = graph[self.camera].as_camera().projection().is_perspective();
+        let is_perspective = graph[self.camera].projection().is_perspective();
 
         match button {
-            MouseButton::Right => {
-                if is_perspective {
-                    if modifiers.shift {
-                        self.mouse_control_mode = MouseControlMode::Drag {
-                            initial_position: self.position(graph),
-                            initial_mouse_position: mouse_position,
-                        };
-                    } else {
-                        self.mouse_control_mode = MouseControlMode::CenteredRotation {
-                            prev_z_offset: self.z_offset,
-                        };
-                        self.move_along_look_vector(self.z_offset, graph);
-                        self.z_offset = 0.0;
-                    }
+            MouseButton::Right if is_perspective => {
+                if modifiers.shift {
+                    self.mouse_control_mode = MouseControlMode::Drag {
+                        initial_position: self.position(graph),
+                        initial_mouse_position: mouse_position,
+                    };
+                } else {
+                    self.mouse_control_mode = MouseControlMode::CenteredRotation {
+                        prev_z_offset: self.z_offset,
+                    };
+                    self.move_along_look_vector(self.z_offset, graph);
+                    self.z_offset = 0.0;
                 }
             }
             MouseButton::Middle => {
@@ -547,7 +557,7 @@ impl CameraController {
         graph: &mut Graph,
         settings: &mut Settings,
         scene_path: Option<&Path>,
-        editor_objects_root: Handle<Node>,
+        editor_objects_root: Handle<Pivot>,
         scene_content_root: Handle<Node>,
         screen_size: Vector2<f32>,
         dt: f32,
@@ -559,7 +569,9 @@ impl CameraController {
         // Keep screen size in-sync.
         self.screen_size = screen_size;
 
-        let camera = graph[self.camera].as_camera_mut();
+        let camera = &mut graph[self.camera];
+
+        camera.set_exposure(settings.camera.exposure);
 
         match camera.projection_value() {
             Projection::Perspective(_) => {
@@ -719,21 +731,31 @@ impl CameraController {
                 if ray.aabb_intersection_points(&aabb).is_some() {
                     let result =
                         precise_ray_test(node, camera, graph, ray, options.ignore_back_faces);
-                    if result.has_hull() {
+
+                    let mut added = false;
+                    if options.method.contains(PickMethod::PRECISE_HULL_RAY_TEST)
+                        && result.has_hull()
+                    {
                         if let Some(position) = result.pick_position {
                             picked_meshes.push(CameraPickResult {
                                 position: position.closest_point,
                                 node: handle,
                                 toi: position.closest_distance.max(toi_limit),
                             });
+                            added = true;
                         }
-                    } else if !options.only_meshes && !options.editor_only {
+                    }
+
+                    if !added && options.method.contains(PickMethod::COARSE_AABB_RAY_TEST) {
                         // Hull-less objects (light sources, cameras, etc.) can still be selected
                         // by coarse intersection test with a simplified bounding box.
-                        let simple_aabb = AxisAlignedBoundingBox::from_radius(
-                            options.settings.hull_less_object_selection_radius,
-                        )
-                        .transform(&node.global_transform());
+                        let simple_aabb =
+                            AxisAlignedBoundingBox::from_radius(if options.editor_only {
+                                1.0
+                            } else {
+                                options.settings.hull_less_object_selection_radius
+                            })
+                            .transform(&node.global_transform());
                         if let Some(points) = ray.aabb_intersection_points(&simple_aabb) {
                             let da = points[0].metric_distance(&ray.origin);
                             let db = points[1].metric_distance(&ray.origin);
@@ -764,74 +786,74 @@ impl CameraController {
     }
 
     pub fn pick(&mut self, graph: &Graph, mut options: PickingOptions) -> Option<CameraPickResult> {
-        if let Some(camera) = graph[self.camera].cast::<Camera>() {
-            let ray = camera.make_ray(options.cursor_pos, self.screen_size);
+        let camera = &graph[self.camera];
 
-            let root = if options.editor_only {
-                // In case if we want to pick stuff from editor scene only, we have to
-                // start traversing graph from editor root.
-                self.editor_objects_root
-            } else {
-                self.scene_content_root
-            };
+        let ray = camera.make_ray(options.cursor_pos, self.screen_size);
 
-            let mut picked_meshes = Vec::new();
-            let mut picked_non_meshes = Vec::new();
-            self.pick_recursive(
-                root,
-                &ray,
-                camera,
-                graph,
-                &mut picked_meshes,
-                &mut picked_non_meshes,
-                0.0,
-                &mut options,
-            );
+        let root = if options.editor_only {
+            // In case if we want to pick stuff from editor scene only, we have to
+            // start traversing graph from editor root.
+            self.editor_objects_root.to_base()
+        } else {
+            self.scene_content_root
+        };
 
-            fn sort_by_toi(list: &mut [CameraPickResult]) {
-                list.sort_by(|a, b| a.toi.partial_cmp(&b.toi).unwrap());
+        let mut picked_meshes = Vec::new();
+        let mut picked_non_meshes = Vec::new();
+        self.pick_recursive(
+            root,
+            &ray,
+            camera,
+            graph,
+            &mut picked_meshes,
+            &mut picked_non_meshes,
+            0.0,
+            &mut options,
+        );
+
+        fn sort_by_toi(list: &mut [CameraPickResult]) {
+            list.sort_by(|a, b| a.toi.partial_cmp(&b.toi).unwrap());
+        }
+        sort_by_toi(&mut picked_meshes);
+        sort_by_toi(&mut picked_non_meshes);
+
+        let context = if options.editor_only {
+            &mut self.editor_context
+        } else {
+            &mut self.scene_context
+        };
+        context.pick_list.clear();
+        context.pick_list.append(&mut picked_meshes);
+        context.pick_list.append(&mut picked_non_meshes);
+
+        if options.use_picking_loop {
+            let mut hasher = DefaultHasher::new();
+            for result in context.pick_list.iter() {
+                result.node.hash(&mut hasher);
             }
-            sort_by_toi(&mut picked_meshes);
-            sort_by_toi(&mut picked_non_meshes);
+            let selection_hash = hasher.finish();
+            if selection_hash == context.old_selection_hash
+                && options.cursor_pos == context.old_cursor_pos
+            {
+                context.pick_index += 1;
 
-            let context = if options.editor_only {
-                &mut self.editor_context
-            } else {
-                &mut self.scene_context
-            };
-            context.pick_list.clear();
-            context.pick_list.append(&mut picked_meshes);
-            context.pick_list.append(&mut picked_non_meshes);
-
-            if options.use_picking_loop {
-                let mut hasher = DefaultHasher::new();
-                for result in context.pick_list.iter() {
-                    result.node.hash(&mut hasher);
-                }
-                let selection_hash = hasher.finish();
-                if selection_hash == context.old_selection_hash
-                    && options.cursor_pos == context.old_cursor_pos
-                {
-                    context.pick_index += 1;
-
-                    // Wrap picking loop.
-                    if context.pick_index >= context.pick_list.len() {
-                        context.pick_index = 0;
-                    }
-                } else {
-                    // Select is different, start from beginning.
+                // Wrap picking loop.
+                if context.pick_index >= context.pick_list.len() {
                     context.pick_index = 0;
                 }
-                context.old_selection_hash = selection_hash;
             } else {
+                // Select is different, start from beginning.
                 context.pick_index = 0;
             }
-            context.old_cursor_pos = options.cursor_pos;
+            context.old_selection_hash = selection_hash;
+        } else {
+            context.pick_index = 0;
+        }
+        context.old_cursor_pos = options.cursor_pos;
 
-            if !context.pick_list.is_empty() {
-                if let Some(result) = context.pick_list.get(context.pick_index) {
-                    return Some(result.clone());
-                }
+        if !context.pick_list.is_empty() {
+            if let Some(result) = context.pick_list.get(context.pick_index) {
+                return Some(result.clone());
             }
         }
 
@@ -847,7 +869,6 @@ impl CameraController {
         transform: Matrix4<f32>,
     ) -> Option<Vector3<f32>> {
         graph[self.camera]
-            .as_camera()
             .make_ray(mouse_position, viewport_size)
             .transform(transform)
             .plane_intersection_point(&plane)

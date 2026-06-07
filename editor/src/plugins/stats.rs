@@ -21,41 +21,47 @@
 use crate::{
     fyrox::{
         core::pool::Handle,
+        engine::ApplicationLoopController,
         gui::{
-            menu::MenuItemMessage,
-            message::{MessageDirection, UiMessage},
+            menu::{MenuItem, MenuItemMessage},
+            message::UiMessage,
             stack_panel::StackPanelBuilder,
-            text::{TextBuilder, TextMessage},
+            text::{Text, TextBuilder, TextMessage},
             widget::{WidgetBuilder, WidgetMessage},
-            window::{WindowBuilder, WindowMessage},
-            HorizontalAlignment, Thickness, UiNode, VerticalAlignment,
+            window::{Window, WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
+            HorizontalAlignment, Thickness, VerticalAlignment,
         },
     },
     menu::create_menu_item,
     plugin::EditorPlugin,
     Editor,
 };
-use fyrox::gui::window::WindowTitle;
+use fyrox::core::uuid::{uuid, Uuid};
 
-/// Editor UI statistics, useful to track number of active widgets and memory consumption.
+/// Editor statistics, useful to track number of active widgets, memory consumption, and other
+/// various useful information.
 
 #[derive(Default)]
-pub struct UiStatisticsPlugin {
-    window: Handle<UiNode>,
-    text: Handle<UiNode>,
-    open_ui_stats: Handle<UiNode>,
+pub struct EditorStatisticsPlugin {
+    window: Handle<Window>,
+    text: Handle<Text>,
+    open_ui_stats: Handle<MenuItem>,
 }
 
-impl EditorPlugin for UiStatisticsPlugin {
+impl EditorStatisticsPlugin {
+    pub const EDITOR_STATISTICS: Uuid = uuid!("6331d1a4-3194-4b80-a95b-1558c61e1b1a");
+}
+
+impl EditorPlugin for EditorStatisticsPlugin {
     fn on_start(&mut self, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
         let ctx = &mut ui.build_ctx();
-        self.open_ui_stats = create_menu_item("Editor UI Statistics", vec![], ctx);
-        ui.send_message(MenuItemMessage::add_item(
+        self.open_ui_stats =
+            create_menu_item("Editor Statistics", Self::EDITOR_STATISTICS, vec![], ctx);
+        ui.send(
             editor.menu.utils_menu.menu,
-            MessageDirection::ToWidget,
-            self.open_ui_stats,
-        ));
+            MenuItemMessage::AddItem(self.open_ui_stats),
+        );
     }
 
     fn on_ui_message(&mut self, message: &mut UiMessage, editor: &mut Editor) {
@@ -68,8 +74,8 @@ impl EditorPlugin for UiStatisticsPlugin {
                     TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(1.0)))
                         .build(ctx);
                 self.window =
-                    WindowBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(100.0))
-                        .with_title(WindowTitle::text("Editor UI Statistics"))
+                    WindowBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(130.0))
+                        .with_title(WindowTitle::text("Editor Statistics"))
                         .with_content(
                             StackPanelBuilder::new(WidgetBuilder::new().with_child(self.text))
                                 .build(ctx),
@@ -77,31 +83,31 @@ impl EditorPlugin for UiStatisticsPlugin {
                         .open(false)
                         .build(ctx);
 
-                ui.send_message(WindowMessage::open_and_align(
+                ui.send(
                     self.window,
-                    MessageDirection::ToWidget,
-                    editor.scene_viewer.frame(),
-                    HorizontalAlignment::Right,
-                    VerticalAlignment::Bottom,
-                    Thickness::uniform(1.0),
-                    false,
-                    true,
-                ));
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Relative {
+                            relative_to: editor.scene_viewer.frame().to_base(),
+                            horizontal_alignment: HorizontalAlignment::Right,
+                            vertical_alignment: VerticalAlignment::Bottom,
+                            margin: Thickness::uniform(1.0),
+                        },
+                        modal: false,
+                        focus_content: true,
+                    },
+                );
             }
         }
 
         if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == self.window {
-                ui.send_message(WidgetMessage::remove(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.window, WidgetMessage::Remove);
                 self.window = Handle::NONE;
             }
         }
     }
 
-    fn on_update(&mut self, editor: &mut Editor) {
+    fn on_update(&mut self, editor: &mut Editor, _loop_controller: ApplicationLoopController) {
         if self.window.is_none() {
             return;
         }
@@ -113,17 +119,27 @@ impl EditorPlugin for UiStatisticsPlugin {
             .iter()
             .fold(0, |acc, node| acc + node.self_size());
 
-        ui.send_message(TextMessage::text(
-            self.text,
-            MessageDirection::ToWidget,
-            format!(
-                "Widget Count: {}\nMemory Used: {:.3} Mb.\n\
-                Drawing Commands: {}\nProcessed Messages: {}\n",
-                ui.nodes().alive_count(),
-                total_memory as f32 / (1024.0 * 1024.0),
-                ui.drawing_context.get_commands().len(),
-                editor.processed_ui_messages
-            ),
-        ));
+        let widget_count = ui.nodes().alive_count();
+        let memory_used = total_memory as f32 / (1024.0 * 1024.0);
+        let drawing_commands = ui.drawing_context.get_commands().len();
+        let processed_ui_messages = editor.processed_ui_messages;
+        let loaded_assets = editor
+            .engine
+            .resource_manager
+            .state()
+            .count_loaded_resources();
+
+        let text = format!(
+            "Ui Statistics:\n\
+             \tWidget Count: {widget_count}\n\
+             \tMemory Used: {memory_used:.3} Mb.\n\
+             \tDrawing Commands: {drawing_commands}\n\
+             \tProcessed Messages: {processed_ui_messages}\n\
+             Asset Statistics:\n\
+             \tLoaded Assets: {loaded_assets}
+             ",
+        );
+
+        ui.send(self.text, TextMessage::Text(text));
     }
 }

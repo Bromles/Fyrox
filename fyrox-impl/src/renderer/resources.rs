@@ -22,20 +22,20 @@
 
 use crate::{
     core::{algebra::Matrix4, array_as_u8_slice},
+    graphics::{
+        buffer::GpuBufferDescriptor,
+        buffer::{BufferKind, BufferUsage, GpuBuffer},
+        error::FrameworkError,
+        geometry_buffer::GpuGeometryBuffer,
+        gpu_program::SamplerFallback,
+        gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
+        sampler::{
+            GpuSampler, GpuSamplerDescriptor, MagnificationFilter, MinificationFilter, WrapMode,
+        },
+        server::GraphicsServer,
+    },
     renderer::{cache::shader::RenderPassContainer, framework::GeometryBufferExt},
     scene::mesh::surface::SurfaceData,
-};
-use fyrox_graphics::buffer::GpuBufferDescriptor;
-use fyrox_graphics::{
-    buffer::{BufferKind, BufferUsage, GpuBuffer},
-    error::FrameworkError,
-    geometry_buffer::GpuGeometryBuffer,
-    gpu_program::SamplerFallback,
-    gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
-    sampler::{
-        GpuSampler, GpuSamplerDescriptor, MagnificationFilter, MinificationFilter, WrapMode,
-    },
-    server::GraphicsServer,
 };
 use fyrox_material::shader::ShaderDefinition;
 
@@ -173,7 +173,15 @@ impl ShadersContainer {
             box_blur: RenderPassContainer::from_str(server, include_str!("shaders/blur.shader"))?,
             ui: RenderPassContainer::from_str(
                 server,
-                include_str!("../../../fyrox-material/src/shader/standard/widget.shader"),
+                str::from_utf8(
+                    fyrox_material::shader::STANDARD_WIDGET
+                        .data_source
+                        .as_ref()
+                        .unwrap()
+                        .bytes
+                        .as_ref(),
+                )
+                .unwrap(),
             )?,
             environment_map_specular_convolution: RenderPassContainer::from_str(
                 server,

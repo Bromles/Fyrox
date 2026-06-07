@@ -23,7 +23,6 @@
 mod grid;
 mod optimizer;
 
-use crate::renderer::resources::RendererResources;
 use crate::{
     core::{
         algebra::{Matrix4, Vector2, Vector3},
@@ -33,20 +32,21 @@ use crate::{
         pool::Handle,
         ImmutableString,
     },
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
+    graphics::{
+        error::FrameworkError,
+        framebuffer::Attachment,
+        framebuffer::GpuFrameBuffer,
+        gpu_texture::GpuTexture,
+        gpu_texture::{GpuTextureKind, PixelKind},
+        server::GraphicsServer,
+        stats::RenderPassStatistics,
+    },
+    renderer::resources::RendererResources,
     renderer::{
         cache::shader::{binding, property, PropertyGroup, RenderMaterial},
         cache::uniform::UniformBufferCache,
         debug_renderer::{self, DebugRenderer},
-        framework::{
-            error::FrameworkError,
-            framebuffer::Attachment,
-            framebuffer::GpuFrameBuffer,
-            gpu_texture::GpuTexture,
-            gpu_texture::{GpuTextureKind, PixelKind},
-            server::GraphicsServer,
-            stats::RenderPassStatistics,
-        },
         occlusion::{
             grid::{GridCache, Visibility},
             optimizer::VisibilityBufferOptimizer,
@@ -114,7 +114,8 @@ impl TileBuffer {
 
 fn inflated_world_aabb(graph: &Graph, object: Handle<Node>) -> Option<AxisAlignedBoundingBox> {
     let mut aabb = graph
-        .try_get(object)
+        .try_get_node(object)
+        .ok()
         .map(|node_ref| node_ref.world_bounding_box())?;
     aabb.inflate(Vector3::repeat(0.01));
     Some(aabb)
@@ -228,7 +229,7 @@ impl OcclusionTester {
         let mut lines = Vec::new();
         for (object_index, object) in self.objects_to_test.iter().enumerate() {
             let object_index = object_index as u32;
-            let Some(node_ref) = graph.try_get(*object) else {
+            let Ok(node_ref) = graph.try_get_node(*object) else {
                 continue;
             };
 
@@ -326,6 +327,7 @@ impl OcclusionTester {
 
     pub fn try_run_visibility_test<'a>(
         &mut self,
+        server: &dyn GraphicsServer,
         graph: &Graph,
         debug_renderer: Option<&mut DebugRenderer>,
         objects_to_test: impl Iterator<Item = &'a Handle<Node>>,
@@ -335,6 +337,8 @@ impl OcclusionTester {
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("VisibilityTest");
+
         let mut stats = RenderPassStatistics::default();
 
         if self.visibility_buffer_optimizer.is_reading_from_gpu() {
@@ -400,6 +404,7 @@ impl OcclusionTester {
         )?;
 
         self.visibility_buffer_optimizer.optimize(
+            server,
             &self.visibility_mask,
             self.tile_size as i32,
             uniform_buffer_cache,

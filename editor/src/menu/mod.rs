@@ -19,14 +19,15 @@
 // SOFTWARE.
 
 use crate::{
+    asset::preview::cache::IconRequest,
     export::ExportWindow,
     fyrox::{
         core::{algebra::Vector2, pool::Handle},
         gui::{
             menu::{MenuBuilder, MenuItemBuilder, MenuItemContent},
-            message::{MessageDirection, UiMessage},
+            message::UiMessage,
             widget::{WidgetBuilder, WidgetMessage},
-            BuildContext, Thickness, UiNode, UserInterface,
+            BuildContext, Thickness, UserInterface,
         },
     },
     menu::{
@@ -35,12 +36,19 @@ use crate::{
     },
     message::MessageSender,
     scene::{container::EditorSceneEntry, controller::SceneController},
-    send_sync_message,
     settings::Settings,
     stats::StatisticsWindow,
     Engine, Mode, SceneSettingsWindow,
 };
+use fyrox::asset::manager::ResourceManager;
+use fyrox::core::uuid::Uuid;
+use fyrox::gui::file_browser::FileType;
+use fyrox::gui::image::{Image, ImageBuilder};
+use fyrox::gui::menu::MenuItem;
+use fyrox::gui::texture::TextureResource;
+use fyrox::gui::window::Window;
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 
 pub mod create;
 pub mod edit;
@@ -51,7 +59,7 @@ pub mod utils;
 pub mod view;
 
 pub struct Menu {
-    pub menu: Handle<UiNode>,
+    pub menu: Handle<fyrox::gui::menu::Menu>,
     pub create_entity_menu: CreateEntityRootMenu,
     pub edit_menu: EditMenu,
     pub file_menu: FileMenu,
@@ -62,16 +70,16 @@ pub struct Menu {
 }
 
 pub struct Panels<'b> {
-    pub scene_frame: Handle<UiNode>,
-    pub light_panel: Handle<UiNode>,
-    pub log_panel: Handle<UiNode>,
-    pub navmesh_panel: Handle<UiNode>,
-    pub audio_panel: Handle<UiNode>,
-    pub command_stack_panel: Handle<UiNode>,
-    pub inspector_window: Handle<UiNode>,
-    pub world_outliner_window: Handle<UiNode>,
-    pub asset_window: Handle<UiNode>,
-    pub configurator_window: Handle<UiNode>,
+    pub scene_frame: Handle<Image>,
+    pub light_panel: Handle<Window>,
+    pub log_panel: Handle<Window>,
+    pub navmesh_panel: Handle<Window>,
+    pub audio_panel: Handle<Window>,
+    pub command_stack_panel: Handle<Window>,
+    pub inspector_window: Handle<Window>,
+    pub world_outliner_window: Handle<Window>,
+    pub asset_window: Handle<Window>,
+    pub configurator_window: Handle<Window>,
     pub scene_settings: &'b SceneSettingsWindow,
     pub export_window: &'b mut Option<ExportWindow>,
     pub statistics_window: &'b mut Option<StatisticsWindow>,
@@ -79,43 +87,73 @@ pub struct Panels<'b> {
 
 pub struct MenuContext<'a, 'b> {
     pub engine: &'a mut Engine,
-    pub game_scene: Option<&'b mut EditorSceneEntry>,
+    pub game_scene: &'b mut EditorSceneEntry,
     pub panels: Panels<'b>,
     pub settings: &'b mut Settings,
+    pub icon_request_sender: Sender<IconRequest>,
 }
 
 pub fn create_root_menu_item(
     text: &str,
-    items: Vec<Handle<UiNode>>,
+    id: Uuid,
+    items: Vec<Handle<MenuItem>>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
-    MenuItemBuilder::new(WidgetBuilder::new().with_margin(Thickness::right(10.0)))
-        .with_content(MenuItemContent::text_centered(text))
-        .with_items(items)
-        .build(ctx)
+) -> Handle<MenuItem> {
+    MenuItemBuilder::new(
+        WidgetBuilder::new()
+            .with_id(id)
+            .with_name(text)
+            .with_margin(Thickness::right(10.0)),
+    )
+    .with_content(MenuItemContent::text_centered(text))
+    .with_items(items)
+    .build(ctx)
 }
 
 pub fn create_menu_item(
     text: &str,
-    items: Vec<Handle<UiNode>>,
+    id: Uuid,
+    items: Vec<Handle<MenuItem>>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
-    MenuItemBuilder::new(WidgetBuilder::new().with_min_size(Vector2::new(120.0, 22.0)))
-        .with_content(MenuItemContent::text(text))
-        .with_items(items)
-        .build(ctx)
+) -> Handle<MenuItem> {
+    MenuItemBuilder::new(
+        WidgetBuilder::new()
+            .with_id(id)
+            .with_min_size(Vector2::new(120.0, 22.0)),
+    )
+    .with_content(MenuItemContent::text(text))
+    .with_items(items)
+    .build(ctx)
 }
 
 pub fn create_menu_item_shortcut(
     text: &str,
+    icon: Option<TextureResource>,
+    id: Uuid,
     shortcut: &str,
-    items: Vec<Handle<UiNode>>,
+    items: Vec<Handle<MenuItem>>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
-    MenuItemBuilder::new(WidgetBuilder::new().with_min_size(Vector2::new(120.0, 22.0)))
-        .with_content(MenuItemContent::text_with_shortcut(text, shortcut))
-        .with_items(items)
-        .build(ctx)
+) -> Handle<MenuItem> {
+    let icon = match icon {
+        Some(icon) => MenuItemContent::text_with_shortcut_and_icon(
+            text,
+            shortcut,
+            ImageBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(4.0)))
+                .with_keep_aspect_ratio(true)
+                .with_texture(icon)
+                .build(ctx),
+        ),
+        None => MenuItemContent::text_with_shortcut(text, shortcut),
+    };
+
+    MenuItemBuilder::new(
+        WidgetBuilder::new()
+            .with_id(id)
+            .with_min_size(Vector2::new(120.0, 22.0)),
+    )
+    .with_content(icon)
+    .with_items(items)
+    .build(ctx)
 }
 
 impl Menu {
@@ -155,13 +193,22 @@ impl Menu {
         }
     }
 
-    pub fn open_load_file_selector(&self, ui: &mut UserInterface) {
-        self.file_menu.open_load_file_selector(ui)
+    pub fn open_load_file_selector(
+        &self,
+        resource_manager: &ResourceManager,
+        ui: &mut UserInterface,
+    ) {
+        self.file_menu.open_load_file_selector(resource_manager, ui)
     }
 
-    pub fn open_save_file_selector(&mut self, ui: &mut UserInterface, default_file_name: PathBuf) {
+    pub fn open_save_file_selector(
+        &mut self,
+        ui: &mut UserInterface,
+        resource_manager: &ResourceManager,
+        default_file_info: (PathBuf, FileType),
+    ) {
         self.file_menu
-            .open_save_file_selector(ui, default_file_name)
+            .open_save_file_selector(ui, resource_manager, default_file_info)
     }
 
     pub fn sync_to_model(&mut self, has_active_scene: bool, ui: &mut UserInterface) {
@@ -175,31 +222,27 @@ impl Menu {
         ]
         .iter()
         {
-            send_sync_message(
-                ui,
-                WidgetMessage::enabled(widget, MessageDirection::ToWidget, has_active_scene),
-            );
+            ui.send_sync(widget, WidgetMessage::Enabled(has_active_scene));
         }
     }
 
     pub fn handle_ui_message(&mut self, message: &UiMessage, mut ctx: MenuContext) {
-        if let Some(entry) = ctx.game_scene.as_mut() {
-            self.edit_menu.handle_ui_message(
-                message,
-                &self.message_sender,
-                &entry.selection,
-                &mut *entry.controller,
-                ctx.engine,
-            );
+        let entry = ctx.game_scene;
+        self.edit_menu.handle_ui_message(
+            message,
+            &self.message_sender,
+            &entry.selection,
+            &mut *entry.controller,
+            ctx.engine,
+        );
 
-            self.create_entity_menu.handle_ui_message(
-                message,
-                &self.message_sender,
-                &mut *entry.controller,
-                &entry.selection,
-                ctx.engine,
-            );
-        }
+        self.create_entity_menu.handle_ui_message(
+            message,
+            &self.message_sender,
+            &mut *entry.controller,
+            &entry.selection,
+            ctx.engine,
+        );
 
         self.utils_menu.handle_ui_message(
             message,
@@ -209,10 +252,10 @@ impl Menu {
         self.file_menu.handle_ui_message(
             message,
             &self.message_sender,
-            ctx.game_scene,
+            Some(entry),
             ctx.engine,
-            ctx.settings,
             &mut ctx.panels,
+            ctx.icon_request_sender.clone(),
         );
         self.view_menu.handle_ui_message(
             message,

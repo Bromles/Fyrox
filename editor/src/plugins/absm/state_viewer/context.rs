@@ -18,14 +18,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::SceneGraphNode;
+use crate::fyrox::graph::NodeWrapper;
 use crate::fyrox::{
     core::{algebra::Vector2, pool::Handle},
     generic_animation::machine::{
         node::{blendspace::BlendSpace, blendspace::BlendSpacePoint, BasePoseNode},
         BlendAnimations, BlendAnimationsByIndex, MachineLayer, PlayAnimation, PoseNode, State,
     },
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     gui::{
         menu::MenuItemMessage,
         message::UiMessage,
@@ -35,6 +35,7 @@ use crate::fyrox::{
         BuildContext, RcUiNodeHandle, UiNode, UserInterface,
     },
 };
+use crate::plugins::absm::canvas::AbsmCanvas;
 use crate::plugins::absm::{
     command::{
         blend::{
@@ -53,19 +54,25 @@ use crate::{
     message::MessageSender,
     scene::{commands::ChangeSelectionCommand, Selection},
 };
-use fyrox::gui::menu::ContextMenuBuilder;
+use fyrox::core::uuid::{uuid, Uuid};
+use fyrox::gui::menu::{ContextMenuBuilder, MenuItem};
 
 pub struct CanvasContextMenu {
-    create_play_animation: Handle<UiNode>,
-    create_blend_animations: Handle<UiNode>,
-    create_blend_by_index: Handle<UiNode>,
-    create_blend_space: Handle<UiNode>,
+    create_play_animation: Handle<MenuItem>,
+    create_blend_animations: Handle<MenuItem>,
+    create_blend_by_index: Handle<MenuItem>,
+    create_blend_space: Handle<MenuItem>,
     pub menu: RcUiNodeHandle,
-    pub canvas: Handle<UiNode>,
+    pub canvas: Handle<AbsmCanvas>,
     pub node_context_menu: Option<RcUiNodeHandle>,
 }
 
 impl CanvasContextMenu {
+    pub const PLAY_ANIMATION: Uuid = uuid!("6a151c9d-4d3e-49e7-b229-d9ffe536102e");
+    pub const BLEND_ANIMATIONS: Uuid = uuid!("c923a357-ed22-46f2-9188-bf639095c1cf");
+    pub const BLEND_BY_INDEX: Uuid = uuid!("2a656cac-20b9-4576-af95-c2a1b87e8304");
+    pub const BLEND_SPACE: Uuid = uuid!("94a92a0a-a59f-44a8-bc8a-98d89f6aff80");
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let create_play_animation;
         let create_blend_animations;
@@ -81,25 +88,41 @@ impl CanvasContextMenu {
                 StackPanelBuilder::new(
                     WidgetBuilder::new()
                         .with_child({
-                            create_play_animation = create_menu_item("Play Animation", vec![], ctx);
+                            create_play_animation = create_menu_item(
+                                "Play Animation",
+                                Self::PLAY_ANIMATION,
+                                vec![],
+                                ctx,
+                            );
                             create_play_animation
                         })
                         .with_child({
-                            create_blend_animations =
-                                create_menu_item("Blend Animations", vec![], ctx);
+                            create_blend_animations = create_menu_item(
+                                "Blend Animations",
+                                Self::BLEND_ANIMATIONS,
+                                vec![],
+                                ctx,
+                            );
                             create_blend_animations
                         })
                         .with_child({
-                            create_blend_by_index = create_menu_item("Blend By Index", vec![], ctx);
+                            create_blend_by_index = create_menu_item(
+                                "Blend By Index",
+                                Self::BLEND_BY_INDEX,
+                                vec![],
+                                ctx,
+                            );
                             create_blend_by_index
                         })
                         .with_child({
-                            create_blend_space = create_menu_item("Blend Space", vec![], ctx);
+                            create_blend_space =
+                                create_menu_item("Blend Space", Self::BLEND_SPACE, vec![], ctx);
                             create_blend_space
                         }),
                 )
                 .build(ctx),
-            ),
+            )
+            .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -115,7 +138,7 @@ impl CanvasContextMenu {
         }
     }
 
-    pub fn handle_ui_message<N: SceneGraphNode>(
+    pub fn handle_ui_message<N: NodeWrapper>(
         &mut self,
         sender: &MessageSender,
         message: &UiMessage,
@@ -125,9 +148,8 @@ impl CanvasContextMenu {
         layer_index: usize,
     ) {
         if let Some(MenuItemMessage::Click) = message.data() {
-            let position = ui
-                .node(self.canvas)
-                .screen_to_local(ui.node(self.menu.handle()).screen_position());
+            let position =
+                ui[self.canvas].screen_to_local(ui.node(self.menu.handle()).screen_position());
 
             let pose_node = if message.destination() == self.create_play_animation {
                 Some(PoseNode::PlayAnimation(PlayAnimation {
@@ -200,32 +222,38 @@ impl CanvasContextMenu {
 }
 
 pub struct NodeContextMenu {
-    remove: Handle<UiNode>,
-    set_as_root: Handle<UiNode>,
+    remove: Handle<MenuItem>,
+    set_as_root: Handle<MenuItem>,
     pub menu: RcUiNodeHandle,
-    pub canvas: Handle<UiNode>,
+    pub canvas: Handle<AbsmCanvas>,
     placement_target: Handle<UiNode>,
 }
 
 impl NodeContextMenu {
+    pub const SET_AS_ROOT: Uuid = uuid!("b0dbe561-6d30-4cd3-a900-8cb4105c9c77");
+    pub const REMOVE: Uuid = uuid!("2936d699-bdea-43d9-b601-b5159ea056cf");
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let remove;
         let set_as_root;
         let menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new().with_visibility(false)).with_content(
-                StackPanelBuilder::new(
-                    WidgetBuilder::new()
-                        .with_child({
-                            set_as_root = create_menu_item("Set As Root", vec![], ctx);
-                            set_as_root
-                        })
-                        .with_child({
-                            remove = create_menu_item("Remove", vec![], ctx);
-                            remove
-                        }),
+            PopupBuilder::new(WidgetBuilder::new().with_visibility(false))
+                .with_content(
+                    StackPanelBuilder::new(
+                        WidgetBuilder::new()
+                            .with_child({
+                                set_as_root =
+                                    create_menu_item("Set As Root", Self::SET_AS_ROOT, vec![], ctx);
+                                set_as_root
+                            })
+                            .with_child({
+                                remove = create_menu_item("Remove", Self::REMOVE, vec![], ctx);
+                                remove
+                            }),
+                    )
+                    .build(ctx),
                 )
-                .build(ctx),
-            ),
+                .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -239,7 +267,7 @@ impl NodeContextMenu {
         }
     }
 
-    pub fn handle_ui_message<N: SceneGraphNode>(
+    pub fn handle_ui_message<N: NodeWrapper>(
         &mut self,
         message: &UiMessage,
         machine_layer: &MachineLayer<Handle<N>>,
@@ -276,7 +304,7 @@ impl NodeContextMenu {
             } else if message.destination() == self.set_as_root {
                 let root = ui
                     .node(self.placement_target)
-                    .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                    .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                     .unwrap()
                     .model_handle;
 
@@ -296,22 +324,31 @@ impl NodeContextMenu {
 }
 
 pub struct ConnectionContextMenu {
-    remove: Handle<UiNode>,
+    remove: Handle<MenuItem>,
     pub menu: RcUiNodeHandle,
     placement_target: Handle<UiNode>,
 }
 
 impl ConnectionContextMenu {
+    pub const REMOVE_CONNECTION: Uuid = uuid!("4b91ee45-02ba-47d2-b3dd-e05962f323d9");
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let remove;
         let menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new().with_visibility(false)).with_content(
-                StackPanelBuilder::new(WidgetBuilder::new().with_child({
-                    remove = create_menu_item("Remove Connection", vec![], ctx);
-                    remove
-                }))
-                .build(ctx),
-            ),
+            PopupBuilder::new(WidgetBuilder::new().with_visibility(false))
+                .with_content(
+                    StackPanelBuilder::new(WidgetBuilder::new().with_child({
+                        remove = create_menu_item(
+                            "Remove Connection",
+                            Self::REMOVE_CONNECTION,
+                            vec![],
+                            ctx,
+                        );
+                        remove
+                    }))
+                    .build(ctx),
+                )
+                .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -323,7 +360,7 @@ impl ConnectionContextMenu {
         }
     }
 
-    pub fn handle_ui_message<N: SceneGraphNode>(
+    pub fn handle_ui_message<N: NodeWrapper>(
         &mut self,
         message: &UiMessage,
         ui: &mut UserInterface,
@@ -336,19 +373,19 @@ impl ConnectionContextMenu {
             if message.destination == self.remove {
                 let connection_ref = ui
                     .node(self.placement_target)
-                    .query_component::<Connection>()
+                    .self_or_field_ref::<Connection>()
                     .unwrap();
 
                 let dest_node_ref = ui
                     .node(connection_ref.dest_node)
-                    .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                    .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                     .unwrap();
 
                 let index = dest_node_ref
                     .base
                     .input_sockets
                     .iter()
-                    .position(|s| *s == connection_ref.segment.dest)
+                    .position(|s| connection_ref.segment.dest == *s)
                     .unwrap();
 
                 let model_handle = dest_node_ref.model_handle;

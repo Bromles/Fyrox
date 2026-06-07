@@ -51,10 +51,7 @@ pub mod tilemap;
 pub mod transform;
 
 use crate::{
-    asset::{
-        self, io::ResourceIo, manager::ResourceManager, registry::ResourceRegistryStatus,
-        untyped::UntypedResource,
-    },
+    asset::{self, io::ResourceIo, manager::ResourceManager, untyped::UntypedResource},
     core::{
         algebra::Vector2,
         color::Color,
@@ -64,16 +61,15 @@ use crate::{
         reflect::prelude::*,
         variable::InheritableVariable,
         visitor::{error::VisitError, Visit, VisitResult, Visitor},
+        SafeLock,
     },
     engine::SerializationContext,
     graph::NodeHandleMap,
-    renderer::framework::PolygonFillMode,
+    graphics::PolygonFillMode,
     resource::texture::TextureResource,
     scene::{
-        base::BaseBuilder,
         debug::SceneDrawingContext,
         graph::{Graph, GraphPerformanceStatistics, GraphUpdateSwitches},
-        navmesh::NavigationalMeshBuilder,
         node::Node,
         skybox::{SkyBox, SkyBoxKind},
         sound::SoundEngine,
@@ -81,6 +77,9 @@ use crate::{
     utils::navmesh::Navmesh,
 };
 use fxhash::FxHashSet;
+use fyrox_core::blank_reflect_ref;
+use fyrox_core::dyntype::DynTypeConstructorContainer;
+use fyrox_core::pool::PoolError;
 use std::{
     fmt::{Display, Formatter},
     ops::{Index, IndexMut},
@@ -88,6 +87,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 /// A container for navigational meshes.
 #[derive(Default, Clone, Debug, Visit)]
@@ -132,22 +132,22 @@ impl NavMeshContainer {
     }
 
     /// Tries to borrow a navmesh by its index.
-    pub fn at(&self, i: u32) -> Option<&Navmesh> {
+    pub fn at(&self, i: u32) -> Result<&Navmesh, PoolError> {
         self.pool.at(i)
     }
 
     /// Tries to borrow a navmesh by its handle.
-    pub fn try_get(&self, handle: Handle<Navmesh>) -> Option<&Navmesh> {
+    pub fn try_get(&self, handle: Handle<Navmesh>) -> Result<&Navmesh, PoolError> {
         self.pool.try_borrow(handle)
     }
 
     /// Tries to borrow a navmesh by its index.
-    pub fn at_mut(&mut self, i: u32) -> Option<&mut Navmesh> {
+    pub fn at_mut(&mut self, i: u32) -> Result<&mut Navmesh, PoolError> {
         self.pool.at_mut(i)
     }
 
     /// Tries to borrow a navmesh by its handle.
-    pub fn try_get_mut(&mut self, handle: Handle<Navmesh>) -> Option<&mut Navmesh> {
+    pub fn try_get_mut(&mut self, handle: Handle<Navmesh>) -> Result<&mut Navmesh, PoolError> {
         self.pool.try_borrow_mut(handle)
     }
 }
@@ -166,8 +166,23 @@ impl IndexMut<Handle<Navmesh>> for NavMeshContainer {
     }
 }
 
+/// A set of options, that allows selecting the source of environment lighting for a scene. By
+/// default, it is set to [`EnvironmentLightingSource::SkyBox`].
+#[derive(
+    Reflect, Visit, Debug, Default, Clone, Copy, PartialEq, AsRefStr, EnumString, VariantNames,
+)]
+#[reflect(type_uuid = "28f22fe7-22ed-47e1-ae43-779866a46cdf")]
+pub enum EnvironmentLightingSource {
+    /// Sky box of a scene will be the source of lighting.
+    #[default]
+    SkyBox,
+    /// Ambient color of the scene will be the source of lighting.
+    AmbientColor,
+}
+
 /// Rendering options of a scene. It allows you to specify a render target to render the scene to, change its clear color, etc.
 #[derive(Debug, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "74a58c1d-4f70-4a04-9cac-bfdaec63b321")]
 pub struct SceneRenderingOptions {
     /// A texture to draw the scene to. If empty, then the scene will be drawn on screen directly. It is useful to "embed" some scene into other
     /// by drawing a quad with this texture. This can be used to make in-game video conference - you can make separate scene with
@@ -184,8 +199,18 @@ pub struct SceneRenderingOptions {
     /// [`PolygonFillMode::Line`] could be used to render the scene in wireframe mode.
     pub polygon_rasterization_mode: PolygonFillMode,
 
-    /// Color of the ambient lighting.
+    /// Color of the ambient lighting. This color is only used if `environment_lighting_source`
+    /// is set to [`EnvironmentLightingSource::AmbientColor`].
     pub ambient_lighting_color: Color,
+
+    /// A switch, that allows selecting the source of environment lighting. By default, it is set to
+    /// [`EnvironmentLightingSource::SkyBox`].
+    pub environment_lighting_source: EnvironmentLightingSource,
+
+    /// Environment lighting brightness. Default is 1.0. Environment lighting will be multiplied
+    /// by this coefficient.
+    #[visit(optional)]
+    pub environment_lighting_brightness: f32,
 }
 
 impl Default for SceneRenderingOptions {
@@ -195,6 +220,8 @@ impl Default for SceneRenderingOptions {
             clear_color: None,
             polygon_rasterization_mode: Default::default(),
             ambient_lighting_color: Color::opaque(100, 100, 100),
+            environment_lighting_source: Default::default(),
+            environment_lighting_brightness: 1.0,
         }
     }
 }
@@ -206,12 +233,15 @@ impl Clone for SceneRenderingOptions {
             clear_color: self.clear_color,
             polygon_rasterization_mode: self.polygon_rasterization_mode,
             ambient_lighting_color: self.ambient_lighting_color,
+            environment_lighting_source: self.environment_lighting_source,
+            environment_lighting_brightness: self.environment_lighting_brightness,
         }
     }
 }
 
 /// See module docs.
 #[derive(Debug, Reflect)]
+#[reflect(type_uuid = "03b3f812-3518-429b-befe-3f7a160503fa")]
 pub struct Scene {
     /// Graph is main container for all scene nodes. It calculates global transforms for nodes,
     /// updates them and performs all other important work. See `graph` module docs for more
@@ -240,6 +270,10 @@ pub struct Scene {
     /// to false for menu's scene and when you need to open a menu - set it to true and
     /// set `enabled` flag to false for level's scene.
     pub enabled: InheritableVariable<bool>,
+}
+
+impl Reflect for &'static mut Scene {
+    blank_reflect_ref!("1258e495-5789-4aa4-a2c5-3f9f79bef5f4");
 }
 
 impl Clone for Scene {
@@ -310,16 +344,10 @@ impl SceneLoader {
         path: P,
         io: &dyn ResourceIo,
         serialization_context: Arc<SerializationContext>,
+        dyn_type_constructors: Arc<DynTypeConstructorContainer>,
         resource_manager: ResourceManager,
     ) -> Result<(Self, Vec<u8>), VisitError> {
-        let registry_status = resource_manager
-            .state()
-            .resource_registry
-            .lock()
-            .status_flag();
-        // Wait until the registry is fully loaded.
-        let registry_status = registry_status.await;
-        if registry_status == ResourceRegistryStatus::Unknown {
+        if !resource_manager.registry_is_loaded() {
             return Err(VisitError::User(format!(
                 "Unable to load a scene from {} path, because the \
             resource registry isn't loaded!",
@@ -332,6 +360,7 @@ impl SceneLoader {
         let loader = Self::load(
             "Scene",
             serialization_context,
+            dyn_type_constructors,
             resource_manager,
             &mut visitor,
             Some(path.as_ref().to_path_buf()),
@@ -343,6 +372,7 @@ impl SceneLoader {
     pub fn load(
         region_name: &str,
         serialization_context: Arc<SerializationContext>,
+        dyn_type_constructors: Arc<DynTypeConstructorContainer>,
         resource_manager: ResourceManager,
         visitor: &mut Visitor,
         path: Option<PathBuf>,
@@ -354,6 +384,7 @@ impl SceneLoader {
         }
 
         visitor.blackboard.register(serialization_context);
+        visitor.blackboard.register(dyn_type_constructors);
         visitor
             .blackboard
             .register(Arc::new(resource_manager.clone()));
@@ -381,13 +412,10 @@ impl SceneLoader {
             let exclusion_list = used_resources
                 .iter()
                 .filter(|res| {
-                    // Calling resource_uuid means locking the header.
-                    // To minimize the number of locks we hold at once, get the UUID first,
-                    // before we lock the resource manager and registry.
                     let uuid = res.resource_uuid();
                     let state = self.resource_manager.state();
-                    let registry = state.resource_registry.lock();
-                    uuid.and_then(|uuid| registry.uuid_to_path(uuid)) == Some(&path)
+                    let registry = state.resource_registry.safe_lock();
+                    registry.uuid_to_path(uuid) == Some(&path)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -404,7 +432,13 @@ impl SceneLoader {
         ));
 
         // Wait everything.
-        join_all(used_resources.into_iter()).await;
+        let results = join_all(used_resources).await;
+
+        for result in results {
+            if let Err(err) = result {
+                Log::err(format!("Scene resource loading error: {:?}", err));
+            }
+        }
 
         Log::info(format!(
             "SceneLoader::finish() - All {used_resources_count} resources have finished loading."
@@ -500,6 +534,7 @@ impl Scene {
     pub fn clone_ex<F, Pre, Post>(
         &self,
         root: Handle<Node>,
+        preserve_handles: bool,
         filter: &mut F,
         pre_process_callback: &mut Pre,
         post_process_callback: &mut Post,
@@ -509,9 +544,13 @@ impl Scene {
         Pre: FnMut(Handle<Node>, &mut Node),
         Post: FnMut(Handle<Node>, Handle<Node>, &mut Node),
     {
-        let (graph, old_new_map) =
-            self.graph
-                .clone_ex(root, filter, pre_process_callback, post_process_callback);
+        let (graph, old_new_map) = self.graph.clone_ex(
+            root,
+            preserve_handles,
+            filter,
+            pre_process_callback,
+            post_process_callback,
+        );
 
         (
             Self {
@@ -530,6 +569,7 @@ impl Scene {
     pub fn clone_one_to_one(&self) -> (Self, NodeHandleMap<Node>) {
         self.clone_ex(
             self.graph.get_root(),
+            true,
             &mut |_, _| true,
             &mut |_, _| {},
             &mut |_, _, _| {},
@@ -540,22 +580,10 @@ impl Scene {
         let mut region = visitor.enter_region(region_name)?;
 
         self.graph.visit("Graph", &mut region)?;
-
         self.enabled.visit("Enabled", &mut region)?;
-        let _ = self
-            .rendering_options
-            .visit("RenderingOptions", &mut region);
-        let _ = self.sky_box.visit("SkyBox", &mut region);
-
-        // Backward compatibility.
-        let mut navmeshes = NavMeshContainer::default();
-        if navmeshes.visit("NavMeshes", &mut region).is_ok() {
-            for (i, navmesh) in navmeshes.iter().enumerate() {
-                NavigationalMeshBuilder::new(BaseBuilder::new().with_name(format!("Navmesh{i}")))
-                    .with_navmesh(navmesh.clone())
-                    .build(&mut self.graph);
-            }
-        }
+        self.rendering_options
+            .visit("RenderingOptions", &mut region)?;
+        self.sky_box.visit("SkyBox", &mut region)?;
 
         Ok(())
     }
@@ -640,12 +668,12 @@ impl SceneContainer {
     }
 
     /// Tries to borrow a scene using its handle.
-    pub fn try_get(&self, handle: Handle<Scene>) -> Option<&Scene> {
+    pub fn try_get(&self, handle: Handle<Scene>) -> Result<&Scene, PoolError> {
         self.pool.try_borrow(handle)
     }
 
     /// Tries to borrow a scene using its handle.
-    pub fn try_get_mut(&mut self, handle: Handle<Scene>) -> Option<&mut Scene> {
+    pub fn try_get_mut(&mut self, handle: Handle<Scene>) -> Result<&mut Scene, PoolError> {
         self.pool.try_borrow_mut(handle)
     }
 

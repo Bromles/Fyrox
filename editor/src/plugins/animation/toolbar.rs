@@ -18,61 +18,60 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::{
-    asset::manager::ResourceManager,
-    core::{
-        algebra::Vector2, futures::executor::block_on, log::Log, math::Rect, pool::ErasedHandle,
-        pool::Handle,
-    },
-    generic_animation::{Animation, AnimationContainer, RootMotionSettings},
-    graph::{BaseSceneGraph, PrefabData, SceneGraph, SceneGraphNode},
-    gui::{
-        border::BorderBuilder,
-        button::{Button, ButtonBuilder, ButtonMessage},
-        check_box::{CheckBoxBuilder, CheckBoxMessage},
-        dropdown_list::{DropdownList, DropdownListBuilder, DropdownListMessage},
-        file_browser::{FileSelectorBuilder, FileSelectorMessage, Filter},
-        grid::{Column, GridBuilder, Row},
-        image::ImageBuilder,
-        message::{MessageDirection, UiMessage},
-        numeric::{NumericUpDownBuilder, NumericUpDownMessage},
-        popup::{Placement, PopupBuilder, PopupMessage},
-        stack_panel::StackPanelBuilder,
-        text::{TextBuilder, TextMessage},
-        text_box::{TextBox, TextBoxBuilder},
-        utils::{make_cross, make_simple_tooltip},
-        vector_image::{Primitive, VectorImageBuilder},
-        widget::{WidgetBuilder, WidgetMessage},
-        window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
-        VerticalAlignment,
-    },
-    resource::model::AnimationSource,
-};
-use crate::plugins::animation::{
-    command::{
-        AddAnimationCommand, RemoveAnimationCommand, ReplaceAnimationCommand,
-        SetAnimationEnabledCommand, SetAnimationLoopingCommand, SetAnimationNameCommand,
-        SetAnimationRootMotionSettingsCommand, SetAnimationSpeedCommand,
-        SetAnimationTimeSliceCommand,
-    },
-    selection::AnimationSelection,
-};
 use crate::{
     command::{Command, CommandGroup},
+    fyrox::{
+        asset::manager::ResourceManager,
+        core::{futures::executor::block_on, log::Log, pool::ErasedHandle, pool::Handle},
+        generic_animation::{Animation, AnimationContainer, RootMotionSettings},
+        graph::{NodeWrapper, PrefabData, SceneGraph},
+        gui::{
+            border::BorderBuilder,
+            button::{Button, ButtonBuilder, ButtonMessage},
+            check_box::{CheckBox, CheckBoxBuilder, CheckBoxMessage},
+            dropdown_list::{DropdownList, DropdownListBuilder, DropdownListMessage},
+            file_browser::{
+                FileSelector, FileSelectorBuilder, FileSelectorMessage, FileType, PathFilter,
+            },
+            grid::{Column, GridBuilder, Row},
+            image::ImageBuilder,
+            input::{InputBox, InputBoxBuilder, InputBoxMessage, InputBoxResult},
+            message::{MessageDirection, UiMessage},
+            numeric::{NumericUpDown, NumericUpDownBuilder, NumericUpDownMessage},
+            popup::{Placement, Popup, PopupBuilder, PopupMessage},
+            style::{resource::StyleResourceExt, Style},
+            text::{Text, TextBuilder, TextMessage},
+            toggle::{ToggleButton, ToggleButtonMessage},
+            utils::{make_dropdown_list_option_universal, make_simple_tooltip},
+            widget::{WidgetBuilder, WidgetMessage},
+            window::{WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
+            wrap_panel::WrapPanelBuilder,
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+            VerticalAlignment,
+        },
+        resource::model::AnimationSource,
+    },
     load_image,
     message::MessageSender,
+    plugins::animation::{
+        command::{
+            AddAnimationCommand, RemoveAnimationCommand, ReplaceAnimationCommand,
+            SetAnimationEnabledCommand, SetAnimationLoopingCommand, SetAnimationNameCommand,
+            SetAnimationRootMotionSettingsCommand, SetAnimationSpeedCommand,
+            SetAnimationTimeSliceCommand,
+        },
+        selection::AnimationSelection,
+    },
     scene::{
         commands::ChangeSelectionCommand,
-        selector::{HierarchyNode, NodeSelectorMessage, NodeSelectorWindowBuilder},
+        selector::NodeSelectorWindow,
+        selector::{AllowedType, HierarchyNode, NodeSelectorMessage, NodeSelectorWindowBuilder},
         Selection,
     },
-    send_sync_message,
 };
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
-use fyrox::gui::utils::make_dropdown_list_option_universal;
-use std::path::Path;
+use fyrox::core::color::Color;
+use fyrox::gui::utils::ImageButtonBuilder;
+use std::any::TypeId;
 
 enum ImportMode {
     Import,
@@ -80,56 +79,55 @@ enum ImportMode {
 }
 
 pub struct Toolbar {
-    pub panel: Handle<UiNode>,
-    pub play_pause: Handle<UiNode>,
-    pub stop: Handle<UiNode>,
-    pub speed: Handle<UiNode>,
-    pub animations: Handle<UiNode>,
-    pub add_animation: Handle<UiNode>,
-    pub remove_current_animation: Handle<UiNode>,
-    pub rename_current_animation: Handle<UiNode>,
-    pub clone_current_animation: Handle<UiNode>,
-    pub animation_name: Handle<UiNode>,
-    pub preview: Handle<UiNode>,
-    pub time_slice_start: Handle<UiNode>,
-    pub time_slice_end: Handle<UiNode>,
-    pub import: Handle<UiNode>,
-    pub reimport: Handle<UiNode>,
-    pub node_selector: Handle<UiNode>,
-    pub import_file_selector: Handle<UiNode>,
+    pub top_panel: Handle<UiNode>,
+    pub bottom_panel: Handle<UiNode>,
+    pub play_pause: Handle<Button>,
+    pub stop: Handle<Button>,
+    pub speed: Handle<NumericUpDown<f32>>,
+    pub animations: Handle<DropdownList>,
+    pub add_animation: Handle<Button>,
+    pub remove_current_animation: Handle<Button>,
+    pub rename_current_animation: Handle<Button>,
+    pub rename_animation_input_box: Handle<InputBox>,
+    pub clone_current_animation: Handle<Button>,
+    pub animation_name_input_box: Handle<InputBox>,
+    pub preview: Handle<ToggleButton>,
+    pub time_slice_start: Handle<NumericUpDown<f32>>,
+    pub time_slice_end: Handle<NumericUpDown<f32>>,
+    pub import: Handle<Button>,
+    pub reimport: Handle<Button>,
+    pub node_selector: Handle<NodeSelectorWindow>,
+    pub import_file_selector: Handle<FileSelector>,
     pub selected_import_root: ErasedHandle,
-    pub looping: Handle<UiNode>,
-    pub enabled: Handle<UiNode>,
+    pub looping: Handle<ToggleButton>,
+    pub enabled: Handle<CheckBox>,
     root_motion_dropdown_area: RootMotionDropdownArea,
-    pub root_motion: Handle<UiNode>,
+    pub root_motion: Handle<Button>,
     import_mode: ImportMode,
+    show_background_curves: Handle<ToggleButton>,
 }
 
 struct RootMotionDropdownArea {
-    popup: Handle<UiNode>,
-    select_node: Handle<UiNode>,
-    enabled: Handle<UiNode>,
-    ignore_x: Handle<UiNode>,
-    ignore_y: Handle<UiNode>,
-    ignore_z: Handle<UiNode>,
-    ignore_rotation: Handle<UiNode>,
-    node_selector: Handle<UiNode>,
+    popup: Handle<Popup>,
+    select_node: Handle<Button>,
+    enabled: Handle<CheckBox>,
+    ignore_x: Handle<CheckBox>,
+    ignore_y: Handle<CheckBox>,
+    ignore_z: Handle<CheckBox>,
+    ignore_rotation: Handle<CheckBox>,
+    node_selector: Handle<NodeSelectorWindow>,
 }
 
 impl RootMotionDropdownArea {
     fn new(ctx: &mut BuildContext) -> Self {
-        fn text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<UiNode> {
-            TextBuilder::new(
-                WidgetBuilder::new()
-                    .with_vertical_alignment(VerticalAlignment::Center)
-                    .on_row(row)
-                    .on_column(0),
-            )
-            .with_text(text)
-            .build(ctx)
+        fn text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<Text> {
+            TextBuilder::new(WidgetBuilder::new().on_row(row).on_column(0))
+                .with_vertical_text_alignment(VerticalAlignment::Center)
+                .with_text(text)
+                .build(ctx)
         }
 
-        fn check_box(row: usize, ctx: &mut BuildContext) -> Handle<UiNode> {
+        fn check_box(row: usize, ctx: &mut BuildContext) -> Handle<CheckBox> {
             CheckBoxBuilder::new(
                 WidgetBuilder::new()
                     .with_width(18.0)
@@ -220,8 +218,8 @@ impl RootMotionDropdownArea {
         root: Handle<N>,
         selection: &AnimationSelection<N>,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
         let send_command = |settings: Option<RootMotionSettings<Handle<N>>>| {
             sender.do_command(SetAnimationRootMotionSettingsCommand {
@@ -275,67 +273,71 @@ impl RootMotionDropdownArea {
                         .with_title(WindowTitle::text("Select a Root Node"))
                         .open(false),
                     )
+                    .with_allowed_types(
+                        [AllowedType {
+                            id: TypeId::of::<N>(),
+                            name: std::any::type_name::<N>().to_string(),
+                        }]
+                        .into_iter()
+                        .collect(),
+                    )
                     .build(&mut ui.build_ctx());
 
-                    ui.send_message(NodeSelectorMessage::hierarchy(
+                    ui.send(
                         self.node_selector,
-                        MessageDirection::ToWidget,
-                        HierarchyNode::from_scene_node(root, Handle::NONE, graph),
-                    ));
+                        NodeSelectorMessage::Hierarchy(HierarchyNode::from_scene_node(
+                            root,
+                            Handle::NONE,
+                            graph,
+                        )),
+                    );
 
-                    ui.send_message(NodeSelectorMessage::selection(
+                    ui.send(
                         self.node_selector,
-                        MessageDirection::ToWidget,
-                        if settings.node.is_some() {
+                        NodeSelectorMessage::Selection(if settings.node.is_some() {
                             vec![settings.node.into()]
                         } else {
                             vec![]
-                        },
-                    ));
+                        }),
+                    );
 
-                    ui.send_message(WindowMessage::open_modal(
+                    ui.send(
                         self.node_selector,
-                        MessageDirection::ToWidget,
-                        true,
-                        true,
-                    ));
+                        WindowMessage::Open {
+                            alignment: WindowAlignment::Center,
+                            modal: true,
+                            focus_content: true,
+                        },
+                    );
                 }
             }
-        } else if let Some(NodeSelectorMessage::Selection(node_selection)) = message.data() {
-            if message.destination() == self.node_selector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                if let Some(settings) = animation.root_motion_settings_ref() {
-                    sender.do_command(SetAnimationRootMotionSettingsCommand {
-                        node_handle: selection.animation_player,
-                        animation_handle: selection.animation,
-                        value: Some(RootMotionSettings {
-                            node: node_selection
-                                .first()
-                                .cloned()
-                                .map(|selected| selected.handle.into())
-                                .unwrap_or_default(),
-                            ..*settings
-                        }),
-                    });
-                }
+        } else if let Some(NodeSelectorMessage::Selection(node_selection)) =
+            message.data_from(self.node_selector)
+        {
+            if let Some(settings) = animation.root_motion_settings_ref() {
+                sender.do_command(SetAnimationRootMotionSettingsCommand {
+                    node_handle: selection.animation_player,
+                    animation_handle: selection.animation,
+                    value: Some(RootMotionSettings {
+                        node: node_selection
+                            .first()
+                            .cloned()
+                            .map(|selected| selected.handle.into())
+                            .unwrap_or_default(),
+                        ..*settings
+                    }),
+                });
             }
         } else if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == self.node_selector {
-                ui.send_message(WidgetMessage::remove(
-                    self.node_selector,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.node_selector, WidgetMessage::Remove);
                 self.node_selector = Handle::NONE;
             }
         }
     }
 
     pub fn destroy(self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::remove(
-            self.popup,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.popup, WidgetMessage::Remove);
     }
 
     pub fn sync_to_model<G, N>(
@@ -344,14 +346,11 @@ impl RootMotionDropdownArea {
         graph: &G,
         ui: &mut UserInterface,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper,
     {
-        fn sync_checked(ui: &UserInterface, check_box: Handle<UiNode>, checked: bool) {
-            send_sync_message(
-                ui,
-                CheckBoxMessage::checked(check_box, MessageDirection::ToWidget, Some(checked)),
-            );
+        fn sync_checked(ui: &UserInterface, check_box: Handle<CheckBox>, checked: bool) {
+            ui.send_sync(check_box, CheckBoxMessage::Check(Some(checked)));
         }
 
         let root_motion_enabled = animation.root_motion_settings_ref().is_some();
@@ -359,31 +358,24 @@ impl RootMotionDropdownArea {
         sync_checked(ui, self.enabled, root_motion_enabled);
 
         for widget in [
-            self.select_node,
-            self.ignore_x,
-            self.ignore_y,
-            self.ignore_z,
-            self.ignore_rotation,
+            self.select_node.to_base::<UiNode>(),
+            self.ignore_x.to_base(),
+            self.ignore_y.to_base(),
+            self.ignore_z.to_base(),
+            self.ignore_rotation.to_base(),
         ] {
-            send_sync_message(
-                ui,
-                WidgetMessage::enabled(widget, MessageDirection::ToWidget, root_motion_enabled),
-            );
+            ui.send_sync(widget, WidgetMessage::Enabled(root_motion_enabled));
         }
 
         if let Some(settings) = animation.root_motion_settings_ref() {
-            send_sync_message(
-                ui,
-                TextMessage::text(
-                    *ui.node(self.select_node)
-                        .query_component::<Button>()
-                        .unwrap()
-                        .content,
-                    MessageDirection::ToWidget,
+            let content = *ui[self.select_node].content;
+            ui.send_sync(
+                content,
+                TextMessage::Text(
                     graph
-                        .try_get(settings.node)
+                        .try_get_node(settings.node)
                         .map(|n| n.name().to_owned())
-                        .unwrap_or_else(|| String::from("<Unassigned>")),
+                        .unwrap_or_else(|_| String::from("<Unassigned>")),
                 ),
             );
 
@@ -402,10 +394,23 @@ pub enum ToolbarAction {
     SelectAnimation(ErasedHandle),
     PlayPause,
     Stop,
+    NewAnimation,
+    ShowBackgroundCurves(bool),
 }
 
 impl Toolbar {
     pub fn new(ctx: &mut BuildContext) -> Self {
+        let reimport_tooltip =
+            "Reimport Animation.\nImports an animation from external file (FBX/GLTF) and replaces \
+            content of the current animation. Use it if you need to keep references to the \
+            animation valid in some animation blending state machine, but just replace animation \
+            with some other.";
+        let import_tooltip =
+            "Import Animation.\nImports an animation from external file (FBX/GLTF) and adds it to \
+            the animation player.";
+        let rename_animation_tooltip = "Rename Selected Animation";
+        let add_animation_tooltip = "Add New Animation";
+
         let play_pause;
         let stop;
         let speed;
@@ -414,7 +419,6 @@ impl Toolbar {
         let remove_current_animation;
         let rename_current_animation;
         let clone_current_animation;
-        let animation_name;
         let preview;
         let time_slice_start;
         let time_slice_end;
@@ -423,205 +427,100 @@ impl Toolbar {
         let looping;
         let enabled;
         let root_motion;
-        let panel = BorderBuilder::new(
+        let show_background_curves;
+        let top_panel = BorderBuilder::new(
             WidgetBuilder::new()
                 .on_row(0)
                 .with_foreground(ctx.style.property(Style::BRUSH_LIGHT))
                 .with_child(
-                    StackPanelBuilder::new(
+                    WrapPanelBuilder::new(
                         WidgetBuilder::new()
                             .with_margin(Thickness::uniform(1.0))
                             .with_child({
-                                animation_name = TextBoxBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_width(100.0)
-                                        .with_margin(Thickness::uniform(1.0)),
-                                )
-                                .with_vertical_text_alignment(VerticalAlignment::Center)
-                                .with_text("New Animation")
-                                .build(ctx);
-                                animation_name
-                            })
-                            .with_child({
-                                add_animation = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_width(20.0)
-                                        .with_height(20.0)
-                                        .with_vertical_alignment(VerticalAlignment::Center)
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(
-                                            ctx,
-                                            "Add New Animation.\n\
-                                            Adds new empty animation with the name at \
-                                            the right text box.",
-                                        )),
-                                )
-                                .with_text("+")
-                                .build(ctx);
+                                add_animation = ImageButtonBuilder::default()
+                                    .with_image_color(Color::GREEN)
+                                    .with_image(load_image!("../../../resources/add.png"))
+                                    .with_tooltip(add_animation_tooltip)
+                                    .build_button(ctx);
                                 add_animation
                             })
                             .with_child({
-                                import = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(
-                                            ctx,
-                                            "Import Animation.\n\
-                                            Imports an animation from external file (FBX/GLTF) \
-                                            and adds it to the animation player.",
-                                        )),
-                                )
-                                .with_content(
-                                    ImageBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_width(18.0)
-                                            .with_height(18.0)
-                                            .with_margin(Thickness::uniform(1.0))
-                                            .with_background(
-                                                ctx.style.property(Style::BRUSH_BRIGHT),
-                                            ),
-                                    )
-                                    .with_opt_texture(load_image!("../../../resources/import.png"))
-                                    .build(ctx),
-                                )
-                                .build(ctx);
+                                import = ImageButtonBuilder::default()
+                                    .with_image_color(Color::PALE_TURQUOISE)
+                                    .with_image(load_image!("../../../resources/import.png"))
+                                    .with_tooltip(import_tooltip)
+                                    .build_button(ctx);
                                 import
-                            })
-                            .with_child({
-                                reimport = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(
-                                            ctx,
-                                            "Reimport Animation.\n\
-                                            Imports an animation from external file (FBX/GLTF) and \
-                                            replaces content of the current animation. Use it \
-                                            if you need to keep references to the animation valid \
-                                            in some animation blending state machine, but just \
-                                            replace animation with some other.",
-                                        )),
-                                )
-                                .with_content(
-                                    ImageBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_width(18.0)
-                                            .with_height(18.0)
-                                            .with_margin(Thickness::uniform(1.0))
-                                            .with_background(
-                                                ctx.style.property(Style::BRUSH_BRIGHT),
-                                            ),
-                                    )
-                                    .with_opt_texture(load_image!(
-                                        "../../../resources/reimport.png"
-                                    ))
-                                    .build(ctx),
-                                )
-                                .build(ctx);
-                                reimport
-                            })
-                            .with_child({
-                                rename_current_animation = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_enabled(false)
-                                        .with_width(20.0)
-                                        .with_height(20.0)
-                                        .with_vertical_alignment(VerticalAlignment::Center)
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(
-                                            ctx,
-                                            "Rename Selected Animation",
-                                        )),
-                                )
-                                .with_content(
-                                    ImageBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_width(18.0)
-                                            .with_height(18.0)
-                                            .with_margin(Thickness::uniform(1.0))
-                                            .with_background(
-                                                ctx.style.property(Style::BRUSH_BRIGHT),
-                                            ),
-                                    )
-                                    .with_opt_texture(load_image!("../../../resources/rename.png"))
-                                    .build(ctx),
-                                )
-                                .build(ctx);
-                                rename_current_animation
                             })
                             .with_child({
                                 animations = DropdownListBuilder::new(
                                     WidgetBuilder::new()
                                         .with_width(120.0)
-                                        .with_margin(Thickness::uniform(1.0)),
+                                        .with_margin(Thickness {
+                                            left: 10.0,
+                                            top: 1.0,
+                                            right: 1.0,
+                                            bottom: 1.0,
+                                        }),
                                 )
                                 .build(ctx);
                                 animations
                             })
                             .with_child({
-                                remove_current_animation = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_enabled(false)
-                                        .with_width(20.0)
-                                        .with_height(20.0)
-                                        .with_vertical_alignment(VerticalAlignment::Center)
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(
-                                            ctx,
-                                            "Remove Selected Animation",
-                                        )),
-                                )
-                                .with_content(make_cross(ctx, 14.0, 2.0))
-                                .build(ctx);
+                                reimport = ImageButtonBuilder::default()
+                                    .with_image_color(Color::DEEP_SKY_BLUE)
+                                    .with_image(load_image!("../../../resources/reimport.png"))
+                                    .with_tooltip(reimport_tooltip)
+                                    .build_button(ctx);
+                                reimport
+                            })
+                            .with_child({
+                                rename_current_animation = ImageButtonBuilder::default()
+                                    .with_image_color(Color::ORANGE)
+                                    .with_image(load_image!("../../../resources/rename.png"))
+                                    .with_tooltip(rename_animation_tooltip)
+                                    .build_button(ctx);
+                                rename_current_animation
+                            })
+                            .with_child({
+                                remove_current_animation = ImageButtonBuilder::default()
+                                    .with_image_color(Color::ORANGE_RED)
+                                    .with_image(load_image!("../../../resources/cross.png"))
+                                    .with_tooltip("Remove Selected Animation")
+                                    .build_button(ctx);
                                 remove_current_animation
                             })
                             .with_child({
-                                clone_current_animation = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_enabled(false)
-                                        .with_width(20.0)
-                                        .with_height(20.0)
-                                        .with_vertical_alignment(VerticalAlignment::Center)
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(
-                                            ctx,
-                                            "Clone Selected Animation",
-                                        )),
-                                )
-                                .with_content(
-                                    ImageBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_width(18.0)
-                                            .with_height(18.0)
-                                            .with_margin(Thickness::uniform(1.0))
-                                            .with_background(
-                                                ctx.style.property(Style::BRUSH_BRIGHT),
-                                            ),
-                                    )
-                                    .with_opt_texture(load_image!("../../../resources/copy.png"))
-                                    .build(ctx),
-                                )
-                                .build(ctx);
+                                clone_current_animation = ImageButtonBuilder::default()
+                                    .with_image_color(Color::LIGHT_GOLDEN_ROD_YELLOW)
+                                    .with_image(load_image!("../../../resources/copy.png"))
+                                    .with_tooltip("Clone Selected Animation")
+                                    .build_button(ctx);
                                 clone_current_animation
                             })
                             .with_child({
-                                looping = CheckBoxBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(
-                                        ctx,
+                                root_motion = ImageButtonBuilder::default()
+                                    .with_image(load_image!("../../../resources/root_motion.png"))
+                                    .with_tooltip("Root Motion Settings")
+                                    .build_button(ctx);
+                                root_motion
+                            })
+                            .with_child({
+                                looping = ImageButtonBuilder::default()
+                                    .with_image(load_image!("../../../resources/loop.png"))
+                                    .with_tooltip(
                                         "Animation looping. Looped animation will play infinitely.",
-                                    )),
-                                )
-                                .with_content(
-                                    TextBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_vertical_alignment(VerticalAlignment::Center),
                                     )
-                                    .with_text("Loop")
-                                    .build(ctx),
-                                )
-                                .build(ctx);
+                                    .build_toggle(ctx);
                                 looping
+                            })
+                            .with_child({
+                                show_background_curves = ImageButtonBuilder::default()
+                                    .with_is_toggled(true)
+                                    .with_image(load_image!("../../../resources/all_curves.png"))
+                                    .with_tooltip("Show Background Curves.")
+                                    .build_toggle(ctx);
+                                show_background_curves
                             })
                             .with_child({
                                 enabled = CheckBoxBuilder::new(
@@ -633,22 +532,66 @@ impl Toolbar {
                                         )),
                                 )
                                 .with_content(
-                                    TextBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_vertical_alignment(VerticalAlignment::Center),
-                                    )
-                                    .with_text("Enabled")
-                                    .build(ctx),
+                                    TextBuilder::new(WidgetBuilder::new())
+                                        .with_vertical_text_alignment(VerticalAlignment::Center)
+                                        .with_text("Enabled")
+                                        .build(ctx),
                                 )
                                 .build(ctx);
                                 enabled
+                            }),
+                    )
+                    .with_orientation(Orientation::Horizontal)
+                    .build(ctx),
+                ),
+        )
+        .with_corner_radius(3.0.into())
+        .with_stroke_thickness(Thickness::uniform(1.0).into())
+        .build(ctx)
+        .to_base();
+
+        let bottom_panel = BorderBuilder::new(
+            WidgetBuilder::new()
+                .on_row(1)
+                .with_foreground(ctx.style.property(Style::BRUSH_LIGHT))
+                .with_child(
+                    WrapPanelBuilder::new(
+                        WidgetBuilder::new()
+                            .with_margin(Thickness::uniform(1.0))
+                            .with_child({
+                                preview = ImageButtonBuilder::default()
+                                    .with_image(load_image!("../../../resources/eye.png"))
+                                    .with_tooltip("Preview")
+                                    .build_toggle(ctx);
+                                preview
+                            })
+                            .with_child({
+                                play_pause = ImageButtonBuilder::default()
+                                    .with_image_color(Color::GREEN)
+                                    .with_image(load_image!("../../../resources/play_pause.png"))
+                                    .with_tooltip("Play/Pause")
+                                    .build_button(ctx);
+                                play_pause
+                            })
+                            .with_child({
+                                stop = ImageButtonBuilder::default()
+                                    .with_image_color(Color::ORANGE_RED)
+                                    .with_image(load_image!("../../../resources/stop.png"))
+                                    .with_tooltip("Stop Playback")
+                                    .build_button(ctx);
+                                stop
                             })
                             .with_child(
                                 ImageBuilder::new(
                                     WidgetBuilder::new()
                                         .with_width(18.0)
                                         .with_height(18.0)
-                                        .with_margin(Thickness::uniform(1.0))
+                                        .with_margin(Thickness {
+                                            left: 10.0,
+                                            top: 1.0,
+                                            right: 1.0,
+                                            bottom: 1.0,
+                                        })
                                         .with_background(ctx.style.property(Style::BRUSH_BRIGHT)),
                                 )
                                 .with_opt_texture(load_image!("../../../resources/speed.png"))
@@ -658,7 +601,7 @@ impl Toolbar {
                                 speed = NumericUpDownBuilder::<f32>::new(
                                     WidgetBuilder::new()
                                         .with_enabled(false)
-                                        .with_width(50.0)
+                                        .with_width(60.0)
                                         .with_margin(Thickness::uniform(1.0))
                                         .with_tooltip(make_simple_tooltip(
                                             ctx,
@@ -674,7 +617,12 @@ impl Toolbar {
                                     WidgetBuilder::new()
                                         .with_width(18.0)
                                         .with_height(18.0)
-                                        .with_margin(Thickness::uniform(1.0))
+                                        .with_margin(Thickness {
+                                            left: 10.0,
+                                            top: 1.0,
+                                            right: 1.0,
+                                            bottom: 1.0,
+                                        })
                                         .with_background(ctx.style.property(Style::BRUSH_BRIGHT)),
                                 )
                                 .with_opt_texture(load_image!("../../../resources/time.png"))
@@ -684,7 +632,7 @@ impl Toolbar {
                                 time_slice_start = NumericUpDownBuilder::<f32>::new(
                                     WidgetBuilder::new()
                                         .with_enabled(false)
-                                        .with_width(50.0)
+                                        .with_width(60.0)
                                         .with_margin(Thickness::uniform(1.0))
                                         .with_tooltip(make_simple_tooltip(
                                             ctx,
@@ -711,128 +659,38 @@ impl Toolbar {
                                 .with_value(1.0)
                                 .build(ctx);
                                 time_slice_end
-                            })
-                            .with_child({
-                                root_motion =
-                                    ButtonBuilder::new(WidgetBuilder::new().with_tooltip(
-                                        make_simple_tooltip(ctx, "Root Motion Settings"),
-                                    ))
-                                    .with_text("RM")
-                                    .build(ctx);
-                                root_motion
-                            })
-                            .with_child({
-                                preview = CheckBoxBuilder::new(
-                                    WidgetBuilder::new().with_enabled(false).with_margin(
-                                        Thickness {
-                                            left: 10.0,
-                                            top: 1.0,
-                                            right: 5.0,
-                                            bottom: 1.0,
-                                        },
-                                    ),
-                                )
-                                .with_content(
-                                    TextBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_vertical_alignment(VerticalAlignment::Center),
-                                    )
-                                    .with_text("Preview")
-                                    .build(ctx),
-                                )
-                                .checked(Some(false))
-                                .build(ctx);
-                                preview
-                            })
-                            .with_child({
-                                play_pause = ButtonBuilder::new(
-                                    WidgetBuilder::new().with_enabled(false).with_margin(
-                                        Thickness {
-                                            left: 1.0,
-                                            top: 1.0,
-                                            right: 1.0,
-                                            bottom: 1.0,
-                                        },
-                                    ),
-                                )
-                                .with_content(
-                                    VectorImageBuilder::new(
-                                        WidgetBuilder::new()
-                                            .with_foreground(
-                                                ctx.style.property(Style::BRUSH_BRIGHT),
-                                            )
-                                            .with_tooltip(make_simple_tooltip(ctx, "Play/Pause")),
-                                    )
-                                    .with_primitives(vec![
-                                        Primitive::Triangle {
-                                            points: [
-                                                Vector2::new(0.0, 0.0),
-                                                Vector2::new(8.0, 8.0),
-                                                Vector2::new(0.0, 16.0),
-                                            ],
-                                        },
-                                        Primitive::RectangleFilled {
-                                            rect: Rect::new(10.0, 0.0, 4.0, 16.0),
-                                        },
-                                        Primitive::RectangleFilled {
-                                            rect: Rect::new(15.0, 0.0, 4.0, 16.0),
-                                        },
-                                    ])
-                                    .build(ctx),
-                                )
-                                .build(ctx);
-                                play_pause
-                            })
-                            .with_child({
-                                stop = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_enabled(false)
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_tooltip(make_simple_tooltip(ctx, "Stop Playback")),
-                                )
-                                .with_content(
-                                    VectorImageBuilder::new(
-                                        WidgetBuilder::new().with_foreground(
-                                            ctx.style.property(Style::BRUSH_BRIGHT),
-                                        ),
-                                    )
-                                    .with_primitives(vec![Primitive::RectangleFilled {
-                                        rect: Rect::new(0.0, 0.0, 16.0, 16.0),
-                                    }])
-                                    .build(ctx),
-                                )
-                                .build(ctx);
-                                stop
                             }),
                     )
                     .with_orientation(Orientation::Horizontal)
                     .build(ctx),
                 ),
         )
+        .with_corner_radius(3.0.into())
         .with_stroke_thickness(Thickness::uniform(1.0).into())
-        .build(ctx);
+        .build(ctx)
+        .to_base();
 
         let import_file_selector = FileSelectorBuilder::new(
             WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(400.0))
                 .open(false)
                 .with_title(WindowTitle::text("Select Animation To Import")),
         )
-        .with_filter(Filter::new(|p: &Path| {
+        .with_filter(
             // TODO: Here we allow importing only FBX and GLTF files, but they can contain
             // multiple animations and it might be good to also add animation selector
             // that will be used to select a particular animation to import.
-            p.is_dir()
-                || p.extension().is_some_and(|ext| {
-                    let ext = ext.to_string_lossy();
-                    ext.as_ref() == "fbx" || ext.as_ref() == "gltf" || ext.as_ref() == "glb"
-                })
-        }))
+            PathFilter::new()
+                .with_file_type(FileType::new_extension("fbx"))
+                .with_file_type(FileType::new_extension("gltf"))
+                .with_file_type(FileType::new_extension("glb")),
+        )
         .build(ctx);
 
         let root_motion_dropdown_area = RootMotionDropdownArea::new(ctx);
 
         Self {
-            panel,
+            top_panel,
+            bottom_panel,
             play_pause,
             stop,
             speed,
@@ -840,7 +698,7 @@ impl Toolbar {
             add_animation,
             rename_current_animation,
             remove_current_animation,
-            animation_name,
+            animation_name_input_box: Default::default(),
             preview,
             time_slice_start,
             time_slice_end,
@@ -855,18 +713,14 @@ impl Toolbar {
             root_motion,
             root_motion_dropdown_area,
             import_mode: ImportMode::Import,
+            rename_animation_input_box: Default::default(),
+            show_background_curves,
         }
     }
 
     pub fn destroy(self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::remove(
-            self.node_selector,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::remove(
-            self.import_file_selector,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.node_selector, WidgetMessage::Remove);
+        ui.send(self.import_file_selector, WidgetMessage::Remove);
         self.root_motion_dropdown_area.destroy(ui);
     }
 
@@ -882,53 +736,43 @@ impl Toolbar {
         selection: &AnimationSelection<N>,
     ) -> ToolbarAction
     where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
-        if let Some(animation) = animations.try_get(selection.animation) {
+        if let Ok(animation) = animations.try_get(selection.animation) {
             self.root_motion_dropdown_area
                 .handle_ui_message(message, graph, sender, ui, animation, root, selection);
         }
 
-        if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
-            if message.destination() == self.animations
-                && message.direction() == MessageDirection::FromWidget
-            {
-                let item = ui
-                    .node(self.animations)
-                    .query_component::<DropdownList>()
-                    .unwrap()
-                    .items[*index];
-                let animation = ui
-                    .node(item)
-                    .user_data_cloned::<Handle<Animation<Handle<N>>>>()
-                    .unwrap();
-                sender.do_command(ChangeSelectionCommand::new(Selection::new(
-                    AnimationSelection {
-                        animation_player: animation_player_handle,
-                        animation,
-                        entities: vec![],
-                    },
-                )));
-                return ToolbarAction::SelectAnimation(animation.into());
-            }
+        if let Some(DropdownListMessage::Selection(Some(index))) =
+            message.data_from(self.animations)
+        {
+            let item = ui[self.animations].items[*index];
+            let animation = ui
+                .node(item)
+                .user_data_cloned::<Handle<Animation<Handle<N>>>>()
+                .unwrap();
+            sender.do_command(ChangeSelectionCommand::new(Selection::new(
+                AnimationSelection {
+                    animation_player: animation_player_handle,
+                    animation,
+                    entities: vec![],
+                },
+            )));
+            return ToolbarAction::SelectAnimation(animation.into());
         } else if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.play_pause {
                 return ToolbarAction::PlayPause;
             } else if message.destination() == self.stop {
                 return ToolbarAction::Stop;
             } else if message.destination() == self.root_motion {
-                ui.send_message(PopupMessage::placement(
+                ui.send(
                     self.root_motion_dropdown_area.popup,
-                    MessageDirection::ToWidget,
-                    Placement::LeftBottom(self.root_motion),
-                ));
-                ui.send_message(PopupMessage::open(
-                    self.root_motion_dropdown_area.popup,
-                    MessageDirection::ToWidget,
-                ));
+                    PopupMessage::Placement(Placement::LeftBottom(self.root_motion.to_base())),
+                );
+                ui.send(self.root_motion_dropdown_area.popup, PopupMessage::Open);
             } else if message.destination() == self.remove_current_animation {
-                if animations.try_get(selection.animation).is_some() {
+                if animations.try_get(selection.animation).is_ok() {
                     let group = vec![
                         Command::new(ChangeSelectionCommand::new(Selection::new(
                             AnimationSelection {
@@ -946,26 +790,38 @@ impl Toolbar {
                     sender.do_command(CommandGroup::from(group));
                 }
             } else if message.destination() == self.rename_current_animation {
-                sender.do_command(SetAnimationNameCommand {
-                    node_handle: animation_player_handle,
-                    animation_handle: selection.animation,
-                    value: ui
-                        .node(self.animation_name)
-                        .query_component::<TextBox>()
-                        .unwrap()
-                        .text(),
-                });
-            } else if message.destination() == self.add_animation {
-                let mut animation = Animation::default();
-                animation.set_name(
-                    ui.node(self.animation_name)
-                        .query_component::<TextBox>()
-                        .unwrap()
-                        .text(),
+                self.rename_animation_input_box = InputBoxBuilder::new(
+                    WindowBuilder::new(WidgetBuilder::new().with_width(320.0).with_height(120.0))
+                        .with_title(WindowTitle::text("Rename Animation"))
+                        .open(false)
+                        .with_remove_on_close(true),
+                )
+                .with_text("Type the new name for the selected animation:")
+                .with_value(
+                    animations
+                        .try_get(selection.animation)
+                        .ok()
+                        .map(|a| a.name().to_string())
+                        .unwrap_or_else(|| "Animation".to_string()),
+                )
+                .build(&mut ui.build_ctx());
+                ui.send(
+                    self.rename_animation_input_box,
+                    InputBoxMessage::open_as_is(),
                 );
-                sender.do_command(AddAnimationCommand::new(animation_player_handle, animation));
+            } else if message.destination() == self.add_animation {
+                self.animation_name_input_box = InputBoxBuilder::new(
+                    WindowBuilder::new(WidgetBuilder::new().with_width(320.0).with_height(120.0))
+                        .with_title(WindowTitle::text("New Animation Name"))
+                        .open(false)
+                        .with_remove_on_close(true),
+                )
+                .with_text("Type the name for the new animation:")
+                .with_value("Animation".to_string())
+                .build(&mut ui.build_ctx());
+                ui.send(self.animation_name_input_box, InputBoxMessage::open_as_is());
             } else if message.destination() == self.clone_current_animation {
-                if let Some(animation) = animations.try_get(selection.animation) {
+                if let Ok(animation) = animations.try_get(selection.animation) {
                     let mut animation_clone = animation.clone();
                     animation_clone.set_name(format!("{} Copy", animation.name()));
 
@@ -975,28 +831,31 @@ impl Toolbar {
                     ));
                 }
             }
-        } else if let Some(CheckBoxMessage::Check(Some(checked))) = message.data() {
-            if message.direction() == MessageDirection::FromWidget {
-                if message.destination() == self.preview {
-                    return if *checked {
-                        ToolbarAction::EnterPreviewMode
-                    } else {
-                        ToolbarAction::LeavePreviewMode
-                    };
-                } else if message.destination() == self.looping {
-                    sender.do_command(SetAnimationLoopingCommand {
-                        node_handle: animation_player_handle,
-                        animation_handle: selection.animation,
-                        value: *checked,
-                    });
-                } else if message.destination() == self.enabled {
-                    sender.do_command(SetAnimationEnabledCommand {
-                        node_handle: animation_player_handle,
-                        animation_handle: selection.animation,
-                        value: *checked,
-                    });
-                }
-            }
+        } else if let Some(CheckBoxMessage::Check(Some(checked))) = message.data_from(self.enabled)
+        {
+            sender.do_command(SetAnimationEnabledCommand {
+                node_handle: animation_player_handle,
+                animation_handle: selection.animation,
+                value: *checked,
+            });
+        } else if let Some(ToggleButtonMessage::Toggled(toggled)) = message.data_from(self.looping)
+        {
+            sender.do_command(SetAnimationLoopingCommand {
+                node_handle: animation_player_handle,
+                animation_handle: selection.animation,
+                value: *toggled,
+            });
+        } else if let Some(ToggleButtonMessage::Toggled(toggled)) =
+            message.data_from(self.show_background_curves)
+        {
+            return ToolbarAction::ShowBackgroundCurves(*toggled);
+        } else if let Some(ToggleButtonMessage::Toggled(toggled)) = message.data_from(self.preview)
+        {
+            return if *toggled {
+                ToolbarAction::EnterPreviewMode
+            } else {
+                ToolbarAction::LeavePreviewMode
+            };
         } else if let Some(NumericUpDownMessage::<f32>::Value(value)) = message.data() {
             if message.direction() == MessageDirection::FromWidget {
                 if message.destination() == self.time_slice_start {
@@ -1023,6 +882,22 @@ impl Toolbar {
                     });
                 }
             }
+        } else if let Some(InputBoxMessage::Close(InputBoxResult::Ok(name))) =
+            message.data_from(self.rename_animation_input_box)
+        {
+            sender.do_command(SetAnimationNameCommand {
+                node_handle: animation_player_handle,
+                animation_handle: selection.animation,
+                value: name.clone(),
+            });
+        } else if let Some(InputBoxMessage::Close(InputBoxResult::Ok(name))) =
+            message.data_from(self.animation_name_input_box)
+        {
+            let mut animation = Animation::default();
+            animation.set_name(name);
+            animation.set_time_slice(0.0..1.0);
+            sender.do_command(AddAnimationCommand::new(animation_player_handle, animation));
+            return ToolbarAction::NewAnimation;
         }
 
         ToolbarAction::None
@@ -1040,8 +915,8 @@ impl Toolbar {
         resource_manager: &ResourceManager,
     ) where
         P: PrefabData<Graph = G> + AnimationSource<Node = N, SceneGraph = G, Prefab = P>,
-        G: SceneGraph<Node = N, Prefab = P>,
-        N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+        G: SceneGraph<NodeWrapper = N, Prefab = P>,
+        N: NodeWrapper<SceneGraph = G, ResourceData = P>,
     {
         if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.import || message.destination() == self.reimport {
@@ -1051,20 +926,33 @@ impl Toolbar {
                         .with_title(WindowTitle::text("Select a Target Node"))
                         .open(false),
                 )
+                .with_allowed_types(
+                    [AllowedType {
+                        id: TypeId::of::<N>(),
+                        name: std::any::type_name::<N>().to_string(),
+                    }]
+                    .into_iter()
+                    .collect(),
+                )
                 .build(&mut ui.build_ctx());
 
-                ui.send_message(NodeSelectorMessage::hierarchy(
+                ui.send(
                     self.node_selector,
-                    MessageDirection::ToWidget,
-                    HierarchyNode::from_scene_node(root, Handle::NONE, graph),
-                ));
+                    NodeSelectorMessage::Hierarchy(HierarchyNode::from_scene_node(
+                        root,
+                        Handle::NONE,
+                        graph,
+                    )),
+                );
 
-                ui.send_message(WindowMessage::open_modal(
+                ui.send(
                     self.node_selector,
-                    MessageDirection::ToWidget,
-                    true,
-                    true,
-                ));
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Center,
+                        modal: true,
+                        focus_content: true,
+                    },
+                );
 
                 if message.destination() == self.reimport {
                     self.import_mode = ImportMode::Reimport;
@@ -1072,25 +960,24 @@ impl Toolbar {
                     self.import_mode = ImportMode::Import;
                 }
             }
-        } else if let Some(NodeSelectorMessage::Selection(selected_nodes)) = message.data() {
-            if message.destination() == self.node_selector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                if let Some(first) = selected_nodes.first() {
-                    self.selected_import_root = first.handle;
+        } else if let Some(NodeSelectorMessage::Selection(selected_nodes)) =
+            message.data_from(self.node_selector)
+        {
+            if let Some(first) = selected_nodes.first() {
+                self.selected_import_root = first.handle;
 
-                    ui.send_message(WindowMessage::open_modal(
-                        self.import_file_selector,
-                        MessageDirection::ToWidget,
-                        true,
-                        true,
-                    ));
-                    ui.send_message(FileSelectorMessage::root(
-                        self.import_file_selector,
-                        MessageDirection::ToWidget,
-                        Some(std::env::current_dir().unwrap()),
-                    ));
-                }
+                ui.send(
+                    self.import_file_selector,
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Center,
+                        modal: true,
+                        focus_content: true,
+                    },
+                );
+                ui.send(
+                    self.import_file_selector,
+                    FileSelectorMessage::Root(Some(resource_manager.registry_folder())),
+                );
             }
         } else if let Some(FileSelectorMessage::Commit(path)) = message.data() {
             if message.destination() == self.import_file_selector {
@@ -1161,20 +1048,12 @@ impl Toolbar {
     }
 
     pub fn clear(&mut self, ui: &UserInterface) {
-        ui.send_message(DropdownListMessage::items(
-            self.animations,
-            MessageDirection::ToWidget,
-            vec![],
-        ));
+        ui.send_sync(self.animations, DropdownListMessage::Items(vec![]));
     }
 
     pub fn on_preview_mode_changed(&self, ui: &UserInterface, in_preview_mode: bool) {
         for widget in [self.play_pause, self.stop] {
-            ui.send_message(WidgetMessage::enabled(
-                widget,
-                MessageDirection::ToWidget,
-                in_preview_mode,
-            ));
+            ui.send(widget, WidgetMessage::Enabled(in_preview_mode));
         }
     }
 
@@ -1186,8 +1065,8 @@ impl Toolbar {
         ui: &mut UserInterface,
         in_preview_mode: bool,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper,
     {
         let new_items = animations
             .pair_iter()
@@ -1196,16 +1075,10 @@ impl Toolbar {
             })
             .collect();
 
-        send_sync_message(
-            ui,
-            DropdownListMessage::items(self.animations, MessageDirection::ToWidget, new_items),
-        );
-
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(
-                self.animations,
-                MessageDirection::ToWidget,
+        ui.send_sync(self.animations, DropdownListMessage::Items(new_items));
+        ui.send_sync(
+            self.animations,
+            DropdownListMessage::Selection(
                 animations
                     .pair_iter()
                     .position(|(h, _)| h == selection.animation),
@@ -1213,112 +1086,60 @@ impl Toolbar {
         );
 
         let mut selected_animation_valid = false;
-        if let Some(animation) = animations.try_get(selection.animation) {
+        if let Ok(animation) = animations.try_get(selection.animation) {
             self.root_motion_dropdown_area
                 .sync_to_model(animation, graph, ui);
 
             selected_animation_valid = true;
-            send_sync_message(
-                ui,
-                TextMessage::text(
-                    self.animation_name,
-                    MessageDirection::ToWidget,
-                    animation.name().to_string(),
-                ),
+
+            ui.send_sync(
+                self.time_slice_start,
+                NumericUpDownMessage::Value(animation.time_slice().start),
+            );
+            ui.send_sync(
+                self.time_slice_start,
+                NumericUpDownMessage::MaxValue(animation.time_slice().end),
             );
 
-            send_sync_message(
-                ui,
-                NumericUpDownMessage::value(
-                    self.time_slice_start,
-                    MessageDirection::ToWidget,
-                    animation.time_slice().start,
-                ),
+            ui.send_sync(
+                self.time_slice_end,
+                NumericUpDownMessage::Value(animation.time_slice().end),
             );
-            send_sync_message(
-                ui,
-                NumericUpDownMessage::max_value(
-                    self.time_slice_start,
-                    MessageDirection::ToWidget,
-                    animation.time_slice().end,
-                ),
+            ui.send_sync(
+                self.time_slice_end,
+                NumericUpDownMessage::MinValue(animation.time_slice().start),
             );
 
-            send_sync_message(
-                ui,
-                NumericUpDownMessage::value(
-                    self.time_slice_end,
-                    MessageDirection::ToWidget,
-                    animation.time_slice().end,
-                ),
+            ui.send_sync(self.speed, NumericUpDownMessage::Value(animation.speed()));
+            ui.send_sync(
+                self.looping,
+                ToggleButtonMessage::Toggled(animation.is_loop()),
             );
-            send_sync_message(
-                ui,
-                NumericUpDownMessage::min_value(
-                    self.time_slice_end,
-                    MessageDirection::ToWidget,
-                    animation.time_slice().start,
-                ),
-            );
-
-            send_sync_message(
-                ui,
-                NumericUpDownMessage::value(
-                    self.speed,
-                    MessageDirection::ToWidget,
-                    animation.speed(),
-                ),
-            );
-
-            send_sync_message(
-                ui,
-                CheckBoxMessage::checked(
-                    self.looping,
-                    MessageDirection::ToWidget,
-                    Some(animation.is_loop()),
-                ),
-            );
-
-            send_sync_message(
-                ui,
-                CheckBoxMessage::checked(
-                    self.enabled,
-                    MessageDirection::ToWidget,
-                    Some(animation.is_enabled()),
-                ),
+            ui.send_sync(
+                self.enabled,
+                CheckBoxMessage::Check(Some(animation.is_enabled())),
             );
         }
 
         for widget in [
-            self.preview,
-            self.speed,
-            self.rename_current_animation,
-            self.remove_current_animation,
-            self.time_slice_start,
-            self.time_slice_end,
-            self.clone_current_animation,
-            self.looping,
-            self.enabled,
-            self.root_motion,
+            self.preview.to_base::<UiNode>(),
+            self.speed.to_base(),
+            self.rename_current_animation.to_base(),
+            self.remove_current_animation.to_base(),
+            self.time_slice_start.to_base(),
+            self.time_slice_end.to_base(),
+            self.clone_current_animation.to_base(),
+            self.looping.to_base(),
+            self.enabled.to_base(),
+            self.root_motion.to_base(),
         ] {
-            send_sync_message(
-                ui,
-                WidgetMessage::enabled(
-                    widget,
-                    MessageDirection::ToWidget,
-                    selected_animation_valid,
-                ),
-            );
+            ui.send_sync(widget, WidgetMessage::Enabled(selected_animation_valid));
         }
 
         for widget in [self.play_pause, self.stop] {
-            send_sync_message(
-                ui,
-                WidgetMessage::enabled(
-                    widget,
-                    MessageDirection::ToWidget,
-                    selected_animation_valid && in_preview_mode,
-                ),
+            ui.send_sync(
+                widget,
+                WidgetMessage::Enabled(selected_animation_valid && in_preview_mode),
             );
         }
     }

@@ -34,9 +34,10 @@ use crate::{
     Thickness,
 };
 use bytemuck::{Pod, Zeroable};
-use fyrox_core::math::round_to_step;
+use fyrox_core::math::{round_to_step, OptionRect};
 use fyrox_material::MaterialResource;
 use fyrox_texture::TextureResource;
+use std::fmt::{Display, Formatter};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -100,6 +101,7 @@ impl Draw for ClippingGeometry {
 }
 
 impl ClippingGeometry {
+    #[inline]
     pub fn is_contains_point(&self, pos: Vector2<f32>) -> bool {
         for triangle in self.triangle_buffer.iter() {
             if let Some((va, vb, vc)) = self.triangle_points(triangle) {
@@ -112,6 +114,7 @@ impl ClippingGeometry {
         false
     }
 
+    #[inline]
     pub fn triangle_points(
         &self,
         triangle: &TriangleDefinition,
@@ -127,9 +130,9 @@ impl ClippingGeometry {
 pub struct Command {
     /// Clipping bounds, should be used for scissor-test. Screen-space.
     pub clip_bounds: Rect<f32>,
-    /// Total bounds of command's geometry. Screen-space.
+    /// Total bounds of command's geometry. Local space.
     pub bounds: Rect<f32>,
-    /// Brush defines visual appearance of rendered geometry.
+    /// Brush defines the visual appearance of rendered geometry.
     pub brush: Brush,
     pub texture: CommandTexture,
     pub triangles: Range<usize>,
@@ -137,9 +140,11 @@ pub struct Command {
     pub opacity: f32,
     /// A set of triangles that defines clipping region.
     pub clipping_geometry: Option<ClippingGeometry>,
+    pub transform: Matrix3<f32>,
 }
 
 pub trait Draw {
+    #[inline]
     fn push_vertex(&mut self, pos: Vector2<f32>, tex_coord: Vector2<f32>) {
         self.push_vertex_raw(Vertex::new(pos, tex_coord))
     }
@@ -150,6 +155,7 @@ pub trait Draw {
 
     fn last_vertex_index(&self) -> u32;
 
+    #[inline]
     fn push_triangle_multicolor(&mut self, vertices: [(Vector2<f32>, Color); 3]) {
         let index = self.last_vertex_index();
         for &(pos, color) in &vertices {
@@ -163,6 +169,7 @@ pub trait Draw {
         self.push_triangle(index, index + 1, index + 2);
     }
 
+    #[inline]
     fn push_triangle_filled(&mut self, vertices: [Vector2<f32>; 3]) {
         let index = self.last_vertex_index();
 
@@ -173,6 +180,7 @@ pub trait Draw {
         self.push_triangle(index, index + 1, index + 2);
     }
 
+    #[inline]
     fn push_line(&mut self, a: Vector2<f32>, b: Vector2<f32>, thickness: f32) {
         let index = self.last_vertex_index();
         let perp = get_line_thickness_vector(a, b, thickness);
@@ -185,6 +193,7 @@ pub trait Draw {
         self.push_triangle(index + 2, index + 1, index + 3);
     }
 
+    #[inline]
     fn push_rect(&mut self, rect: &Rect<f32>, thickness: f32) {
         let offset = thickness * 0.5;
 
@@ -209,6 +218,7 @@ pub trait Draw {
         self.push_line(left_bottom, left_top, thickness);
     }
 
+    #[inline]
     fn push_rect_vary(&mut self, rect: &Rect<f32>, thickness: Thickness) {
         let left_top = Vector2::new(rect.x() + thickness.left * 0.5, rect.y() + thickness.top);
         let right_top = Vector2::new(
@@ -240,6 +250,7 @@ pub trait Draw {
         self.push_line(left_bottom, left_top, thickness.left);
     }
 
+    #[inline]
     fn push_rect_filled(&mut self, rect: &Rect<f32>, tex_coords: Option<&[Vector2<f32>; 4]>) {
         let index = self.last_vertex_index();
         self.push_vertex(
@@ -263,6 +274,7 @@ pub trait Draw {
         self.push_triangle(index, index + 2, index + 3);
     }
 
+    #[inline]
     fn push_rect_multicolor(&mut self, rect: &Rect<f32>, colors: [Color; 4]) {
         let index = self.last_vertex_index();
         self.push_vertex_raw(Vertex {
@@ -290,6 +302,7 @@ pub trait Draw {
         self.push_triangle(index, index + 2, index + 3);
     }
 
+    #[inline]
     fn push_circle_filled(
         &mut self,
         origin: Vector2<f32>,
@@ -331,6 +344,7 @@ pub trait Draw {
         }
     }
 
+    #[inline]
     fn push_circle(
         &mut self,
         center: Vector2<f32>,
@@ -360,6 +374,7 @@ pub trait Draw {
         self.connect_as_line(start_vertex, last_vertex_index, true)
     }
 
+    #[inline]
     fn connect_as_line(&mut self, from: u32, to: u32, closed: bool) {
         if closed {
             let count = to - from;
@@ -383,6 +398,7 @@ pub trait Draw {
         }
     }
 
+    #[inline]
     fn push_arc(
         &mut self,
         center: Vector2<f32>,
@@ -398,6 +414,7 @@ pub trait Draw {
         self.connect_as_line(start_vertex, last_vertex_index, false)
     }
 
+    #[inline]
     fn push_arc_path_with_thickness(
         &mut self,
         center: Vector2<f32>,
@@ -431,6 +448,7 @@ pub trait Draw {
         }
     }
 
+    #[inline]
     fn push_arc_path(
         &mut self,
         center: Vector2<f32>,
@@ -457,11 +475,13 @@ pub trait Draw {
         }
     }
 
+    #[inline]
     fn push_line_path(&mut self, a: Vector2<f32>, b: Vector2<f32>) {
         self.push_vertex(a, Default::default());
         self.push_vertex(b, Default::default());
     }
 
+    #[inline]
     fn push_line_path_with_thickness(&mut self, a: Vector2<f32>, b: Vector2<f32>, thickness: f32) {
         let perp = get_line_thickness_vector(a, b, thickness);
         self.push_vertex(a - perp, Vector2::new(0.0, 0.0));
@@ -470,6 +490,7 @@ pub trait Draw {
         self.push_vertex(b + perp, Vector2::new(0.0, 1.0));
     }
 
+    #[inline]
     fn push_rounded_rect_filled(
         &mut self,
         rect: &Rect<f32>,
@@ -551,6 +572,7 @@ pub trait Draw {
         self.push_triangle(last_vertex_index, first_index, center_index);
     }
 
+    #[inline]
     fn push_rounded_rect(
         &mut self,
         rect: &Rect<f32>,
@@ -659,6 +681,7 @@ pub trait Draw {
         self.connect_as_line(start_index, last_vertex_index, true);
     }
 
+    #[inline]
     fn push_bezier(
         &mut self,
         p0: Vector2<f32>,
@@ -692,6 +715,7 @@ pub trait Draw {
         }
     }
 
+    #[inline]
     fn push_grid(&mut self, zoom: f32, cell_size: Vector2<f32>, grid_bounds: Rect<f32>) {
         let mut local_left_bottom = grid_bounds.left_top_corner();
         local_left_bottom.x = round_to_step(local_left_bottom.x, cell_size.x);
@@ -762,10 +786,12 @@ impl TransformStack {
         self.stack.len()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.stack.is_empty()
     }
 
+    #[inline]
     pub fn content(&self) -> Vec<Matrix3<f32>> {
         self.stack.clone()
     }
@@ -780,16 +806,81 @@ impl TransformStack {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RenderData {
+    pub vertex_buffer: Vec<Vertex>,
+    pub triangle_buffer: Vec<TriangleDefinition>,
+    pub command_buffer: Vec<Command>,
+}
+
+impl Display for RenderData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderData")
+            .field("Vertices Count: ", &self.vertex_buffer.len())
+            .field("Triangles Count: ", &self.triangle_buffer.len())
+            .field("Commands Count: ", &self.command_buffer.len())
+            .finish()
+    }
+}
+
+impl RenderData {
+    pub fn clear(&mut self) {
+        self.vertex_buffer.clear();
+        self.triangle_buffer.clear();
+        self.command_buffer.clear();
+    }
+
+    pub fn append(&mut self, other: &Self) {
+        let vertex_index_offset = self.vertex_buffer.len();
+        let triangle_index_offset = self.triangle_buffer.len();
+        self.vertex_buffer.extend_from_slice(&other.vertex_buffer);
+        for cmd in other.command_buffer.iter() {
+            let mut cmd_copy = cmd.clone();
+            cmd_copy.triangles.start += triangle_index_offset;
+            cmd_copy.triangles.end += triangle_index_offset;
+            self.command_buffer.push(cmd_copy);
+        }
+        for triangle in other.triangle_buffer.iter() {
+            self.triangle_buffer
+                .push(triangle.add(vertex_index_offset as u32));
+        }
+    }
+
+    #[inline]
+    pub fn triangle_points(
+        &self,
+        triangle: &TriangleDefinition,
+    ) -> Option<(&Vertex, &Vertex, &Vertex)> {
+        let a = self.vertex_buffer.get(triangle[0] as usize)?;
+        let b = self.vertex_buffer.get(triangle[1] as usize)?;
+        let c = self.vertex_buffer.get(triangle[2] as usize)?;
+        Some((a, b, c))
+    }
+
+    #[inline]
+    pub fn is_command_contains_point(&self, command: &Command, pos: Vector2<f32>) -> bool {
+        for i in command.triangles.clone() {
+            if let Some(triangle) = self.triangle_buffer.get(i) {
+                if let Some((va, vb, vc)) = self.triangle_points(triangle) {
+                    if math::is_point_inside_2d_triangle(pos, va.pos, vb.pos, vc.pos) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DrawingContext {
-    vertex_buffer: Vec<Vertex>,
-    triangle_buffer: Vec<TriangleDefinition>,
-    command_buffer: Vec<Command>,
+    pub render_data: RenderData,
     pub transform_stack: TransformStack,
     opacity_stack: Vec<f32>,
     triangles_to_commit: usize,
     pub style: StyleResource,
-    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// Amount of time (in seconds) that passed from the creation of the engine. Keep in mind that
     /// this value is **not** guaranteed to match real time. A user can change delta time with
     /// which the engine "ticks" and this delta time affects elapsed time.
     pub elapsed_time: f32,
@@ -805,34 +896,29 @@ fn get_line_thickness_vector(a: Vector2<f32>, b: Vector2<f32>, thickness: f32) -
 
 impl Draw for DrawingContext {
     #[inline(always)]
-    fn push_vertex_raw(&mut self, mut vertex: Vertex) {
-        vertex.pos = self
-            .transform_stack
-            .transform
-            .transform_point(&Point2::from(vertex.pos))
-            .coords;
-
-        self.vertex_buffer.push(vertex);
+    fn push_vertex_raw(&mut self, vertex: Vertex) {
+        self.render_data.vertex_buffer.push(vertex);
     }
 
     #[inline(always)]
     fn push_triangle(&mut self, a: u32, b: u32, c: u32) {
-        self.triangle_buffer.push(TriangleDefinition([a, b, c]));
+        self.render_data
+            .triangle_buffer
+            .push(TriangleDefinition([a, b, c]));
         self.triangles_to_commit += 1;
     }
 
     #[inline(always)]
     fn last_vertex_index(&self) -> u32 {
-        self.vertex_buffer.len() as u32
+        self.render_data.vertex_buffer.len() as u32
     }
 }
 
 impl DrawingContext {
+    #[inline]
     pub fn new(style: StyleResource) -> DrawingContext {
         DrawingContext {
-            vertex_buffer: Vec::new(),
-            triangle_buffer: Vec::new(),
-            command_buffer: Vec::new(),
+            render_data: RenderData::default(),
             triangles_to_commit: 0,
             opacity_stack: vec![1.0],
             transform_stack: Default::default(),
@@ -843,79 +929,93 @@ impl DrawingContext {
 
     #[inline]
     pub fn clear(&mut self) {
-        self.vertex_buffer.clear();
-        self.triangle_buffer.clear();
-        self.command_buffer.clear();
+        self.render_data.clear();
         self.opacity_stack.clear();
         self.opacity_stack.push(1.0);
         self.triangles_to_commit = 0;
     }
 
     #[inline]
+    pub fn copy_render_data_and_clear(&mut self, dest: &mut RenderData) {
+        dest.command_buffer.clear();
+        dest.command_buffer
+            .append(&mut self.render_data.command_buffer);
+
+        dest.vertex_buffer.clear();
+        dest.vertex_buffer
+            .append(&mut self.render_data.vertex_buffer);
+
+        dest.triangle_buffer.clear();
+        dest.triangle_buffer
+            .append(&mut self.render_data.triangle_buffer);
+
+        self.triangles_to_commit = 0;
+    }
+
+    pub fn append(&mut self, render_data: &RenderData) {
+        self.render_data.append(render_data);
+    }
+
+    #[inline]
     pub fn get_vertices(&self) -> &[Vertex] {
-        self.vertex_buffer.as_slice()
+        self.render_data.vertex_buffer.as_slice()
     }
 
     #[inline]
     pub fn get_triangles(&self) -> &[TriangleDefinition] {
-        self.triangle_buffer.as_slice()
+        self.render_data.triangle_buffer.as_slice()
     }
 
     #[inline]
     pub fn get_commands(&self) -> &Vec<Command> {
-        &self.command_buffer
+        &self.render_data.command_buffer
     }
 
+    #[inline]
     pub fn push_opacity(&mut self, opacity: f32) {
         self.opacity_stack.push(opacity);
     }
 
+    #[inline]
     pub fn pop_opacity(&mut self) {
         self.opacity_stack.pop().unwrap();
     }
 
+    #[inline]
     pub fn triangle_points(
         &self,
         triangle: &TriangleDefinition,
     ) -> Option<(&Vertex, &Vertex, &Vertex)> {
-        let a = self.vertex_buffer.get(triangle[0] as usize)?;
-        let b = self.vertex_buffer.get(triangle[1] as usize)?;
-        let c = self.vertex_buffer.get(triangle[2] as usize)?;
-        Some((a, b, c))
+        self.render_data.triangle_points(triangle)
     }
 
+    #[inline]
     pub fn is_command_contains_point(&self, command: &Command, pos: Vector2<f32>) -> bool {
-        for i in command.triangles.clone() {
-            if let Some(triangle) = self.triangle_buffer.get(i) {
-                if let Some((va, vb, vc)) = self.triangle_points(triangle) {
-                    if math::is_point_inside_2d_triangle(pos, va.pos, vb.pos, vc.pos) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
+        self.render_data.is_command_contains_point(command, pos)
     }
 
+    #[inline]
     fn pending_range(&self) -> Range<usize> {
-        if self.triangle_buffer.is_empty() {
+        if self.render_data.triangle_buffer.is_empty() {
             0..self.triangles_to_commit
         } else {
-            (self.triangle_buffer.len() - self.triangles_to_commit)..self.triangle_buffer.len()
+            (self.render_data.triangle_buffer.len() - self.triangles_to_commit)
+                ..self.render_data.triangle_buffer.len()
         }
     }
 
+    #[inline]
     fn bounds_of(&self, range: Range<usize>) -> Rect<f32> {
-        let mut bounds = Rect::new(f32::MAX, f32::MAX, 0.0, 0.0);
+        let mut bounds = OptionRect::default();
         for i in range {
-            for &k in self.triangle_buffer[i].as_ref() {
-                bounds.push(self.vertex_buffer[k as usize].pos);
+            for &k in self.render_data.triangle_buffer[i].as_ref() {
+                bounds.push(self.render_data.vertex_buffer[k as usize].pos);
             }
         }
-        bounds
+        bounds.unwrap_or_default()
     }
 
+    #[inline]
     pub fn commit(
         &mut self,
         clip_bounds: Rect<f32>,
@@ -929,7 +1029,7 @@ impl DrawingContext {
             let bounds = self.bounds_of(triangles.clone());
 
             let opacity = *self.opacity_stack.last().unwrap();
-            self.command_buffer.push(Command {
+            self.render_data.command_buffer.push(Command {
                 clip_bounds,
                 bounds,
                 brush,
@@ -938,11 +1038,13 @@ impl DrawingContext {
                 material: material.clone(),
                 opacity,
                 clipping_geometry,
+                transform: *self.transform_stack.transform(),
             });
             self.triangles_to_commit = 0;
         }
     }
 
+    #[inline]
     pub fn draw_text(
         &mut self,
         clip_bounds: Rect<f32>,

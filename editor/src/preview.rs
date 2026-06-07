@@ -18,41 +18,47 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::BaseSceneGraph;
-use crate::fyrox::scene::SceneRenderingOptions;
-use crate::fyrox::{
-    core::{
-        algebra::{UnitQuaternion, Vector2, Vector3},
-        color::Color,
-        math::aabb::AxisAlignedBoundingBox,
-        pool::Handle,
+use crate::{
+    fyrox::{
+        core::{
+            algebra::{UnitQuaternion, Vector2, Vector3},
+            color::Color,
+            pool::Handle,
+        },
+        graph::SceneGraph,
+        gui::{
+            button::{ButtonBuilder, ButtonMessage},
+            grid::{Column, GridBuilder, Row},
+            image::{Image, ImageBuilder, ImageMessage},
+            message::{CursorIcon, MouseButton, UiMessage},
+            stack_panel::StackPanelBuilder,
+            widget::{WidgetBuilder, WidgetMessage},
+            HorizontalAlignment, Orientation, Thickness, VerticalAlignment,
+        },
+        resource::{
+            model::{Model, ModelResourceExtension},
+            texture::{TextureKind, TextureResource, TextureResourceExtension},
+        },
+        scene::{
+            base::BaseBuilder,
+            camera::{CameraBuilder, FitParameters},
+            debug::Line,
+            light::{directional::DirectionalLightBuilder, BaseLightBuilder},
+            node::Node,
+            pivot::PivotBuilder,
+            transform::TransformBuilder,
+            Scene, SceneRenderingOptions,
+        },
     },
-    gui::{
-        button::{ButtonBuilder, ButtonMessage},
-        grid::{Column, GridBuilder, Row},
-        image::{Image, ImageBuilder, ImageMessage},
-        message::{CursorIcon, MessageDirection, MouseButton, UiMessage},
-        stack_panel::StackPanelBuilder,
-        widget::{WidgetBuilder, WidgetMessage},
-        HorizontalAlignment, Orientation, Thickness, UiNode, VerticalAlignment,
-    },
-    resource::{
-        model::{Model, ModelResourceExtension},
-        texture::{TextureKind, TextureResource, TextureResourceExtension},
-    },
-    scene::{
-        base::BaseBuilder,
-        camera::{CameraBuilder, Projection},
-        debug::Line,
-        light::{directional::DirectionalLightBuilder, BaseLightBuilder},
-        mesh::Mesh,
-        node::Node,
-        pivot::PivotBuilder,
-        transform::TransformBuilder,
-        Scene,
-    },
+    load_image, Engine,
 };
-use crate::{load_image, Engine};
+use fyrox::core::num_traits::Zero;
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::button::Button;
+use fyrox::gui::grid::Grid;
+use fyrox::gui::stack_panel::StackPanel;
+use fyrox::scene::camera::Camera;
+use fyrox::scene::pivot::Pivot;
 use std::path::Path;
 
 #[derive(Eq, PartialEq, Copy, Clone)]
@@ -64,12 +70,12 @@ enum Mode {
 
 pub struct PreviewPanel {
     scene: Handle<Scene>,
-    pub root: Handle<UiNode>,
-    frame: Handle<UiNode>,
-    camera_pivot: Handle<Node>,
-    fit: Handle<UiNode>,
-    hinge: Handle<Node>,
-    camera: Handle<Node>,
+    pub root: Handle<Grid>,
+    frame: Handle<Image>,
+    camera_pivot: Handle<Pivot>,
+    fit: Handle<Button>,
+    hinge: Handle<Pivot>,
+    pub camera: Handle<Camera>,
     prev_mouse_pos: Vector2<f32>,
     yaw: f32,
     pitch: f32,
@@ -77,7 +83,7 @@ pub struct PreviewPanel {
     mode: Mode,
     position: Vector3<f32>,
     model: Handle<Node>,
-    pub tools_panel: Handle<UiNode>,
+    pub tools_panel: Handle<StackPanel>,
 }
 
 impl PreviewPanel {
@@ -139,8 +145,8 @@ impl PreviewPanel {
 
         let camera;
         let hinge;
-        let camera_pivot = PivotBuilder::new(BaseBuilder::new().with_children(&[{
-            hinge = PivotBuilder::new(BaseBuilder::new().with_children(&[{
+        let camera_pivot = PivotBuilder::new(BaseBuilder::new().with_child({
+            hinge = PivotBuilder::new(BaseBuilder::new().with_child({
                 camera = CameraBuilder::new(
                     BaseBuilder::new().with_local_transform(
                         TransformBuilder::new()
@@ -154,10 +160,10 @@ impl PreviewPanel {
                 )
                 .build(&mut scene.graph);
                 camera
-            }]))
+            }))
             .build(&mut scene.graph);
             hinge
-        }]))
+        }))
         .build(&mut scene.graph);
 
         scene.graph.link_nodes(hinge, camera_pivot);
@@ -264,83 +270,77 @@ impl PreviewPanel {
     }
 
     pub fn fit_to_model(&mut self, scene: &mut Scene) {
-        let mut bounding_box = AxisAlignedBoundingBox::default();
-        for node in scene.graph.linear_iter() {
-            if let Some(mesh) = node.cast::<Mesh>() {
-                bounding_box.add_box(mesh.accurate_world_bounding_box(&scene.graph))
-            }
-        }
-
-        self.yaw = 0.0;
-        self.pitch = -45.0;
-
-        if let Projection::Perspective(proj) = scene.graph[self.camera].as_camera().projection() {
-            let fov = proj.fov;
-            self.position = bounding_box.center();
-            self.distance = (bounding_box.max - bounding_box.min).norm() * (fov * 0.5).tan();
+        let aabb = scene
+            .graph
+            .aabb_of_descendants(self.model, |_, _| true)
+            .unwrap_or_default();
+        let aspect_ratio = scene
+            .rendering_options
+            .render_target
+            .as_ref()
+            .and_then(|rt| rt.data_ref().kind().rectangle_size())
+            .map(|rs| rs.x as f32 / rs.y as f32)
+            .unwrap_or(1.0);
+        if let FitParameters::Perspective { distance, .. } =
+            scene.graph[self.camera].fit(&aabb, aspect_ratio, 1.1)
+        {
+            self.position = Default::default();
+            self.distance = distance;
         }
     }
 
     pub fn handle_message(&mut self, message: &UiMessage, engine: &mut Engine) {
         let scene = &mut engine.scenes[self.scene];
 
-        if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
-            if message.destination() == self.fit {
-                self.fit_to_model(scene);
-            }
+        if let Some(ButtonMessage::Click) = message.data_from(self.fit) {
+            self.fit_to_model(scene);
         }
 
-        if message.destination() == self.frame
-            && message.direction() == MessageDirection::FromWidget
-        {
-            if let Some(msg) = message.data::<WidgetMessage>() {
-                match *msg {
-                    WidgetMessage::MouseMove { pos, .. } => {
-                        let delta = pos - self.prev_mouse_pos;
-                        match self.mode {
-                            Mode::None => {}
-                            Mode::Move => {
-                                let pivot = &scene.graph[self.camera_pivot];
+        if let Some(msg) = message.data_from::<WidgetMessage>(self.frame) {
+            match *msg {
+                WidgetMessage::MouseMove { pos, .. } => {
+                    let delta = pos - self.prev_mouse_pos;
+                    match self.mode {
+                        Mode::None => {}
+                        Mode::Move => {
+                            let pivot = &scene.graph[self.camera_pivot];
 
-                                let side_vector = pivot.side_vector().normalize();
-                                let up_vector = pivot.up_vector().normalize();
+                            let side_vector = pivot.side_vector().normalize();
+                            let up_vector = pivot.up_vector().normalize();
 
-                                self.position +=
-                                    side_vector.scale(-delta.x) + up_vector.scale(delta.y);
-                            }
-                            Mode::Rotate => {
-                                self.yaw -= delta.x;
-                                self.pitch = (self.pitch - delta.y).clamp(-90.0, 90.0);
-                            }
+                            self.position += side_vector.scale(-delta.x) + up_vector.scale(delta.y);
                         }
-                        self.prev_mouse_pos = pos;
-                    }
-                    WidgetMessage::MouseDown { button, pos } => {
-                        self.prev_mouse_pos = pos;
-                        engine.user_interfaces.first_mut().capture_mouse(self.frame);
-                        if button == MouseButton::Left {
-                            self.mode = Mode::Rotate;
-                        } else if button == MouseButton::Middle {
-                            self.mode = Mode::Move;
+                        Mode::Rotate => {
+                            self.yaw -= delta.x;
+                            self.pitch = (self.pitch - delta.y).clamp(-90.0, 90.0);
                         }
                     }
-                    WidgetMessage::MouseUp { button, .. } => {
-                        if (button == MouseButton::Left || button == MouseButton::Middle)
-                            && self.mode != Mode::None
-                            && !message.handled()
-                        {
-                            engine.user_interfaces.first_mut().release_mouse_capture();
-                            self.mode = Mode::None;
-                        }
-                    }
-                    WidgetMessage::MouseWheel { amount, .. } => {
-                        let step = 0.1;
-                        let k = 1.0 - amount.signum() * step;
-
-                        self.distance = (self.distance * k).max(0.0);
-                    }
-                    _ => {}
+                    self.prev_mouse_pos = pos;
                 }
+                WidgetMessage::MouseDown { button, pos } => {
+                    self.prev_mouse_pos = pos;
+                    engine.user_interfaces.first_mut().capture_mouse(self.frame);
+                    if button == MouseButton::Left {
+                        self.mode = Mode::Rotate;
+                    } else if button == MouseButton::Middle {
+                        self.mode = Mode::Move;
+                    }
+                }
+                WidgetMessage::MouseUp { button, .. }
+                    if (button == MouseButton::Left || button == MouseButton::Middle)
+                        && self.mode != Mode::None
+                        && !message.handled() =>
+                {
+                    engine.user_interfaces.first_mut().release_mouse_capture();
+                    self.mode = Mode::None;
+                }
+                WidgetMessage::MouseWheel { amount, .. } => {
+                    let step = 0.1;
+                    let k = 1.0 - amount.signum() * step;
+
+                    self.distance = (self.distance * k).max(0.0);
+                }
+                _ => {}
             }
         }
 
@@ -396,32 +396,24 @@ impl PreviewPanel {
         } else {
             unreachable!();
         };
-        if let Some(frame) = engine
-            .user_interfaces
-            .first_mut()
-            .node(self.frame)
-            .cast::<Image>()
+
+        let frame = &engine.user_interfaces.first_mut()[self.frame];
+        let frame_size = frame.actual_local_size();
+        if !frame_size.is_zero()
+            && (rt_width != frame_size.x as u32 || rt_height != frame_size.y as u32)
         {
-            let frame_size = frame.actual_local_size();
-            if rt_width != frame_size.x as u32 || rt_height != frame_size.y as u32 {
-                let rt =
-                    TextureResource::new_render_target(frame_size.x as u32, frame_size.y as u32);
-                scene.rendering_options.render_target = Some(rt.clone());
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(ImageMessage::texture(
-                        self.frame,
-                        MessageDirection::ToWidget,
-                        Some(rt),
-                    ));
-            }
+            let rt = TextureResource::new_render_target(frame_size.x as u32, frame_size.y as u32);
+            scene.rendering_options.render_target = Some(rt.clone());
+            engine
+                .user_interfaces
+                .first()
+                .send(self.frame, ImageMessage::Texture(Some(rt)));
         }
     }
 
-    pub fn set_model(&mut self, model: Handle<Node>, engine: &mut Engine) {
+    pub fn set_model(&mut self, model: Handle<impl ObjectOrVariant<Node>>, engine: &mut Engine) {
         self.clear(engine);
-        self.model = model;
+        self.model = model.to_base();
         self.fit_to_model(&mut engine.scenes[self.scene])
     }
 
@@ -436,8 +428,8 @@ impl PreviewPanel {
     pub fn destroy(self, engine: &mut Engine) {
         engine
             .user_interfaces
-            .first_mut()
-            .send_message(WidgetMessage::remove(self.root, MessageDirection::ToWidget));
+            .first()
+            .send(self.root, WidgetMessage::Remove);
         engine.scenes.remove(self.scene);
     }
 }

@@ -50,11 +50,12 @@ use super::OptionTileRect;
 /// These transformations are useful in situations where positions are
 /// restricted to an orthogonal grid, as in a tile map.
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Visit, Reflect)]
+#[reflect(type_uuid = "fc588f6b-0f07-467c-af6c-c6b62ffc6063")]
 pub struct OrthoTransformation(i8);
 
 /// A map from `Vector2<i32>` to values. It can be transformed to flip and rotate the positions of the values.
 #[derive(Clone, Debug, Visit)]
-pub struct OrthoTransformMap<V> {
+pub struct OrthoTransformMap<V: Visit + Default> {
     transform: OrthoTransformation,
     map: FxHashMap<Vector2<i32>, V>,
 }
@@ -160,9 +161,9 @@ impl Display for OrthoTransformation {
             _ => unreachable!(),
         };
         if self.is_flipped() {
-            write!(f, "rotate({})(flipped)", rotation)
+            write!(f, "rotate({rotation})(flipped)")
         } else {
-            write!(f, "rotate({})", rotation)
+            write!(f, "rotate({rotation})")
         }
     }
 }
@@ -249,7 +250,7 @@ impl<V: Number + SimdPartialOrd + Add + AddAssign + Neg<Output = V> + Scalar> Or
     }
 }
 
-impl<V> OrthoTransformMap<V> {
+impl<V: Visit + Default> OrthoTransformMap<V> {
     /// Bounding rectangle the contains the keys.
     pub fn bounding_rect(&self) -> OptionTileRect {
         let mut result = OptionTileRect::default();
@@ -316,7 +317,7 @@ impl<V> OrthoTransformMap<V> {
     }
 }
 
-impl<V> Default for OrthoTransformMap<V> {
+impl<V: Visit + Default> Default for OrthoTransformMap<V> {
     fn default() -> Self {
         Self {
             transform: Default::default(),
@@ -325,7 +326,7 @@ impl<V> Default for OrthoTransformMap<V> {
     }
 }
 
-impl<V> OrthoTransform for OrthoTransformMap<V> {
+impl<V: Visit + Default> OrthoTransform for OrthoTransformMap<V> {
     fn x_flipped(self) -> Self {
         Self {
             transform: self.transform.x_flipped(),
@@ -459,7 +460,7 @@ mod tests {
         let v = Vector2::new(1.0, 0.5);
         let m = trans.matrix().to_homogeneous();
         let p = m.transform_point(&Point2::from(v)).coords;
-        assert_eq!(p, v.transformed(trans), "{}", trans);
+        assert_eq!(p, v.transformed(trans), "{trans}");
     }
     #[test]
     fn matrix() {

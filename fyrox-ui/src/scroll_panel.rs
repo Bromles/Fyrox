@@ -22,25 +22,22 @@
 //! from top-left corner. It is used to provide basic scrolling functionality. See [`ScrollPanel`] docs for more
 //! info and usage examples.
 
-#![allow(missing_docs)]
-
 use crate::{
     brush::Brush,
     core::{
         algebra::Vector2, color::Color, math::Rect, pool::Handle, reflect::prelude::*,
-        type_traits::prelude::*, visitor::prelude::*,
+        visitor::prelude::*,
     },
-    define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
-    message::{MessageDirection, UiMessage},
+    message::UiMessage,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
 };
 
-use fyrox_core::uuid_provider;
+use crate::message::MessageData;
+use fyrox_core::ok_or_return;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
-use std::ops::{Deref, DerefMut};
+use fyrox_graph::SceneGraph;
 
 /// A set of messages, that is used to modify the state of a scroll panel.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,23 +52,13 @@ pub enum ScrollPanelMessage {
     ScrollToEnd,
 }
 
-impl ScrollPanelMessage {
-    define_constructor!(
-        /// Creates [`ScrollPanelMessage::VerticalScroll`] message.
-        ScrollPanelMessage:VerticalScroll => fn vertical_scroll(f32), layout: false
-    );
-    define_constructor!(
-        /// Creates [`ScrollPanelMessage::HorizontalScroll`] message.
-        ScrollPanelMessage:HorizontalScroll => fn horizontal_scroll(f32), layout: false
-    );
-    define_constructor!(
-        /// Creates [`ScrollPanelMessage::BringIntoView`] message.
-        ScrollPanelMessage:BringIntoView => fn bring_into_view(Handle<UiNode>), layout: true
-    );
-    define_constructor!(
-        /// Creates [`ScrollPanelMessage::ScrollToEnd`] message.
-        ScrollPanelMessage:ScrollToEnd => fn scroll_to_end(), layout: true
-    );
+impl MessageData for ScrollPanelMessage {
+    fn need_perform_layout(&self) -> bool {
+        matches!(
+            self,
+            ScrollPanelMessage::BringIntoView(_) | ScrollPanelMessage::ScrollToEnd
+        )
+    }
 }
 
 /// Scroll panel widget is used to arrange its children widgets, so they can be offset by a certain amount of units
@@ -88,8 +75,9 @@ impl ScrollPanelMessage {
 /// #     widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::scroll_panel::ScrollPanel;
 /// #
-/// fn create_scroll_panel(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_scroll_panel(ctx: &mut BuildContext) -> Handle<ScrollPanel> {
 ///     ScrollPanelBuilder::new(
 ///         WidgetBuilder::new().with_child(
 ///             GridBuilder::new(
@@ -133,16 +121,8 @@ impl ScrollPanelMessage {
 ///     vertical: f32,
 ///     ui: &UserInterface,
 /// ) {
-///     ui.send_message(ScrollPanelMessage::horizontal_scroll(
-///         scroll_panel,
-///         MessageDirection::ToWidget,
-///         horizontal,
-///     ));
-///     ui.send_message(ScrollPanelMessage::vertical_scroll(
-///         scroll_panel,
-///         MessageDirection::ToWidget,
-///         vertical,
-///     ));
+///     ui.send(scroll_panel, ScrollPanelMessage::HorizontalScroll(horizontal));
+///     ui.send(scroll_panel, ScrollPanelMessage::VerticalScroll(vertical));
 /// }
 /// ```
 ///
@@ -160,15 +140,14 @@ impl ScrollPanelMessage {
 ///     child: Handle<UiNode>,
 ///     ui: &UserInterface,
 /// ) {
-///     ui.send_message(ScrollPanelMessage::bring_into_view(
-///         scroll_panel,
-///         MessageDirection::ToWidget,
-///         child,
-///     ))
+///     ui.send(scroll_panel, ScrollPanelMessage::BringIntoView(child))
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "1ab4936d-58c8-4cf7-b33c-4b56092f4826"
+)]
 pub struct ScrollPanel {
     /// Base widget of the scroll panel.
     pub widget: Widget,
@@ -186,6 +165,7 @@ impl ConstructorProvider<UiNode, UserInterface> for ScrollPanel {
             .with_variant("Scroll Panel", |ui| {
                 ScrollPanelBuilder::new(WidgetBuilder::new().with_name("Scroll Panel"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -193,8 +173,6 @@ impl ConstructorProvider<UiNode, UserInterface> for ScrollPanel {
 }
 
 crate::define_widget_deref!(ScrollPanel);
-
-uuid_provider!(ScrollPanel = "1ab4936d-58c8-4cf7-b33c-4b56092f4826");
 
 impl ScrollPanel {
     fn children_size(&self, ui: &UserInterface) -> Vector2<f32> {
@@ -207,49 +185,43 @@ impl ScrollPanel {
         children_size
     }
     fn bring_into_view(&self, ui: &UserInterface, handle: Handle<UiNode>) {
-        let Some(node_to_focus_ref) = ui.try_get(handle) else {
-            return;
-        };
         let mut parent = handle;
         let mut relative_position = Vector2::default();
         while parent.is_some() && parent != self.handle {
-            let node = ui.node(parent);
+            let node = ok_or_return!(ui.try_get_node(parent));
             relative_position += node.actual_local_position();
             parent = node.parent();
         }
         // This check is needed because it possible that given handle is not in
-        // sub-tree of current scroll panel.
+        // subtree of the current scroll panel.
         if parent != self.handle {
             return;
         }
-        let size = node_to_focus_ref.actual_local_size();
         let children_size = self.children_size(ui);
         let view_size = self.actual_local_size();
         // Check if requested item already in "view box", this will prevent weird "jumping" effect
         // when bring into view was requested on already visible element.
         if self.vertical_scroll_allowed
-            && (relative_position.y < 0.0 || relative_position.y + size.y > view_size.y)
+            && (relative_position.y < 0.0 || relative_position.y > view_size.y)
         {
             relative_position.y += self.scroll.y;
             let scroll_max = (children_size.y - view_size.y).max(0.0);
             relative_position.y = relative_position.y.clamp(0.0, scroll_max);
-            ui.send_message(ScrollPanelMessage::vertical_scroll(
+            ui.send(
                 self.handle,
-                MessageDirection::ToWidget,
-                relative_position.y,
-            ));
+                ScrollPanelMessage::VerticalScroll(relative_position.y),
+            );
         }
         if self.horizontal_scroll_allowed
-            && (relative_position.x < 0.0 || relative_position.x + size.x > view_size.x)
+            && (relative_position.x < 0.0 || relative_position.x > view_size.x)
         {
             relative_position.x += self.scroll.x;
             let scroll_max = (children_size.x - view_size.x).max(0.0);
             relative_position.x = relative_position.x.clamp(0.0, scroll_max);
-            ui.send_message(ScrollPanelMessage::horizontal_scroll(
+            ui.send(
                 self.handle,
-                MessageDirection::ToWidget,
-                relative_position.x,
-            ));
+                ScrollPanelMessage::HorizontalScroll(relative_position.x),
+            );
         }
     }
 }
@@ -313,7 +285,7 @@ impl Control for ScrollPanel {
     }
 
     fn draw(&self, drawing_context: &mut DrawingContext) {
-        // Emit transparent geometry so panel will receive mouse events.
+        // Emit transparent geometry so the panel will receive mouse events.
         drawing_context.push_rect_filled(&self.widget.bounding_rect(), None);
         drawing_context.commit(
             self.clip_bounds(),
@@ -344,18 +316,20 @@ impl Control for ScrollPanel {
                     ScrollPanelMessage::ScrollToEnd => {
                         let max_size = self.children_size(ui);
                         if self.vertical_scroll_allowed {
-                            ui.send_message(ScrollPanelMessage::vertical_scroll(
+                            ui.send(
                                 self.handle,
-                                MessageDirection::ToWidget,
-                                (max_size.y - self.actual_local_size().y).max(0.0),
-                            ));
+                                ScrollPanelMessage::VerticalScroll(
+                                    (max_size.y - self.actual_local_size().y).max(0.0),
+                                ),
+                            );
                         }
                         if self.horizontal_scroll_allowed {
-                            ui.send_message(ScrollPanelMessage::horizontal_scroll(
+                            ui.send(
                                 self.handle,
-                                MessageDirection::ToWidget,
-                                (max_size.x - self.actual_local_size().x).max(0.0),
-                            ));
+                                ScrollPanelMessage::HorizontalScroll(
+                                    (max_size.x - self.actual_local_size().x).max(0.0),
+                                ),
+                            );
                         }
                     }
                 }
@@ -402,13 +376,13 @@ impl ScrollPanelBuilder {
     }
 
     /// Finishes scroll panel building and adds it to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(UiNode::new(ScrollPanel {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<ScrollPanel> {
+        ctx.add(ScrollPanel {
             widget: self.widget_builder.build(ctx),
             scroll: self.scroll_value,
             vertical_scroll_allowed: self.vertical_scroll_allowed.unwrap_or(true),
             horizontal_scroll_allowed: self.horizontal_scroll_allowed.unwrap_or(false),
-        }))
+        })
     }
 }
 

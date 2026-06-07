@@ -26,7 +26,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     text::TextMessage,
@@ -49,8 +49,8 @@ impl PropertyEditorDefinition for StringPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<String>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: TextBoxBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            TextBoxBuilder::new(
                 WidgetBuilder::new()
                     .with_min_size(Vector2::new(0.0, 17.0))
                     .with_margin(Thickness::uniform(1.0)),
@@ -60,7 +60,7 @@ impl PropertyEditorDefinition for StringPropertyEditorDefinition {
             .with_text(value)
             .with_vertical_text_alignment(VerticalAlignment::Center)
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -68,10 +68,9 @@ impl PropertyEditorDefinition for StringPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<String>()?;
-        Ok(Some(TextMessage::text(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            TextMessage::Text(value.clone()),
         )))
     }
 
@@ -80,7 +79,7 @@ impl PropertyEditorDefinition for StringPropertyEditorDefinition {
             if let Some(TextMessage::Text(value)) = ctx.message.data::<TextMessage>() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }

@@ -23,9 +23,8 @@ use crate::{
     brush::Brush,
     core::{
         algebra::SVector, color::Color, num_traits, pool::Handle, reflect::prelude::*,
-        type_traits::prelude::*, visitor::prelude::*,
+        visitor::prelude::*,
     },
-    define_constructor,
     grid::{Column, GridBuilder, Row},
     message::{MessageDirection, UiMessage},
     numeric::{NumericType, NumericUpDownBuilder, NumericUpDownMessage},
@@ -33,6 +32,9 @@ use crate::{
     BuildContext, Control, Thickness, UiNode, UserInterface, Widget,
 };
 
+use crate::border::Border;
+use crate::message::MessageData;
+use crate::numeric::NumericUpDown;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut};
 
@@ -45,7 +47,7 @@ fn make_numeric_input<T: NumericType>(
     step: T,
     editable: bool,
     precision: usize,
-) -> Handle<UiNode> {
+) -> Handle<NumericUpDown<T>> {
     NumericUpDownBuilder::new(
         WidgetBuilder::new()
             .on_row(0)
@@ -66,7 +68,7 @@ fn make_numeric_input<T: NumericType>(
     .build(ctx)
 }
 
-pub fn make_mark(ctx: &mut BuildContext, column: usize, color: Color) -> Handle<UiNode> {
+pub fn make_mark(ctx: &mut BuildContext, column: usize, color: Color) -> Handle<Border> {
     BorderBuilder::new(
         WidgetBuilder::new()
             .on_row(0)
@@ -87,22 +89,19 @@ where
 {
     Value(SVector<T, D>),
 }
+impl<T: NumericType, const D: usize> MessageData for VecEditorMessage<T, D> {}
 
-impl<T, const D: usize> VecEditorMessage<T, D>
-where
-    T: NumericType,
-{
-    define_constructor!(VecEditorMessage:Value => fn value(SVector<T, D>), layout: false);
-}
-
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "0332144f-c70e-456a-812b-f9b89980d2ba"
+)]
 pub struct VecEditor<T, const D: usize>
 where
     T: NumericType,
 {
     pub widget: Widget,
-    pub fields: Vec<Handle<UiNode>>,
+    pub fields: Vec<Handle<NumericUpDown<T>>>,
     #[reflect(hidden)]
     #[visit(skip)]
     pub value: SVector<T, D>,
@@ -127,6 +126,7 @@ impl<T: NumericType, const D: usize> ConstructorProvider<UiNode, UserInterface>
                 |ui| {
                     VecEditorBuilder::<T, D>::new(WidgetBuilder::new().with_name("Vec Editor"))
                         .build(&mut ui.build_ctx())
+                        .to_base()
                         .into()
                 },
             )
@@ -170,38 +170,6 @@ where
     }
 }
 
-// TODO: Is 16 enough?
-const DIM_UUIDS: [Uuid; 16] = [
-    uuid!("11ec6ec2-9780-4dbe-827a-935cb9ec5bb0"),
-    uuid!("af532488-8833-443a-8ece-d8380e5ad148"),
-    uuid!("6738154a-9663-4628-bb9d-f61d453eafcd"),
-    uuid!("448dab8c-b4e6-478e-a704-ea0b0db628aa"),
-    uuid!("67246977-8802-4e72-a19f-6e4f60b6eced"),
-    uuid!("f711a9f8-288a-4a28-b30e-e7bcfdf26ab0"),
-    uuid!("c92ac3ad-5dc5-41dd-abbd-7fb9aacb9a5f"),
-    uuid!("88d9a035-4424-40d2-af62-f701025bd767"),
-    uuid!("dda09036-18d8-40bc-ae9d-1a69f45e2ba0"),
-    uuid!("b6fe9585-6ebc-4b4d-be66-484b4d7b3d5b"),
-    uuid!("03c41033-e8fe-420d-b246-e7c9dcd7c01b"),
-    uuid!("14ea7e95-0f94-4b15-a53c-97d7d2e58d4e"),
-    uuid!("0149f666-33cf-4e39-b4bd-58502994b162"),
-    uuid!("abb9f691-0958-464b-a37d-a3336b4d33f9"),
-    uuid!("6f37cfd5-9bec-40ec-9dbc-e532d43b81b7"),
-    uuid!("fa786077-95b9-4e7c-9268-7d0314c005ba"),
-];
-
-impl<T: NumericType, const D: usize> TypeUuidProvider for VecEditor<T, D> {
-    fn type_uuid() -> Uuid {
-        combine_uuids(
-            combine_uuids(
-                uuid!("0332144f-c70e-456a-812b-f9b89980d2ba"),
-                T::type_uuid(),
-            ),
-            DIM_UUIDS[D],
-        )
-    }
-}
-
 impl<T, const D: usize> Control for VecEditor<T, D>
 where
     T: NumericType,
@@ -216,11 +184,7 @@ where
                     if message.destination() == *field {
                         let mut new_value = self.value;
                         new_value[i] = value;
-                        ui.send_message(VecEditorMessage::value(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                            new_value,
-                        ));
+                        ui.send(self.handle(), VecEditorMessage::Value(new_value));
                     }
                 }
             }
@@ -239,17 +203,13 @@ where
 
                     if *current != new {
                         *current = new;
-                        ui.send_message(NumericUpDownMessage::value(
-                            editor,
-                            MessageDirection::ToWidget,
-                            new,
-                        ));
+                        ui.send(editor, NumericUpDownMessage::Value(new));
                         changed = true;
                     }
                 }
 
                 if changed {
-                    ui.send_message(message.reverse());
+                    ui.try_send_response(message);
                 }
             }
         }
@@ -315,7 +275,7 @@ where
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<VecEditor<T, D>> {
         let mut fields = Vec::new();
         let mut children = Vec::new();
         let mut columns = Vec::new();
@@ -330,11 +290,9 @@ where
         ];
 
         for i in 0..D {
-            children.push(make_mark(
-                ctx,
-                i * 2,
-                colors.get(i).cloned().unwrap_or(Color::ORANGE),
-            ));
+            children.push(
+                make_mark(ctx, i * 2, colors.get(i).cloned().unwrap_or(Color::ORANGE)).to_base(),
+            );
 
             let field = make_numeric_input(
                 ctx,
@@ -346,7 +304,7 @@ where
                 self.editable,
                 self.precision,
             );
-            children.push(field);
+            children.push(field.to_base());
             fields.push(field);
 
             columns.push(Column::auto());
@@ -367,7 +325,7 @@ where
             step: self.step,
         };
 
-        ctx.add_node(UiNode::new(node))
+        ctx.add(node)
     }
 }
 

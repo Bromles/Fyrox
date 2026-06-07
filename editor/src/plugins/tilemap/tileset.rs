@@ -24,6 +24,7 @@
 
 use super::{commands::*, *};
 use crate::{
+    asset::preview::cache::IconRequest,
     command::{Command, CommandGroup},
     fyrox::{
         asset::manager::ResourceManager,
@@ -31,30 +32,31 @@ use crate::{
         gui::{
             border::BorderBuilder,
             brush::Brush,
-            button::Button,
-            button::ButtonMessage,
-            color::{ColorFieldBuilder, ColorFieldMessage},
+            button::{Button, ButtonMessage},
+            color::{ColorField, ColorFieldBuilder, ColorFieldMessage},
             decorator::DecoratorMessage,
-            grid::SizeMode,
-            grid::{Column, GridBuilder, Row},
+            grid::{Column, Grid, GridBuilder, Row, SizeMode},
             message::{MessageDirection, UiMessage},
             scroll_viewer::ScrollViewerBuilder,
             stack_panel::StackPanelBuilder,
             tab_control::{TabControl, TabControlBuilder, TabControlMessage, TabDefinition},
-            text::TextBuilder,
-            text::TextMessage,
+            text::{Text, TextBuilder, TextMessage},
             widget::{WidgetBuilder, WidgetMessage},
-            window::{WindowBuilder, WindowMessage, WindowTitle},
+            window::{Window, WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
             BuildContext, Thickness, UiNode, UserInterface,
         },
-        scene::tilemap::{tileset::TileSetRef, TileBook, TileDefinitionHandle},
+        scene::tilemap::{
+            brush::TileMapBrushResource, tileset::TileSetRef, TileBook, TileDefinitionHandle,
+        },
     },
     message::MessageSender,
-    plugins::inspector::editors::resource::{ResourceFieldBuilder, ResourceFieldMessage},
+    plugins::inspector::editors::resource::{
+        ResourceField, ResourceFieldBuilder, ResourceFieldMessage,
+    },
 };
-use fyrox::scene::tilemap::brush::TileMapBrushResource;
 use macro_tab::MacroTab;
 use palette::{PaletteWidgetBuilder, DEFAULT_MATERIAL_COLOR};
+use std::sync::mpsc::Sender;
 
 const TAB_MARGIN: Thickness = Thickness {
     left: 10.0,
@@ -62,13 +64,16 @@ const TAB_MARGIN: Thickness = Thickness {
     right: 10.0,
     bottom: 2.0,
 };
-
+const TILES_TAB_UUID: Uuid = uuid!("63e4038a-be27-40cf-8140-88e5de36203d");
+const PROPERTIES_TAB_UUID: Uuid = uuid!("504d0f49-1ce3-48dd-9714-5cf369b9634e");
+const COLLISION_TAB_UUID: Uuid = uuid!("80558bb3-ffca-44c4-b424-1d2c21acae7d");
+const MACROS_TAB_UUID: Uuid = uuid!("67cb5962-a1c9-446b-b3cb-c112e2ca2f62");
 const DEFAULT_PAGE: Vector2<i32> = Vector2::new(0, 0);
 
 /// A window for editing tile sets and tile map brushes.
 pub struct TileSetEditor {
     /// The window that contains the tile set editor.
-    pub window: Handle<UiNode>,
+    pub window: Handle<Window>,
     /// The state that is shared by many tile editing objects,
     /// such as palette widgets that display the tiles,
     /// the tile map control panel that allows the user to switch
@@ -79,32 +84,32 @@ pub struct TileSetEditor {
     tile_book: TileBook,
     /// The field that controls the tint of the background material on tile atlas pages.
     /// This tint allows the background material to be visually distinguished from actual tiles.
-    color_field: Handle<UiNode>,
+    color_field: Handle<ColorField>,
     /// A text widget showing the coordinates of the currently selected cells.
-    cell_position: Handle<UiNode>,
+    cell_position: Handle<Text>,
     /// The control that allows the editor to switch between the tiles tab,
     /// the properties tab, and the colliders tabl.
-    tab_control: Handle<UiNode>,
+    tab_control: Handle<TabControl>,
     /// The palette widget for the page icons. It is used to select which page to edit.
-    pages_palette: Handle<UiNode>,
+    pages_palette: Handle<PaletteWidget>,
     /// The palette widget for the actual tiles. This is the main work area of the editor.
-    tiles_palette: Handle<UiNode>,
+    tiles_palette: Handle<PaletteWidget>,
     /// A button to switch to the pick tool.
-    pick_button: Handle<UiNode>,
+    pick_button: Handle<Button>,
     /// A button to open the tile map control panel.
     /// It can sometimes be useful while editing a tile set or brush.
-    open_control: Handle<UiNode>,
+    open_control: Handle<Button>,
     /// A button to deleted the selected tiles or pages.
-    remove: Handle<UiNode>,
+    remove: Handle<Button>,
     /// A button to select all the pages of the current resource.
-    all_pages: Handle<UiNode>,
+    all_pages: Handle<Button>,
     /// A button to select all the tiles of the current page.
-    all_tiles: Handle<UiNode>,
+    all_tiles: Handle<Button>,
     /// When editing a brush, this is the area that allows the user to choose
     /// the tile set for the brush.
-    tile_set_selector: Handle<UiNode>,
+    tile_set_selector: Handle<Grid>,
     /// This is the resource field that lets the user select the tile set for a brush.
-    tile_set_field: Handle<UiNode>,
+    tile_set_field: Handle<ResourceField<TileSet>>,
     /// This is the area that shows the data for the currently selected tiles.
     tile_inspector: TileInspector,
     /// The tab that allows users to add, remove, and edit property layers.
@@ -120,11 +125,18 @@ pub struct TileSetEditor {
     brush_macro_cell_sets: MacroCellSetListRef,
 }
 
-fn make_tab(name: &str, content: Handle<UiNode>, ctx: &mut BuildContext) -> TabDefinition {
+fn make_tab(
+    uuid: Uuid,
+    name: &str,
+    content: Handle<UiNode>,
+    ctx: &mut BuildContext,
+) -> TabDefinition {
     TabDefinition {
+        uuid,
         header: TextBuilder::new(WidgetBuilder::new().with_margin(TAB_MARGIN))
             .with_text(name)
-            .build(ctx),
+            .build(ctx)
+            .to_base(),
         content,
         can_be_closed: false,
         user_data: None,
@@ -137,7 +149,7 @@ fn make_button(
     row: usize,
     column: usize,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_row(row)
@@ -150,7 +162,7 @@ fn make_button(
     .build(ctx)
 }
 
-fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<Text> {
     TextBuilder::new(WidgetBuilder::new())
         .with_text(name)
         .build(ctx)
@@ -198,6 +210,7 @@ impl TileSetEditor {
         macro_list: BrushMacroListRef,
         sender: MessageSender,
         resource_manager: ResourceManager,
+        icon_request_sender: Sender<IconRequest>,
         ctx: &mut BuildContext,
     ) -> Self {
         let mut brush_macro_cell_sets = MacroCellSetList::default();
@@ -212,7 +225,7 @@ impl TileSetEditor {
         let tile_set_field =
             ResourceFieldBuilder::<TileSet>::new(WidgetBuilder::new().on_column(1), sender.clone())
                 .with_resource(tile_book.get_tile_set())
-                .build(ctx, resource_manager.clone());
+                .build(ctx, icon_request_sender.clone(), resource_manager.clone());
         let tile_set_selector = GridBuilder::new(
             WidgetBuilder::new()
                 .with_visibility(tile_book.is_brush())
@@ -318,6 +331,7 @@ impl TileSetEditor {
             tiles_palette,
             tile_book.clone(),
             sender,
+            icon_request_sender,
             resource_manager.clone(),
             ctx,
         );
@@ -404,10 +418,25 @@ impl TileSetEditor {
         let colliders_tab = CollidersTab::new(tile_book.clone(), ctx);
         let macros_tab = MacroTab::new(macro_list.clone(), tile_book.clone(), ctx);
         let tab_control = TabControlBuilder::new(WidgetBuilder::new())
-            .with_tab(make_tab("Tiles", tile_tab, ctx))
-            .with_tab(make_tab("Properties", properties_tab.handle(), ctx))
-            .with_tab(make_tab("Collision", colliders_tab.handle(), ctx))
-            .with_tab(make_tab("Macros", macros_tab.handle(), ctx))
+            .with_tab(make_tab(TILES_TAB_UUID, "Tiles", tile_tab.to_base(), ctx))
+            .with_tab(make_tab(
+                PROPERTIES_TAB_UUID,
+                "Properties",
+                properties_tab.handle(),
+                ctx,
+            ))
+            .with_tab(make_tab(
+                COLLISION_TAB_UUID,
+                "Collision",
+                colliders_tab.handle(),
+                ctx,
+            ))
+            .with_tab(make_tab(
+                MACROS_TAB_UUID,
+                "Macros",
+                macros_tab.handle(),
+                ctx,
+            ))
             .build(ctx);
 
         let window = WindowBuilder::new(WidgetBuilder::new().with_width(800.0).with_height(600.0))
@@ -419,14 +448,14 @@ impl TileSetEditor {
             .with_content(tab_control)
             .build(ctx);
 
-        ctx.sender()
-            .send(WindowMessage::open(
-                window,
-                MessageDirection::ToWidget,
-                true,
-                true,
-            ))
-            .unwrap();
+        ctx.inner().send(
+            window,
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
 
         let mut editor = Self {
             window,
@@ -476,11 +505,13 @@ impl TileSetEditor {
             self.brush_macro_cell_sets.lock().clear();
         }
         self.tile_inspector.set_tile_resource(tile_book.clone(), ui);
-        ui.send_message(WindowMessage::title(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            WindowTitle::text(tile_set_to_title(resource_manager, &tile_book)),
-        ));
+            WindowMessage::Title(WindowTitle::text(tile_set_to_title(
+                resource_manager,
+                &tile_book,
+            ))),
+        );
         let mut state = self.state.lock_mut("set_tile_resource");
         if state.selection_palette() == self.pages_palette
             || state.selection_palette() == self.tiles_palette
@@ -489,84 +520,60 @@ impl TileSetEditor {
         }
         drop(state);
         if let TileBook::Brush(brush) = &tile_book {
-            ui.send_message(ResourceFieldMessage::value(
+            ui.send(
                 self.tile_set_field,
-                MessageDirection::ToWidget,
-                brush.data_ref().tile_set(),
-            ));
+                ResourceFieldMessage::Value(brush.data_ref().tile_set()),
+            );
         }
         self.send_tabs_visible(tile_book.is_tile_set(), ui);
-        ui.send_message(WidgetMessage::visibility(
+        ui.send(
             self.tile_set_selector,
-            MessageDirection::ToWidget,
-            tile_book.is_brush(),
-        ));
-        ui.send_message(TabControlMessage::active_tab(
+            WidgetMessage::Visibility(tile_book.is_brush()),
+        );
+        ui.send(
             self.tab_control,
-            MessageDirection::ToWidget,
-            Some(0),
-        ));
+            TabControlMessage::ActiveTab(Some(TILES_TAB_UUID)),
+        );
         for palette in [self.pages_palette, self.tiles_palette] {
-            ui.send_message(PaletteMessage::set_page(
+            ui.send(
                 palette,
-                MessageDirection::ToWidget,
-                tile_book.clone(),
-                Some(Vector2::new(0, 0)),
-            ));
+                PaletteMessage::SetPage {
+                    source: tile_book.clone(),
+                    page: Some(Vector2::new(0, 0)),
+                },
+            );
         }
         self.sync_to_model(ui);
     }
 
     fn send_tabs_visible(&self, is_tile_set: bool, ui: &mut UserInterface) {
-        let tab_control = ui.node(self.tab_control).cast::<TabControl>().unwrap();
+        let tab_control = &ui[self.tab_control];
         let tabs = tab_control.headers_container;
-        let children = ui.node(tabs).children();
+        let children = ui[tabs].children();
         for &tab in &children[1..3] {
-            ui.send_message(WidgetMessage::visibility(
-                tab,
-                MessageDirection::ToWidget,
-                is_tile_set,
-            ));
+            ui.send(tab, WidgetMessage::Visibility(is_tile_set));
         }
-        ui.send_message(WidgetMessage::visibility(
-            children[3],
-            MessageDirection::ToWidget,
-            !is_tile_set,
-        ));
+        ui.send(children[3], WidgetMessage::Visibility(!is_tile_set));
     }
 
     /// Focus the editor on a particular tile and select that tile.
     pub fn set_position(&self, handle: TileDefinitionHandle, ui: &mut UserInterface) {
         for palette in [self.pages_palette, self.tiles_palette] {
-            ui.send_message(PaletteMessage::set_page(
+            ui.send(
                 palette,
-                MessageDirection::ToWidget,
-                self.tile_book.clone(),
-                Some(handle.page()),
-            ));
+                PaletteMessage::SetPage {
+                    source: self.tile_book.clone(),
+                    page: Some(handle.page()),
+                },
+            );
         }
-        ui.send_message(PaletteMessage::center(
-            self.pages_palette,
-            MessageDirection::ToWidget,
-            handle.page(),
-        ));
-        ui.send_message(PaletteMessage::center(
-            self.tiles_palette,
-            MessageDirection::ToWidget,
-            handle.tile(),
-        ));
-        ui.send_message(PaletteMessage::select_one(
-            self.tiles_palette,
-            MessageDirection::ToWidget,
-            handle.tile(),
-        ));
+        ui.send(self.pages_palette, PaletteMessage::Center(handle.page()));
+        ui.send(self.tiles_palette, PaletteMessage::Center(handle.tile()));
+        ui.send(self.tiles_palette, PaletteMessage::SelectOne(handle.tile()));
     }
 
     fn destroy(self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::remove(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.window, WidgetMessage::Remove);
     }
 
     fn cell_position(&self) -> String {
@@ -588,26 +595,15 @@ impl TileSetEditor {
     /// Update the widgets of this editor after the shared [`TileDrawState`] may have changed.
     pub fn sync_to_state(&mut self, ui: &mut UserInterface) {
         self.tile_inspector.sync_to_state(ui);
-        let decorator = *ui
-            .try_get_of_type::<Button>(self.pick_button)
-            .unwrap()
-            .decorator;
-        ui.send_message(DecoratorMessage::select(
+        let decorator = *ui[self.pick_button].decorator;
+        ui.send(
             decorator,
-            MessageDirection::ToWidget,
-            self.state.lock().drawing_mode == DrawingMode::Pick,
-        ));
+            DecoratorMessage::Select(self.state.lock().drawing_mode == DrawingMode::Pick),
+        );
         let cell_position = self.cell_position();
-        ui.send_message(TextMessage::text(
-            self.cell_position,
-            MessageDirection::ToWidget,
-            cell_position,
-        ));
+        ui.send(self.cell_position, TextMessage::Text(cell_position));
         for palette in [self.pages_palette, self.tiles_palette] {
-            ui.send_message(PaletteMessage::sync_to_state(
-                palette,
-                MessageDirection::ToWidget,
-            ));
+            ui.send(palette, PaletteMessage::SyncToState);
         }
     }
 
@@ -631,11 +627,7 @@ impl TileSetEditor {
         if let TileBook::Brush(brush) = &self.tile_book {
             let brush = brush.data_ref();
             let tile_set = brush.tile_set();
-            ui.send_message(ResourceFieldMessage::value(
-                self.tile_set_field,
-                MessageDirection::ToWidget,
-                tile_set,
-            ));
+            ui.send(self.tile_set_field, ResourceFieldMessage::Value(tile_set));
         }
     }
 
@@ -700,7 +692,7 @@ impl TileSetEditor {
                 ui.send_message(
                     message
                         .clone()
-                        .with_destination(self.tiles_palette)
+                        .with_destination(self.tiles_palette.to_base())
                         .with_direction(MessageDirection::ToWidget),
                 );
                 self.sync_to_state(ui);
@@ -709,11 +701,7 @@ impl TileSetEditor {
             if message.destination() == self.color_field
                 && message.direction() == MessageDirection::FromWidget
             {
-                ui.send_message(PaletteMessage::material_color(
-                    self.tiles_palette,
-                    MessageDirection::ToWidget,
-                    *color,
-                ));
+                ui.send(self.tiles_palette, PaletteMessage::MaterialColor(*color));
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.pick_button {
@@ -723,15 +711,9 @@ impl TileSetEditor {
             } else if message.destination() == self.remove {
                 self.do_delete_command(ui, sender);
             } else if message.destination() == self.all_tiles {
-                ui.send_message(PaletteMessage::select_all(
-                    self.tiles_palette,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.tiles_palette, PaletteMessage::SelectAll);
             } else if message.destination() == self.all_pages {
-                ui.send_message(PaletteMessage::select_all(
-                    self.pages_palette,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.pages_palette, PaletteMessage::SelectAll);
             }
         }
         Some(self)
@@ -749,10 +731,7 @@ impl TileSetEditor {
                 .collect::<Vec<_>>();
             sender.do_command(CommandGroup::from(commands).with_custom_name("Delete Pages"));
         } else if palette == self.tiles_palette {
-            ui.send_message(PaletteMessage::delete(
-                self.tiles_palette,
-                MessageDirection::ToWidget,
-            ));
+            ui.send(self.tiles_palette, PaletteMessage::Delete);
         }
     }
 

@@ -41,22 +41,24 @@
 use crate::{
     asset::{
         io::ResourceIo, manager::ResourceManager, options::ImportOptions, untyped::ResourceKind,
-        Resource, ResourceData, MODEL_RESOURCE_UUID,
+        Resource, ResourceData,
     },
     core::{
-        algebra::{UnitQuaternion, Vector3},
+        algebra::{Point3, UnitQuaternion, Vector3},
+        dyntype::DynTypeConstructorContainer,
         log::{Log, MessageKind},
+        math,
         pool::Handle,
         reflect::prelude::*,
         uuid::Uuid,
-        uuid_provider,
         variable::InheritableVariable,
+        visitor::error::VisitError,
         visitor::{Visit, VisitResult, Visitor},
-        NameProvider, TypeUuidProvider,
+        NameProvider,
     },
     engine::SerializationContext,
     generic_animation::AnimationContainer,
-    graph::{BaseSceneGraph, NodeHandleMap, NodeMapping, PrefabData, SceneGraph, SceneGraphNode},
+    graph::{NodeHandleMap, NodeMapping, NodeWrapper, PrefabData, SceneGraph},
     resource::fbx::{self, error::FbxError},
     scene::{
         animation::Animation, base::SceneNodeId, graph::Graph, node::Node, transform::Transform,
@@ -64,9 +66,7 @@ use crate::{
     },
 };
 use fxhash::FxHashMap;
-use fyrox_core::algebra::Point3;
-use fyrox_core::math;
-use fyrox_core::visitor::error::VisitError;
+use fyrox_core::pool::ObjectOrVariant;
 use fyrox_ui::{UiNode, UserInterface};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -76,11 +76,13 @@ use std::{
     sync::Arc,
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
+use uuid::uuid;
 
 pub mod loader;
 
 /// See module docs.
 #[derive(Debug, Clone, Visit, Reflect)]
+#[reflect(type_uuid = "44cd768f-b4ca-4804-a98c-0adf85577ada")]
 pub struct Model {
     #[visit(skip)]
     pub(crate) mapping: NodeMapping,
@@ -99,12 +101,6 @@ impl PrefabData for Model {
     #[inline]
     fn mapping(&self) -> NodeMapping {
         self.mapping
-    }
-}
-
-impl TypeUuidProvider for Model {
-    fn type_uuid() -> Uuid {
-        MODEL_RESOURCE_UUID
     }
 }
 
@@ -202,9 +198,9 @@ pub trait AnimationSource {
     /// Prefab type.
     type Prefab: PrefabData<Graph = Self::SceneGraph>;
     /// Scene graph type.
-    type SceneGraph: SceneGraph<Node = Self::Node, Prefab = Self::Prefab>;
+    type SceneGraph: SceneGraph<NodeWrapper = Self::Node, Prefab = Self::Prefab>;
     /// Scene node type.
-    type Node: SceneGraphNode<SceneGraph = Self::SceneGraph, ResourceData = Self::Prefab>;
+    type Node: NodeWrapper<SceneGraph = Self::SceneGraph, ResourceData = Self::Prefab>;
 
     /// Returns a reference to an inner graph.
     fn inner_graph(&self) -> &Self::SceneGraph;
@@ -241,7 +237,7 @@ pub trait AnimationSource {
         let model_graph = self.inner_graph();
         for src_node_ref in model_graph.linear_iter() {
             if let Some(src_animations) = src_node_ref
-                .component_ref::<InheritableVariable<AnimationContainer<Handle<Self::Node>>>>()
+                .self_or_field_ref::<InheritableVariable<AnimationContainer<Handle<Self::Node>>>>()
             {
                 for src_anim in src_animations.iter() {
                     let mut anim_copy = src_anim.clone();
@@ -314,7 +310,7 @@ pub trait AnimationSource {
 
         let dest_animations = graph
             .node_mut(dest_animation_player)
-            .component_mut::<InheritableVariable<AnimationContainer<Handle<Self::Node>>>>()
+            .self_or_field_mut::<InheritableVariable<AnimationContainer<Handle<Self::Node>>>>()
             .unwrap();
 
         for animation in animations {
@@ -338,7 +334,7 @@ pub trait AnimationSource {
         self_kind: ResourceKind,
     ) -> Vec<Handle<fyrox_animation::Animation<Handle<Self::Node>>>> {
         if let Some((animation_player, _)) = graph.find(root, &mut |n| {
-            n.component_ref::<InheritableVariable<AnimationContainer<Handle<Self::Node>>>>()
+            n.self_or_field_ref::<InheritableVariable<AnimationContainer<Handle<Self::Node>>>>()
                 .is_some()
         }) {
             self.retarget_animations_to_player(root, animation_player, graph, self_kind)
@@ -353,7 +349,8 @@ pub type ModelResource = Resource<Model>;
 
 /// Extension trait for model resources.
 pub trait ModelResourceExtension: Sized {
-    /// Tries to instantiate model from given resource.
+    /// Tries to instantiate model from given resource. This is for internal use only and does not
+    /// set `is_resource_instance_root`.
     fn instantiate_from<Pre>(
         model: ModelResource,
         model_data: &Model,
@@ -386,7 +383,7 @@ pub trait ModelResourceExtension: Sized {
     fn instantiate_and_attach(
         &self,
         scene: &mut Scene,
-        parent: Handle<Node>,
+        parent: Handle<impl ObjectOrVariant<Node>>,
         position: Vector3<f32>,
         face_towards: Vector3<f32>,
         scale: Vector3<f32>,
@@ -465,6 +462,18 @@ impl AnimationSource for UserInterface {
 }
 
 impl ModelResourceExtension for ModelResource {
+    /// Copy the given model into the given graph.
+    /// * `model`: The resource handle of the model, which put into the created nodes as their
+    ///   [`Base::resource`](crate::scene::base::Base::resource) to indicate which model
+    ///   the node was instantiated from.
+    /// * `model_data`: A borrow of the data contained in `model`.
+    /// * `handle`: The handle of the node within `model` that should be instantiated, typically
+    ///   the root of the model.
+    /// * `dest_graph`: A mutable borrow of the node graph that will contain the newly created copy.
+    /// * `pre_processing_callback`: A function that takes a node handle and a mutable node.
+    ///   The handle belongs to the original node in the model. The node is a copy of the original
+    ///   node, except that parent handle and child handles have been removed. This is a node
+    ///   that will be inserted into `dest_graph`.
     fn instantiate_from<Pre>(
         model: ModelResource,
         model_data: &Model,
@@ -478,6 +487,7 @@ impl ModelResourceExtension for ModelResource {
         let (root, old_to_new) = model_data.scene.graph.copy_node(
             handle,
             dest_graph,
+            false,
             &mut |_, _| true,
             pre_processing_callback,
             &mut |_, original_handle, node| {
@@ -491,6 +501,11 @@ impl ModelResourceExtension for ModelResource {
     }
 
     fn begin_instantiation<'a>(&'a self, dest_scene: &'a mut Scene) -> InstantiationContext<'a> {
+        if !self.is_ok() {
+            Log::err(format!(
+                "Instantiating a model from a resource that is not loaded: {self:?}"
+            ));
+        }
         InstantiationContext {
             model: self,
             dest_scene,
@@ -518,11 +533,12 @@ impl ModelResourceExtension for ModelResource {
     fn instantiate_and_attach(
         &self,
         scene: &mut Scene,
-        parent: Handle<Node>,
+        parent: Handle<impl ObjectOrVariant<Node>>,
         position: Vector3<f32>,
         face_towards: Vector3<f32>,
         scale: Vector3<f32>,
     ) -> Handle<Node> {
+        let parent = parent.to_base();
         let parent_scale = scene.graph.global_scale(parent);
 
         let parent_inv_transform = scene.graph[parent]
@@ -598,10 +614,6 @@ impl ModelResourceExtension for ModelResource {
 }
 
 impl ResourceData for Model {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
         let mut visitor = Visitor::new();
         self.scene.save("Scene", &mut visitor)?;
@@ -650,7 +662,9 @@ impl Default for Model {
     AsRefStr,
     EnumString,
     VariantNames,
+    Default,
 )]
+#[reflect(type_uuid = "11634aa0-cf8f-4532-a8cd-c0fa6ef804f1")]
 pub enum MaterialSearchOptions {
     /// Search in specified materials directory. It is suitable for cases when
     /// your model resource use shared textures.
@@ -666,6 +680,7 @@ pub enum MaterialSearchOptions {
     /// # Platform specific
     ///
     /// Works on every platform.
+    #[default]
     RecursiveUp,
 
     /// Global search starting from working directory. Slowest option with a lot of ambiguities -
@@ -685,14 +700,6 @@ pub enum MaterialSearchOptions {
     /// RGS (native engine scenes) files should be loaded with this option by default, otherwise
     /// the engine won't be able to correctly find materials.
     UsePathDirectly,
-}
-
-uuid_provider!(MaterialSearchOptions = "11634aa0-cf8f-4532-a8cd-c0fa6ef804f1");
-
-impl Default for MaterialSearchOptions {
-    fn default() -> Self {
-        Self::RecursiveUp
-    }
 }
 
 impl MaterialSearchOptions {
@@ -718,6 +725,7 @@ impl MaterialSearchOptions {
 ///
 /// Check documentation of the field of the structure for more info about each parameter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default, Reflect, Eq)]
+#[reflect(type_uuid = "9b1c3667-f571-4aac-81cf-bcec0dbf0e11")]
 pub struct ModelImportOptions {
     /// See [`MaterialSearchOptions`] docs for more info.
     #[serde(default)]
@@ -742,7 +750,7 @@ impl Display for ModelLoadError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ModelLoadError::Visit(v) => {
-                write!(f, "An error occurred while reading a data source {v:?}")
+                write!(f, "An error occurred while reading a data source: {v}")
             }
             ModelLoadError::NotSupported(v) => {
                 write!(f, "Model format is not supported: {v}")
@@ -775,6 +783,7 @@ impl Model {
         path: P,
         io: &dyn ResourceIo,
         serialization_context: Arc<SerializationContext>,
+        dyn_type_constructors: Arc<DynTypeConstructorContainer>,
         resource_manager: ResourceManager,
         model_import_options: ModelImportOptions,
     ) -> Result<Self, ModelLoadError> {
@@ -811,6 +820,7 @@ impl Model {
                     path.as_ref(),
                     io,
                     serialization_context,
+                    dyn_type_constructors,
                     resource_manager.clone(),
                 )
                 .await?

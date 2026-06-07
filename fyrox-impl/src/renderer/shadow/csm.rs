@@ -18,16 +18,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::cache::DynamicSurfaceCache;
-use crate::renderer::observer::Observer;
-use crate::renderer::observer::ObserverPosition;
-use crate::renderer::resources::RendererResources;
-use crate::renderer::settings::ShadowMapPrecision;
 use crate::{
+    asset::manager::ResourceManager,
     core::{
         algebra::{Matrix4, Point3, Vector2, Vector3},
         color::Color,
         math::{aabb::AxisAlignedBoundingBox, frustum::Frustum, Rect},
+    },
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, GpuFrameBuffer},
+        gpu_texture::{GpuTexture, PixelKind},
+        server::GraphicsServer,
     },
     renderer::{
         bundle::{
@@ -36,12 +38,11 @@ use crate::{
         },
         cache::{
             geometry::GeometryCache, shader::ShaderCache, texture::TextureCache,
-            uniform::UniformMemoryAllocator,
+            uniform::UniformMemoryAllocator, DynamicSurfaceCache,
         },
-        framework::{
-            error::FrameworkError, framebuffer::Attachment, gpu_texture::PixelKind,
-            server::GraphicsServer,
-        },
+        observer::{Observer, ObserverPosition},
+        resources::RendererResources,
+        settings::ShadowMapPrecision,
         RenderPassStatistics, DIRECTIONAL_SHADOW_PASS_NAME,
     },
     scene::{
@@ -50,9 +51,6 @@ use crate::{
     },
 };
 use approx::relative_eq;
-use fyrox_graphics::framebuffer::GpuFrameBuffer;
-use fyrox_graphics::gpu_texture::GpuTexture;
-use fyrox_resource::manager::ResourceManager;
 
 pub struct Cascade {
     pub frame_buffer: GpuFrameBuffer,
@@ -98,7 +96,7 @@ pub struct CsmRenderer {
 pub(crate) struct CsmRenderContext<'a, 'c> {
     pub elapsed_time: f32,
     pub frame_size: Vector2<f32>,
-    pub state: &'a dyn GraphicsServer,
+    pub server: &'a dyn GraphicsServer,
     pub graph: &'c Graph,
     pub light: &'c LightSource,
     pub observer: &'a Observer,
@@ -144,12 +142,14 @@ impl CsmRenderer {
         &mut self,
         ctx: CsmRenderContext,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = ctx.server.begin_scope("CascadedShadowMap");
+
         let mut stats = RenderPassStatistics::default();
 
         let CsmRenderContext {
             elapsed_time,
             frame_size,
-            state,
+            server,
             graph,
             light,
             observer,
@@ -192,6 +192,8 @@ impl CsmRenderer {
         };
 
         for i in 0..CSM_NUM_CASCADES {
+            let _debug_scope = ctx.server.begin_scope(&format!("Cascade {i}"));
+
             let z_near = z_values[i];
             let mut z_far = z_values[i + 1];
 
@@ -275,7 +277,7 @@ impl CsmRenderer {
             );
 
             stats += bundle_storage.render_to_frame_buffer(
-                state,
+                server,
                 geom_cache,
                 shader_cache,
                 |_| true,

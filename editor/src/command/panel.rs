@@ -18,35 +18,42 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::{
-    core::pool::Handle,
-    gui::{
-        button::ButtonMessage,
-        grid::{Column, GridBuilder, Row},
-        list_view::{ListViewBuilder, ListViewMessage},
-        message::{MessageDirection, UiMessage},
-        scroll_viewer::ScrollViewerBuilder,
-        stack_panel::StackPanelBuilder,
-        text::TextBuilder,
-        widget::{WidgetBuilder, WidgetMessage},
-        window::{WindowBuilder, WindowTitle},
-        BuildContext, Orientation, Thickness, UiNode, UserInterface,
-    },
-};
 use crate::{
-    load_image, message::MessageSender, send_sync_message, utils::window_content, Message, Mode,
+    fyrox::{
+        core::pool::Handle,
+        gui::{
+            button::ButtonMessage,
+            grid::{Column, GridBuilder, Row},
+            list_view::{ListViewBuilder, ListViewMessage},
+            message::UiMessage,
+            scroll_viewer::ScrollViewerBuilder,
+            stack_panel::StackPanelBuilder,
+            style::{resource::StyleResourceExt, Style},
+            text::TextBuilder,
+            widget::{WidgetBuilder, WidgetMessage},
+            window::{WindowBuilder, WindowTitle},
+            BuildContext, Thickness, UserInterface,
+        },
+    },
+    load_image,
+    message::MessageSender,
+    utils::window_content,
+    Message, Mode,
 };
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
-use fyrox::gui::utils::make_image_button_with_tooltip;
+use fyrox::core::color::Color;
+use fyrox::gui::button::Button;
+use fyrox::gui::list_view::ListView;
+use fyrox::gui::utils::ImageButtonBuilder;
+use fyrox::gui::window::Window;
+use fyrox::gui::Orientation;
 
 pub struct CommandStackViewer {
-    pub window: Handle<UiNode>,
-    list: Handle<UiNode>,
+    pub window: Handle<Window>,
+    list: Handle<ListView>,
     sender: MessageSender,
-    undo: Handle<UiNode>,
-    redo: Handle<UiNode>,
-    clear: Handle<UiNode>,
+    undo: Handle<Button>,
+    redo: Handle<Button>,
+    clear: Handle<Button>,
 }
 
 impl CommandStackViewer {
@@ -55,67 +62,73 @@ impl CommandStackViewer {
         let undo;
         let redo;
         let clear;
+        let buttons_left = StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_child({
+                    undo = ImageButtonBuilder::default()
+                        .with_image_color(Color::ORANGE_RED)
+                        .with_image(load_image!("../../resources/undo.png"))
+                        .with_tooltip("Undo The Command")
+                        .with_tab_index(Some(0))
+                        .build_button(ctx);
+                    undo
+                })
+                .with_child({
+                    redo = ImageButtonBuilder::default()
+                        .with_image_color(Color::LIME_GREEN)
+                        .with_image(load_image!("../../resources/redo.png"))
+                        .with_tooltip("Redo The Command")
+                        .with_tab_index(Some(1))
+                        .build_button(ctx);
+                    redo
+                }),
+        )
+        .with_orientation(Orientation::Horizontal)
+        .build(ctx);
+
+        let buttons_right = StackPanelBuilder::new(WidgetBuilder::new().on_column(2).with_child({
+            clear = ImageButtonBuilder::default()
+                .with_image_color(Color::ORANGE)
+                .with_image(load_image!("../../resources/clear.png"))
+                .with_tooltip("Clear Command Stack\nChanges history will be erased.")
+                .with_tab_index(Some(2))
+                .build_button(ctx);
+            clear
+        }))
+        .with_orientation(Orientation::Horizontal)
+        .build(ctx);
+
+        let buttons = GridBuilder::new(
+            WidgetBuilder::new()
+                .with_child(buttons_left)
+                .with_child(buttons_right),
+        )
+        .add_column(Column::auto())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .add_row(Row::auto())
+        .build(ctx);
+
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("CommandStackPanel"))
             .with_title(WindowTitle::text("Command Stack"))
             .with_tab_label("Commands")
             .with_content(
                 GridBuilder::new(
-                    WidgetBuilder::new()
-                        .with_child(
-                            StackPanelBuilder::new(
-                                WidgetBuilder::new()
-                                    .with_child({
-                                        undo = make_image_button_with_tooltip(
-                                            ctx,
-                                            20.0,
-                                            20.0,
-                                            load_image!("../../resources/undo.png"),
-                                            "Undo The Command",
-                                            Some(0),
-                                        );
-                                        undo
-                                    })
-                                    .with_child({
-                                        redo = make_image_button_with_tooltip(
-                                            ctx,
-                                            20.0,
-                                            20.0,
-                                            load_image!("../../resources/redo.png"),
-                                            "Redo The Command",
-                                            Some(1),
-                                        );
-                                        redo
-                                    })
-                                    .with_child({
-                                        clear = make_image_button_with_tooltip(
-                                            ctx,
-                                            20.0,
-                                            20.0,
-                                            load_image!("../../resources/clear.png"),
-                                            "Clear Command Stack\nChanges history will be erased.",
-                                            Some(2),
-                                        );
-                                        clear
-                                    }),
-                            )
-                            .with_orientation(Orientation::Horizontal)
-                            .build(ctx),
+                    WidgetBuilder::new().with_child(buttons).with_child(
+                        ScrollViewerBuilder::new(
+                            WidgetBuilder::new()
+                                .with_margin(Thickness::uniform(1.0))
+                                .on_row(1),
                         )
-                        .with_child(
-                            ScrollViewerBuilder::new(
-                                WidgetBuilder::new()
-                                    .with_margin(Thickness::uniform(1.0))
-                                    .on_row(1),
-                            )
-                            .with_content({
-                                list = ListViewBuilder::new(WidgetBuilder::new()).build(ctx);
-                                list
-                            })
-                            .build(ctx),
-                        ),
+                        .with_content({
+                            list = ListViewBuilder::new(WidgetBuilder::new()).build(ctx);
+                            list
+                        })
+                        .build(ctx),
+                    ),
                 )
                 .add_column(Column::stretch())
-                .add_row(Row::strict(26.0))
+                .add_row(Row::auto())
                 .add_row(Row::stretch())
                 .build(ctx),
             )
@@ -176,20 +189,17 @@ impl CommandStackViewer {
                 )
                 .with_text(name)
                 .build(&mut ui.build_ctx())
+                .to_base()
             })
             .collect();
 
-        send_sync_message(
-            ui,
-            ListViewMessage::items(self.list, MessageDirection::ToWidget, items),
-        );
+        ui.send_sync(self.list, ListViewMessage::Items(items));
     }
 
     pub fn on_mode_changed(&mut self, ui: &UserInterface, mode: &Mode) {
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             window_content(self.window, ui),
-            MessageDirection::ToWidget,
-            mode.is_edit(),
-        ));
+            WidgetMessage::Enabled(mode.is_edit()),
+        );
     }
 }

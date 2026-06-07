@@ -25,16 +25,12 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
+    core::{algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     message::UiMessage,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
 };
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
 /// Canvas widget allows its children to have an arbitrary position on an imaginable infinite plane, it also
 /// gives the children constraints of infinite size, which forces them to take all the desired size. This widget
@@ -43,7 +39,7 @@ use std::ops::{Deref, DerefMut};
 ///
 /// ## Examples
 ///
-/// A instance of [`Canvas`] widget can be created using [`CanvasBuilder`] with a set of children widgets provided
+/// An instance of [`Canvas`] widget can be created using [`CanvasBuilder`] with a set of children widgets provided
 /// to [`WidgetBuilder`]:
 ///
 /// ```rust
@@ -51,8 +47,9 @@ use std::ops::{Deref, DerefMut};
 /// #     button::ButtonBuilder, canvas::CanvasBuilder, core::pool::Handle, text::TextBuilder,
 /// #     widget::WidgetBuilder, BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::canvas::Canvas;
 /// #
-/// fn create_canvas(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_canvas(ctx: &mut BuildContext) -> Handle<Canvas> {
 ///     CanvasBuilder::new(
 ///         WidgetBuilder::new()
 ///             .with_child(
@@ -69,8 +66,8 @@ use std::ops::{Deref, DerefMut};
 ///     .build(ctx)
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "6b843a36-53da-467b-b85e-2380fe891ca1")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "6b843a36-53da-467b-b85e-2380fe891ca1")]
 #[reflect(derived_type = "UiNode")]
 pub struct Canvas {
     /// Base widget of the canvas.
@@ -83,6 +80,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Canvas {
             .with_variant("Canvas", |ui| {
                 CanvasBuilder::new(WidgetBuilder::new().with_name("Canvas"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -136,11 +134,11 @@ impl CanvasBuilder {
     }
 
     /// Finishes canvas widget building and adds the instance to the user interface and returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Canvas> {
         let canvas = Canvas {
             widget: self.widget_builder.build(ctx),
         };
-        ctx.add_node(UiNode::new(canvas))
+        ctx.add(canvas)
     }
 }
 

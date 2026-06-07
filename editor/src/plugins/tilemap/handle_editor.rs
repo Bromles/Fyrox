@@ -21,20 +21,18 @@
 //! Give the Fyrox Inspector the ability to edit [`TileDefinitionHandle`] properties.
 
 use std::any::TypeId;
-use std::ops::{Deref, DerefMut};
 
-use crate::{send_sync_message, MSG_SYNC_FLAG};
-
-use fyrox::gui::inspector::FieldKind;
+use super::*;
+use fyrox::gui::button::Button;
+use fyrox::gui::inspector::FieldAction;
+use fyrox::gui::message::MessageData;
+use fyrox::gui::text_box::TextBox;
 use fyrox::{
-    core::{
-        color::Color, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
+    core::{color::Color, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     gui::{
         brush::Brush,
         button::{ButtonBuilder, ButtonMessage},
-        define_constructor, define_widget_deref,
+        define_widget_deref,
         grid::{Column, GridBuilder, Row},
         image::ImageBuilder,
         inspector::{
@@ -53,8 +51,6 @@ use fyrox::{
     scene::tilemap::TileDefinitionHandle,
 };
 
-use super::*;
-
 /// A message for events related to [`TileDefinitionHandleEditor`].
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum TileDefinitionHandleEditorMessage {
@@ -63,15 +59,7 @@ pub enum TileDefinitionHandleEditorMessage {
     /// The user has clicked the go-to button beside the handle.
     Goto(TileDefinitionHandle),
 }
-
-impl TileDefinitionHandleEditorMessage {
-    define_constructor!(
-        /// The value of the handle has changed.
-        TileDefinitionHandleEditorMessage:Value => fn value(Option<TileDefinitionHandle>), layout: false);
-    define_constructor!(
-        /// The user has clicked the go-to button beside the handle.
-        TileDefinitionHandleEditorMessage:Goto => fn goto(TileDefinitionHandle), layout: false);
-}
+impl MessageData for TileDefinitionHandleEditorMessage {}
 
 /// The widget for editing a [`TileDefinitionHandle`].
 /// It has a button that can be used to focus the tile map control panel on the tile
@@ -88,13 +76,13 @@ impl TileDefinitionHandleEditorMessage {
 /// pair is the page coordinates and the second pair is the tile coordinates.
 /// When editing the handle, one need merely type four integers. Whatever
 /// characters separate the integers are ignored, so "1 2 3 4" would be accepted.
-#[derive(Clone, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
+#[derive(Clone, Debug, Visit, Reflect)]
 #[reflect(derived_type = "UiNode")]
-#[type_uuid(id = "60146cf0-33e3-4757-8e66-e7196324271f")]
+#[reflect(type_uuid = "60146cf0-33e3-4757-8e66-e7196324271f")]
 pub struct TileDefinitionHandleEditor {
     widget: Widget,
-    field: Handle<UiNode>,
-    button: Handle<UiNode>,
+    field: Handle<TextBox>,
+    button: Handle<Button>,
     value: Option<TileDefinitionHandle>,
     allow_none: bool,
 }
@@ -115,49 +103,28 @@ impl TileDefinitionHandleEditor {
 
 impl Control for TileDefinitionHandleEditor {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
-        if message.flags == MSG_SYNC_FLAG {
-            return;
-        }
-        if let Some(&TileDefinitionHandleEditorMessage::Value(handle)) = message.data() {
-            if message.direction() == MessageDirection::ToWidget
-                && message.destination() == self.handle()
-            {
-                self.value = handle;
-                send_sync_message(
-                    ui,
-                    TextMessage::text(self.field, MessageDirection::ToWidget, self.text()),
-                );
-                ui.send_message(message.reverse());
+        if let Some(&TileDefinitionHandleEditorMessage::Value(handle)) =
+            message.data_for(self.handle())
+        {
+            self.value = handle;
+            ui.send_sync(self.field, TextMessage::Text(self.text()));
+            ui.try_send_response(message);
+        } else if let Some(TextMessage::Text(text)) = message.data_from(self.field) {
+            let value = TileDefinitionHandle::parse(text);
+            if self.allow_none || value.is_some() {
+                self.value = value;
             }
-        } else if let Some(TextMessage::Text(text)) = message.data() {
-            if message.direction() == MessageDirection::FromWidget
-                && message.destination() == self.field
-            {
-                let value = TileDefinitionHandle::parse(text);
-                if self.allow_none || value.is_some() {
-                    self.value = value;
-                }
-                ui.send_message(TileDefinitionHandleEditorMessage::value(
+            ui.post(
+                self.handle(),
+                TileDefinitionHandleEditorMessage::Value(self.value),
+            );
+            ui.send_sync(self.field, TextMessage::Text(self.text()));
+        } else if let Some(ButtonMessage::Click) = message.data_from(self.button) {
+            if let Some(handle) = self.value {
+                ui.post(
                     self.handle(),
-                    MessageDirection::FromWidget,
-                    self.value,
-                ));
-                send_sync_message(
-                    ui,
-                    TextMessage::text(self.field, MessageDirection::ToWidget, self.text()),
+                    TileDefinitionHandleEditorMessage::Goto(handle),
                 );
-            }
-        } else if let Some(ButtonMessage::Click) = message.data() {
-            if message.direction() == MessageDirection::FromWidget
-                && message.destination() == self.button
-            {
-                if let Some(handle) = self.value {
-                    ui.send_message(TileDefinitionHandleEditorMessage::goto(
-                        self.handle(),
-                        MessageDirection::FromWidget,
-                        handle,
-                    ));
-                }
             }
         }
     }
@@ -190,7 +157,7 @@ impl TileDefinitionHandleEditorBuilder {
         self
     }
     /// Build the widgets for the [`TileDefinitionHandleEditor`].
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<TileDefinitionHandleEditor> {
         let text = value_to_string(self.value);
         let field = TextBoxBuilder::new(WidgetBuilder::new())
             .with_text(text)
@@ -214,13 +181,13 @@ impl TileDefinitionHandleEditorBuilder {
             .add_column(Column::auto())
             .add_row(Row::auto())
             .build(ctx);
-        ctx.add_node(UiNode::new(TileDefinitionHandleEditor {
+        ctx.add(TileDefinitionHandleEditor {
             widget: self.widget_builder.with_child(grid).build(ctx),
             field,
             button,
             allow_none: self.allow_none,
             value: self.value,
-        }))
+        })
     }
 }
 
@@ -238,8 +205,8 @@ impl PropertyEditorDefinition for TileDefinitionHandlePropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = *ctx.property_info.cast_value::<TileDefinitionHandle>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: TileDefinitionHandleEditorBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            TileDefinitionHandleEditorBuilder::new(
                 WidgetBuilder::new()
                     .with_min_size(Vector2::new(0.0, 17.0))
                     .with_margin(Thickness::uniform(1.0)),
@@ -247,7 +214,7 @@ impl PropertyEditorDefinition for TileDefinitionHandlePropertyEditorDefinition {
             .with_allow_none(false)
             .with_value(Some(value))
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -255,10 +222,9 @@ impl PropertyEditorDefinition for TileDefinitionHandlePropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = *ctx.property_info.cast_value::<TileDefinitionHandle>()?;
-        Ok(Some(TileDefinitionHandleEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            Some(value),
+            TileDefinitionHandleEditorMessage::Value(Some(value)),
         )))
     }
 
@@ -268,7 +234,7 @@ impl PropertyEditorDefinition for TileDefinitionHandlePropertyEditorDefinition {
             {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(value),
+                    action: FieldAction::object(value),
                 });
             }
         }
@@ -292,15 +258,15 @@ impl PropertyEditorDefinition for OptionTileDefinitionHandlePropertyEditorDefini
         let value = *ctx
             .property_info
             .cast_value::<Option<TileDefinitionHandle>>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: TileDefinitionHandleEditorBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            TileDefinitionHandleEditorBuilder::new(
                 WidgetBuilder::new()
                     .with_min_size(Vector2::new(0.0, 17.0))
                     .with_margin(Thickness::uniform(1.0)),
             )
             .with_value(value)
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -310,10 +276,9 @@ impl PropertyEditorDefinition for OptionTileDefinitionHandlePropertyEditorDefini
         let value = *ctx
             .property_info
             .cast_value::<Option<TileDefinitionHandle>>()?;
-        Ok(Some(TileDefinitionHandleEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value,
+            TileDefinitionHandleEditorMessage::Value(value),
         )))
     }
 
@@ -322,7 +287,7 @@ impl PropertyEditorDefinition for OptionTileDefinitionHandlePropertyEditorDefini
             if let Some(&TileDefinitionHandleEditorMessage::Value(value)) = ctx.message.data() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(value),
+                    action: FieldAction::object(value),
                 });
             }
         }

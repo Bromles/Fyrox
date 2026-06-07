@@ -25,18 +25,17 @@ use crate::{
         core::{
             algebra::{Vector2, Vector3},
             pool::Handle,
+            reflect::prelude::*,
             some_or_return,
-            type_traits::prelude::*,
-            Uuid,
         },
         engine::Engine,
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
         gui::{
             button::{ButtonBuilder, ButtonMessage},
             grid::{Column, GridBuilder, Row},
-            message::{MessageDirection, UiMessage},
+            message::UiMessage,
             widget::{WidgetBuilder, WidgetMessage},
-            BuildContext, Thickness, UiNode, UserInterface, VerticalAlignment,
+            BuildContext, Thickness, UserInterface, VerticalAlignment,
         },
         scene::{probe::ReflectionProbe, Scene},
     },
@@ -51,11 +50,15 @@ use crate::{
     settings::Settings,
     Editor, Message,
 };
+use fyrox::core::reflect::Reflect;
+use fyrox::core::uuid::Uuid;
+use fyrox::gui::button::Button;
+use fyrox::gui::grid::Grid;
 
 pub struct ReflectionProbePreviewControlPanel {
-    pub root_widget: Handle<UiNode>,
-    update: Handle<UiNode>,
-    adjust: Handle<UiNode>,
+    pub root_widget: Handle<Grid>,
+    update: Handle<Button>,
+    adjust: Handle<Button>,
 }
 
 impl ReflectionProbePreviewControlPanel {
@@ -115,7 +118,7 @@ impl ReflectionProbePreviewControlPanel {
                     let scene = &mut engine.scenes[game_scene.scene];
 
                     for &node in &selection.nodes {
-                        if let Some(particle_system) =
+                        if let Ok(particle_system) =
                             scene.graph.try_get_mut_of_type::<ReflectionProbe>(node)
                         {
                             particle_system.force_update();
@@ -123,7 +126,7 @@ impl ReflectionProbePreviewControlPanel {
                     }
                 } else if message.destination == self.adjust {
                     sender.send(Message::SetInteractionMode(
-                        ReflectionProbeInteractionMode::type_uuid(),
+                        ReflectionProbeInteractionMode::type_info().type_uuid,
                     ));
                 }
             }
@@ -131,24 +134,24 @@ impl ReflectionProbePreviewControlPanel {
     }
 
     fn destroy(self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::remove(
-            self.root_widget,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.root_widget, WidgetMessage::Remove);
     }
 }
 
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable, type_uuid = "9a535782-87a9-4407-8d12-a723d67e179d")]
 struct DragContext {
     new_position: Vector3<f32>,
     plane_kind: PlaneKind,
 }
 
-#[derive(TypeUuidProvider)]
-#[type_uuid(id = "d8fd164c-523c-447a-93ab-e86f2d71eed6")]
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable, type_uuid = "d8fd164c-523c-447a-93ab-e86f2d71eed6")]
 pub struct ReflectionProbeInteractionMode {
     probe: Handle<ReflectionProbe>,
     move_gizmo: MoveGizmo,
     message_sender: MessageSender,
+    #[reflect(hidden)]
     drag_context: Option<DragContext>,
 }
 
@@ -186,7 +189,7 @@ impl InteractionMode for ReflectionProbeInteractionMode {
                 filter: Some(&mut |handle, _| handle != self.move_gizmo.origin),
                 ignore_back_faces: false,
                 use_picking_loop: false,
-                only_meshes: false,
+                method: Default::default(),
                 settings: &settings.selection,
             },
         ) {
@@ -217,7 +220,9 @@ impl InteractionMode for ReflectionProbeInteractionMode {
                 ctx.get_mut::<GameSceneContext>()
                     .scene
                     .graph
-                    .node_mut(probe.transmute())
+                    .try_get_node_mut(probe.transmute())
+                    .ok()
+                    .map(|n| n as &mut dyn Reflect)
             },
         );
         self.message_sender.do_command(command);
@@ -245,7 +250,7 @@ impl InteractionMode for ReflectionProbeInteractionMode {
                 filter: Some(&mut |handle, _| handle != self.move_gizmo.origin),
                 ignore_back_faces: false,
                 use_picking_loop: false,
-                only_meshes: false,
+                method: Default::default(),
                 settings: &settings.selection,
             },
         ) {
@@ -301,7 +306,7 @@ impl InteractionMode for ReflectionProbeInteractionMode {
         self.set_visible(controller, engine, false);
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         make_interaction_mode_button(
             ctx,
             include_bytes!("../../resources/triangle.png"),
@@ -311,7 +316,7 @@ impl InteractionMode for ReflectionProbeInteractionMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 }
 
@@ -322,7 +327,7 @@ pub struct ReflectionProbePlugin {
 
 impl EditorPlugin for ReflectionProbePlugin {
     fn on_ui_message(&mut self, message: &mut UiMessage, editor: &mut Editor) {
-        let entry = some_or_return!(editor.scenes.current_scene_entry_mut());
+        let entry = editor.scenes.current_scene_entry_mut();
         let game_scene = some_or_return!(entry.controller.downcast_mut::<GameScene>());
         let panel = some_or_return!(self.panel.as_mut());
         panel.handle_ui_message(
@@ -335,8 +340,7 @@ impl EditorPlugin for ReflectionProbePlugin {
     }
 
     fn on_message(&mut self, message: &Message, editor: &mut Editor) {
-        let entry = some_or_return!(editor.scenes.current_scene_entry_mut());
-        let selection = some_or_return!(entry.selection.as_graph());
+        let entry = editor.scenes.current_scene_entry_mut();
         let game_scene = some_or_return!(entry.controller.downcast_mut::<GameScene>());
 
         let scene = &mut editor.engine.scenes[game_scene.scene];
@@ -349,11 +353,12 @@ impl EditorPlugin for ReflectionProbePlugin {
                 mode.destroy(scene);
             }
 
-            let selected_reflection_probe = selection
-                .nodes()
-                .iter()
-                .find(|h| scene.graph.has_component::<ReflectionProbe>(**h))
-                .cloned();
+            let selected_reflection_probe = entry.selection.as_graph().and_then(|s| {
+                s.nodes()
+                    .iter()
+                    .find(|h| scene.graph.is_or_has_field::<ReflectionProbe>(**h))
+                    .cloned()
+            });
 
             if let Some(selected_reflection_probe) = selected_reflection_probe {
                 entry.interaction_modes.add(ReflectionProbeInteractionMode {
@@ -367,11 +372,7 @@ impl EditorPlugin for ReflectionProbePlugin {
                     let inspector = editor.plugins.get::<InspectorPlugin>();
                     let ui = editor.engine.user_interfaces.first_mut();
                     let panel = ReflectionProbePreviewControlPanel::new(&mut ui.build_ctx());
-                    ui.send_message(WidgetMessage::link(
-                        panel.root_widget,
-                        MessageDirection::ToWidget,
-                        inspector.head,
-                    ));
+                    ui.send(panel.root_widget, WidgetMessage::link_with(inspector.head));
                     self.panel = Some(panel);
                 }
             } else if let Some(panel) = self.panel.take() {

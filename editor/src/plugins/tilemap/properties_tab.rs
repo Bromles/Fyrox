@@ -43,37 +43,41 @@ use fyrox::{
     },
 };
 
-use crate::{send_sync_message, MSG_SYNC_FLAG};
-
 use super::*;
 use commands::*;
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::border::Border;
+use fyrox::gui::color::ColorField;
+use fyrox::gui::numeric::NumericUpDown;
+use fyrox::gui::text::Text;
+use fyrox::gui::text_box::TextBox;
 
 /// This is the tab of the tile set editor that allows the user to modify the property
 /// layers stored within the tile set. Layers can be created, deleted, renamed
 /// and pre-defined values can be edited.
 pub struct PropertiesTab {
-    handle: Handle<UiNode>,
-    list: Handle<UiNode>,
-    up_button: Handle<UiNode>,
-    down_button: Handle<UiNode>,
-    remove_button: Handle<UiNode>,
-    add_int_button: Handle<UiNode>,
-    add_float_button: Handle<UiNode>,
-    add_string_button: Handle<UiNode>,
-    add_nine_button: Handle<UiNode>,
-    name_field: Handle<UiNode>,
-    name_list: Handle<UiNode>,
-    name_up: Handle<UiNode>,
-    name_down: Handle<UiNode>,
-    name_add: Handle<UiNode>,
-    name_remove: Handle<UiNode>,
-    data_panel: Handle<UiNode>,
-    name_edit_panel: Handle<UiNode>,
-    value_name_field: Handle<UiNode>,
-    color_field: Handle<UiNode>,
-    i8_field: Handle<UiNode>,
-    i32_field: Handle<UiNode>,
-    f32_field: Handle<UiNode>,
+    handle: Handle<Grid>,
+    list: Handle<ListView>,
+    up_button: Handle<Button>,
+    down_button: Handle<Button>,
+    remove_button: Handle<Button>,
+    add_int_button: Handle<Button>,
+    add_float_button: Handle<Button>,
+    add_string_button: Handle<Button>,
+    add_nine_button: Handle<Button>,
+    name_field: Handle<TextBox>,
+    name_list: Handle<ListView>,
+    name_up: Handle<Button>,
+    name_down: Handle<Button>,
+    name_add: Handle<Button>,
+    name_remove: Handle<Button>,
+    data_panel: Handle<Grid>,
+    name_edit_panel: Handle<Border>,
+    value_name_field: Handle<TextBox>,
+    color_field: Handle<ColorField>,
+    i8_field: Handle<NumericUpDown<i8>>,
+    i32_field: Handle<NumericUpDown<i32>>,
+    f32_field: Handle<NumericUpDown<f32>>,
 }
 
 fn make_arrow_button(
@@ -81,7 +85,7 @@ fn make_arrow_button(
     dir: ArrowDirection,
     column: usize,
     row: usize,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     let arrow = make_arrow(ctx, dir, 16.0);
     ButtonBuilder::new(
         WidgetBuilder::new()
@@ -100,7 +104,7 @@ fn make_button(
     ctx: &mut BuildContext,
     column: usize,
     row: usize,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_column(column)
@@ -113,7 +117,7 @@ fn make_button(
     .build(ctx)
 }
 
-fn make_type_widget(ctx: &mut BuildContext, prop_type: TileSetPropertyType) -> Handle<UiNode> {
+fn make_type_widget(ctx: &mut BuildContext, prop_type: TileSetPropertyType) -> Handle<Text> {
     let type_name = match prop_type {
         TileSetPropertyType::I32 => "INTEGER",
         TileSetPropertyType::F32 => "FLOAT",
@@ -154,6 +158,7 @@ fn make_list_item(ctx: &mut BuildContext, property: &TileSetPropertyLayer) -> Ha
             .with_pad_by_corner_radius(false),
     )
     .build(ctx)
+    .to_base()
 }
 
 fn make_items(ctx: &mut BuildContext, tile_set: &OptionTileSet) -> Vec<Handle<UiNode>> {
@@ -164,7 +169,7 @@ fn make_items(ctx: &mut BuildContext, tile_set: &OptionTileSet) -> Vec<Handle<Ui
         .collect()
 }
 
-fn make_value_widget(ctx: &mut BuildContext, value: NamableValue) -> Handle<UiNode> {
+fn make_value_widget(ctx: &mut BuildContext, value: NamableValue) -> Handle<Text> {
     let text = match value {
         NamableValue::I8(x) => x.to_string(),
         NamableValue::I32(x) => x.to_string(),
@@ -216,6 +221,7 @@ fn make_name_list_item(ctx: &mut BuildContext, named_value: &NamedValue) -> Hand
             .with_pad_by_corner_radius(false),
     )
     .build(ctx)
+    .to_base()
 }
 
 fn make_name_items(ctx: &mut BuildContext, property: &TileSetPropertyLayer) -> Vec<Handle<UiNode>> {
@@ -226,20 +232,20 @@ fn make_name_items(ctx: &mut BuildContext, property: &TileSetPropertyLayer) -> V
         .collect()
 }
 
-fn send_visibility(ui: &UserInterface, destination: Handle<UiNode>, visible: bool) {
-    ui.send_message(WidgetMessage::visibility(
-        destination,
-        MessageDirection::ToWidget,
-        visible,
-    ));
+fn send_visibility(
+    ui: &UserInterface,
+    destination: Handle<impl ObjectOrVariant<UiNode>>,
+    visible: bool,
+) {
+    ui.send(destination, WidgetMessage::Visibility(visible));
 }
 
-fn send_enabled(ui: &UserInterface, destination: Handle<UiNode>, enabled: bool) {
-    ui.send_message(WidgetMessage::enabled(
-        destination,
-        MessageDirection::ToWidget,
-        enabled,
-    ));
+fn send_enabled(
+    ui: &UserInterface,
+    destination: Handle<impl ObjectOrVariant<UiNode>>,
+    enabled: bool,
+) {
+    ui.send(destination, WidgetMessage::Enabled(enabled));
 }
 
 impl PropertiesTab {
@@ -492,15 +498,11 @@ impl PropertiesTab {
         }
     }
     pub fn handle(&self) -> Handle<UiNode> {
-        self.handle
+        self.handle.to_base()
     }
     pub fn sync_to_model(&mut self, tile_set: &OptionTileSet, ui: &mut UserInterface) {
         let items = make_items(&mut ui.build_ctx(), tile_set);
-        ui.send_message(ListViewMessage::items(
-            self.list,
-            MessageDirection::ToWidget,
-            items,
-        ));
+        ui.send(self.list, ListViewMessage::Items(items));
         self.sync_data(tile_set, ui);
     }
     pub fn sync_data(&mut self, tile_set: &OptionTileSet, ui: &mut UserInterface) {
@@ -518,16 +520,9 @@ impl PropertiesTab {
             Some(prop) => make_name_items(&mut ui.build_ctx(), prop),
             None => Vec::default(),
         };
-        ui.send_message(ListViewMessage::items(
-            self.name_list,
-            MessageDirection::ToWidget,
-            named_values,
-        ));
+        ui.send(self.name_list, ListViewMessage::Items(named_values));
         send_enabled(ui, self.data_panel, sel_index.is_some());
-        send_sync_message(
-            ui,
-            TextMessage::text(self.name_field, MessageDirection::ToWidget, name),
-        );
+        ui.send_sync(self.name_field, TextMessage::Text(name));
         send_enabled(ui, self.name_list, sel_index.is_some());
         self.sync_name_edit(sel_index.is_some(), tile_set, ui);
     }
@@ -550,33 +545,20 @@ impl PropertiesTab {
                 .unwrap_or(Color::BLACK),
             _ => Color::BLACK,
         };
-        send_sync_message(
-            ui,
-            TextMessage::text(
-                self.value_name_field,
-                MessageDirection::ToWidget,
-                value_name,
-            ),
-        );
-        send_sync_message(
-            ui,
-            ColorFieldMessage::color(self.color_field, MessageDirection::ToWidget, color),
-        );
+        ui.send_sync(self.value_name_field, TextMessage::Text(value_name));
+        ui.send_sync(self.color_field, ColorFieldMessage::Color(color));
         let named_value = name_index.and_then(|i| prop.and_then(|p| p.named_values.get(i)));
         let value = named_value.map(|v| v.value);
         match value {
-            Some(NamableValue::I8(value)) => send_sync_message(
-                ui,
-                NumericUpDownMessage::value(self.i8_field, MessageDirection::ToWidget, value),
-            ),
-            Some(NamableValue::I32(value)) => send_sync_message(
-                ui,
-                NumericUpDownMessage::value(self.i32_field, MessageDirection::ToWidget, value),
-            ),
-            Some(NamableValue::F32(value)) => send_sync_message(
-                ui,
-                NumericUpDownMessage::value(self.f32_field, MessageDirection::ToWidget, value),
-            ),
+            Some(NamableValue::I8(value)) => {
+                ui.send_sync(self.i8_field, NumericUpDownMessage::Value(value))
+            }
+            Some(NamableValue::I32(value)) => {
+                ui.send_sync(self.i32_field, NumericUpDownMessage::Value(value))
+            }
+            Some(NamableValue::F32(value)) => {
+                ui.send_sync(self.f32_field, NumericUpDownMessage::Value(value))
+            }
             None => (),
         }
         let show_i8 = matches!(value, Some(NamableValue::I8(_))) && enabled;
@@ -602,10 +584,10 @@ impl PropertiesTab {
         ui: &mut UserInterface,
         sender: &MessageSender,
     ) {
-        if message.direction() == MessageDirection::ToWidget || message.flags == MSG_SYNC_FLAG {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
-        if let Some(ListViewMessage::SelectionChanged(_)) = message.data() {
+        if let Some(ListViewMessage::Selection(_)) = message.data() {
             if message.destination() == self.list {
                 self.sync_data(&TileSetRef::new(&tile_set).as_loaded(), ui);
             } else if message.destination() == self.name_list {
@@ -664,11 +646,7 @@ impl PropertiesTab {
         }
     }
     fn selection_index(&self, ui: &UserInterface) -> Option<usize> {
-        ui.node(self.list)
-            .cast::<ListView>()?
-            .selection
-            .last()
-            .copied()
+        ui.try_get(self.list).ok()?.selection.last().copied()
     }
     fn property<'a>(
         &self,
@@ -679,11 +657,7 @@ impl PropertiesTab {
         tile_set.properties().get(sel_index)
     }
     fn name_selection_index(&self, ui: &UserInterface) -> Option<usize> {
-        ui.node(self.name_list)
-            .cast::<ListView>()?
-            .selection
-            .last()
-            .copied()
+        ui.try_get(self.name_list).ok()?.selection.last().copied()
     }
     fn update_name(
         &self,
@@ -828,11 +802,7 @@ impl PropertiesTab {
         if sel_index == new_index {
             return;
         }
-        ui.send_message(ListViewMessage::selection(
-            self.name_list,
-            MessageDirection::ToWidget,
-            vec![new_index],
-        ));
+        ui.send(self.name_list, ListViewMessage::Selection(vec![new_index]));
         let uuid = prop.uuid;
         drop(tile_set_guard);
         sender.do_command(MovePropertyValueCommand {
@@ -856,15 +826,8 @@ impl PropertiesTab {
             .map(|i| i + 1)
             .unwrap_or(0)
             .clamp(0, prop.named_values.len());
-        ui.send_message(ListViewMessage::selection(
-            self.name_list,
-            MessageDirection::ToWidget,
-            vec![index],
-        ));
-        ui.send_message(WidgetMessage::focus(
-            self.value_name_field,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.name_list, ListViewMessage::Selection(vec![index]));
+        ui.send(self.value_name_field, WidgetMessage::Focus);
         let uuid = prop.uuid;
         let value_type = prop.prop_type;
         drop(tile_set_guard);
@@ -913,11 +876,7 @@ impl PropertiesTab {
         if sel_index == new_index {
             return;
         }
-        ui.send_message(ListViewMessage::selection(
-            self.list,
-            MessageDirection::ToWidget,
-            vec![new_index],
-        ));
+        ui.send(self.list, ListViewMessage::Selection(vec![new_index]));
         sender.do_command(MovePropertyLayerCommand {
             tile_set: resource.clone(),
             start: sel_index,
@@ -937,15 +896,8 @@ impl PropertiesTab {
             .map(|i| i + 1)
             .unwrap_or(0)
             .clamp(0, tile_set.properties.len());
-        ui.send_message(ListViewMessage::selection(
-            self.list,
-            MessageDirection::ToWidget,
-            vec![index],
-        ));
-        ui.send_message(WidgetMessage::focus(
-            self.name_field,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.list, ListViewMessage::Selection(vec![index]));
+        ui.send(self.name_field, WidgetMessage::Focus);
         sender.do_command(AddPropertyLayerCommand {
             tile_set: resource.clone(),
             index,

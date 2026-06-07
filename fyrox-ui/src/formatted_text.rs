@@ -21,23 +21,32 @@
 use crate::{
     brush::Brush,
     core::{
-        algebra::Vector2, color::Color, math::Rect, reflect::prelude::*, uuid_provider,
+        algebra::Vector2, color::Color, log::Log, math::Rect, reflect::prelude::*,
         variable::InheritableVariable, visitor::prelude::*,
     },
-    font::{Font, FontGlyph, FontHeight, FontResource},
-    style::StyledProperty,
-    HorizontalAlignment, VerticalAlignment,
+    font::{Font, FontGlyph, FontHeight, FontResource, BUILT_IN_FONT},
+    style::{resource::StyleResource, StyledProperty},
+    HorizontalAlignment, Thickness, VerticalAlignment,
 };
+use fyrox_resource::state::{LoadError, ResourceState};
 pub use run::*;
-use std::ops::Range;
+use std::{
+    ops::{Range, RangeBounds},
+    path::PathBuf,
+};
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 use textwrapper::*;
 
 mod run;
 mod textwrapper;
 
+/// Width of a tab when multiplied by font size.
+const TAB_WIDTH: f32 = 2.0;
+const ELLIPSIS: char = '…';
+
 /// Defines a position in the text. It is just a coordinates of a character in text.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default, Visit, Reflect)]
+#[reflect(type_uuid = "dcc6b193-e4e3-49a8-af7e-052cac80c9b2")]
 pub struct Position {
     /// Line index.
     pub line: usize,
@@ -111,6 +120,7 @@ impl TextLine {
     EnumString,
     VariantNames,
 )]
+#[reflect(type_uuid = "f1290ceb-3fee-461f-a1e9-f9450bd06805")]
 pub enum WrapMode {
     /// No wrapping needed.
     #[default]
@@ -122,8 +132,6 @@ pub enum WrapMode {
     /// Word-based wrapping.
     Word,
 }
-
-uuid_provider!(WrapMode = "f1290ceb-3fee-461f-a1e9-f9450bd06805");
 
 struct GlyphMetrics<'a> {
     font: &'a mut Font,
@@ -174,6 +182,17 @@ fn build_glyph(
     x = x.floor();
     y = y.floor();
 
+    if character == '\t' {
+        let rect = Rect::new(x, y + ascender, font_size * TAB_WIDTH, font_size);
+        let text_glyph = TextGlyph {
+            bounds: rect,
+            tex_coords: [Vector2::default(); 4],
+            atlas_page_index: 0,
+            source_char_index,
+        };
+        return (text_glyph, rect.w());
+    }
+
     // Request larger glyph with super sampling scaling.
     match metrics.glyph(character, super_sampling_scale) {
         Some(glyph) => {
@@ -215,7 +234,8 @@ fn build_glyph(
 
 struct WrapSink<'a> {
     lines: &'a mut Vec<TextLine>,
-    max_width: f32,
+    normal_width: f32,
+    first_width: f32,
 }
 
 impl LineSink for WrapSink<'_> {
@@ -228,16 +248,21 @@ impl LineSink for WrapSink<'_> {
     }
 
     fn max_width(&self) -> f32 {
-        self.max_width
+        if self.lines.is_empty() {
+            self.first_width
+        } else {
+            self.normal_width
+        }
     }
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "a48f1f1d-24ce-4a84-a45d-706ac541cf0a")]
 pub struct FormattedText {
-    font: InheritableVariable<FontResource>,
-    text: InheritableVariable<Vec<char>>,
+    font: InheritableVariable<Option<FontResource>>,
+    pub text: InheritableVariable<Vec<char>>,
     // Temporary buffer used to split text on lines. We need it to reduce memory allocations
-    // when we changing text too frequently, here we sacrifice some memory in order to get
+    // when we're changing text too frequently, here we sacrifice some memory in order to get
     // more performance.
     #[reflect(hidden)]
     #[visit(skip)]
@@ -248,6 +273,7 @@ pub struct FormattedText {
     glyphs: Vec<TextGlyph>,
     vertical_alignment: InheritableVariable<VerticalAlignment>,
     horizontal_alignment: InheritableVariable<HorizontalAlignment>,
+    #[reflect(hidden)]
     brush: InheritableVariable<Brush>,
     #[visit(skip)]
     #[reflect(hidden)]
@@ -265,6 +291,21 @@ pub struct FormattedText {
     pub shadow_offset: InheritableVariable<Vector2<f32>>,
     #[visit(optional)]
     pub runs: RunSet,
+    /// The indent amount of the first line of the text.
+    /// A negative indent will cause every line except the first to indent.
+    #[visit(optional)]
+    pub line_indent: InheritableVariable<f32>,
+    /// The space between lines.
+    #[visit(optional)]
+    pub line_space: InheritableVariable<f32>,
+    pub padding: InheritableVariable<Thickness>,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    total_height: f32,
+    /// A flag, that defines whether the formatted text should add ellipsis to lines that goes
+    /// outside provided bounds.
+    #[visit(optional)]
+    pub trim_text: InheritableVariable<bool>,
 }
 
 impl FormattedText {
@@ -389,6 +430,7 @@ impl FormattedText {
                 })
         })
     }
+
     pub fn position_range_to_char_index_range(&self, range: Range<Position>) -> Range<usize> {
         let start = self
             .position_to_char_index_unclamped(range.start)
@@ -400,7 +442,7 @@ impl FormattedText {
     }
     /// Maps input [`Position`] to a linear position in character array.
     /// The index returned is the index of the character after the position, which may be
-    /// out-of-bounds if thee position is at the end of the text.
+    /// out-of-bounds if the position is at the end of the text.
     /// You should check the index before trying to use it to fetch data from inner array of characters.
     pub fn position_to_char_index_unclamped(&self, position: Position) -> Option<usize> {
         self.position_to_char_index_internal(position, false)
@@ -408,10 +450,10 @@ impl FormattedText {
 
     /// Maps input [`Position`] to a linear position in character array.
     /// The index returned is usually the index of the character after the position,
-    /// but if the position is at the end of a line then return the index of the character _before_ the position.
+    /// but if the position is at the end of a line, then return the index of the character _before_ the position.
     /// In other words, the last two positions of each line are mapped to the same character index.
-    /// Output index will always be valid for fetching, if the method returned `Some(index)`.
-    /// The index however cannot be used for text insertion, because it cannot point to a "place after last char".
+    /// Output index will always be valid for fetching if the method returned `Some(index)`.
+    /// The index, however, cannot be used for text insertion because it cannot point to a "place after last char".
     pub fn position_to_char_index_clamped(&self, position: Position) -> Option<usize> {
         self.position_to_char_index_internal(position, true)
     }
@@ -435,44 +477,20 @@ impl FormattedText {
     }
 
     pub fn position_to_local(&self, position: Position) -> Vector2<f32> {
-        let mut state = self.font.state();
-        let Some(font) = state.data() else {
+        if self.get_font().state().data().is_none() {
             return Default::default();
-        };
-        let mut metrics = GlyphMetrics {
-            font,
-            size: **self.font_size,
-        };
-        let mut caret_pos = Vector2::default();
-        let position = self.nearest_valid_position(position);
-
-        let line = self.lines[position.line];
-        let raw_text = self.get_raw_text();
-        caret_pos += Vector2::new(line.x_offset, line.y_offset);
-        for (offset, char_index) in (line.begin..line.end).enumerate() {
-            if offset >= position.offset {
-                break;
-            }
-            if let Some(advance) = raw_text.get(char_index).map(|c| metrics.advance(*c)) {
-                caret_pos.x += advance;
-            } else {
-                caret_pos.x += metrics.size;
-            }
         }
-        caret_pos
+        let position = self.nearest_valid_position(position);
+        let line = &self.lines[position.line];
+        let caret_pos = Vector2::new(line.x_offset, line.y_offset);
+        let range = line.begin..line.begin + position.offset;
+        caret_pos + Vector2::new(self.get_range_width(range), 0.0)
     }
 
     pub fn local_to_position(&self, point: Vector2<f32>) -> Position {
-        let font_size = **self.font_size();
-        let font = self.get_font();
-        let mut state = font.state();
-        let Some(font) = state.data() else {
+        if self.get_font().state().data().is_none() {
             return Position::default();
-        };
-        let mut metrics = GlyphMetrics {
-            font,
-            size: font_size,
-        };
+        }
         let y = point.y;
 
         let Some(line_index) = self
@@ -490,13 +508,8 @@ impl FormattedText {
         let mut glyph_x: f32 = 0.0;
         let mut min_dist: f32 = x.abs();
         let mut min_index: usize = 0;
-        let raw_text = self.get_raw_text();
         for (offset, char_index) in (line.begin..line.end).enumerate() {
-            if let Some(advance) = raw_text.get(char_index).map(|c| metrics.advance(*c)) {
-                glyph_x += advance;
-            } else {
-                glyph_x += font_size;
-            }
+            glyph_x += self.get_char_width(char_index).unwrap_or_default();
             let dist = (x - glyph_x).abs();
             if dist < min_dist {
                 min_dist = dist;
@@ -539,11 +552,11 @@ impl FormattedText {
     }
 
     pub fn get_font(&self) -> FontResource {
-        (*self.font).clone()
+        (*self.font).clone().unwrap_or(BUILT_IN_FONT.resource())
     }
 
     pub fn set_font(&mut self, font: FontResource) -> &mut Self {
-        self.font.set_value_and_mark_modified(font);
+        self.font.set_value_and_mark_modified(Some(font));
         self
     }
 
@@ -601,6 +614,10 @@ impl FormattedText {
         self
     }
 
+    pub fn super_sampling_scale(&self) -> f32 {
+        self.super_sampling_scale
+    }
+
     pub fn set_constraint(&mut self, constraint: Vector2<f32>) -> &mut Self {
         self.constraint = constraint;
         self
@@ -618,26 +635,66 @@ impl FormattedText {
         self.text[range].iter().collect()
     }
 
+    /// The width of the character at the given index.
+    pub fn get_char_width(&self, index: usize) -> Option<f32> {
+        let glyph = self.text.get(index)?;
+        Some(
+            GlyphMetrics {
+                font: &mut self.font_at(index).data_ref(),
+                size: self.font_size_at(index),
+            }
+            .advance(*glyph),
+        )
+    }
+
+    /// The width of the characters at the indices in the given iterator.
+    /// This is equivalent to calling [`get_char_width`](Self::get_char_width) repeatedly and summing the results.
     pub fn get_range_width<T: IntoIterator<Item = usize>>(&self, range: T) -> f32 {
         let mut width = 0.0;
-        if let Some(font) = self.font.state().data() {
-            let mut metrics = GlyphMetrics {
-                font,
-                size: **self.font_size(),
-            };
-            for index in range {
-                // We can't trust the range values, check to prevent panic.
-                if let Some(glyph) = self.text.get(index) {
-                    width += metrics.advance(*glyph);
-                }
-            }
+        for index in range {
+            width += self.get_char_width(index).unwrap_or_default();
         }
         width
+    }
+
+    /// A rectangle relative to the top-left corner of the text that contains the given
+    /// range of characters on the given line. None is returned if the `line` is out of
+    /// bounds. The `range` is relative to the start of the line, so 0 is the first character
+    /// of the line, not the first character of the text.
+    ///
+    /// This rect is appropriate for drawing a selection or highlight for the text,
+    /// and the lower edge of the rectangle can be used to draw an underline.
+    pub fn text_rect<R: RangeBounds<usize>>(&self, line: usize, range: R) -> Option<Rect<f32>> {
+        let line = self.lines.get(line)?;
+        let x = line.x_offset;
+        let y = line.y_offset;
+        let h = line.height;
+        use std::ops::Bound;
+        let start = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => line.len(),
+        };
+        let start = line.begin + start;
+        let end = line.begin + end;
+        let offset = self.get_range_width(line.begin..start);
+        let w = self.get_range_width(start..end);
+        Some(Rect::new(offset + x, y, w, h))
     }
 
     pub fn set_text<P: AsRef<str>>(&mut self, text: P) -> &mut Self {
         self.text
             .set_value_and_mark_modified(text.as_ref().chars().collect());
+        self
+    }
+
+    pub fn set_chars(&mut self, text: Vec<char>) -> &mut Self {
+        self.text.set_value_and_mark_modified(text);
         self
     }
 
@@ -671,6 +728,64 @@ impl FormattedText {
         self
     }
 
+    /// Sets desired style.
+    pub fn set_style(&mut self, style: &StyleResource) -> &mut Self {
+        self.font_size.update(style);
+        self
+    }
+
+    /// Runs can optionally modify various style settings for portions of the text.
+    /// Later runs override earlier runs if their ranges overlap and the later run
+    /// sets a property that conflicts with an earlier run.
+    pub fn runs(&self) -> &RunSet {
+        &self.runs
+    }
+
+    /// Modify runs of the text to set the style for portions of the text.
+    /// Later runs potentially override earlier runs if the ranges of the runs overlap and the later run
+    /// sets a property that conflicts with an earlier run.
+    pub fn runs_mut(&mut self) -> &mut RunSet {
+        &mut self.runs
+    }
+
+    /// Replace runs of the text to set the style for portions of the text.
+    /// Later runs potentially override earlier runs if the ranges of the runs overlap and the later run
+    /// sets a property that conflicts with an earlier run.
+    pub fn set_runs(&mut self, runs: RunSet) -> &mut Self {
+        self.runs = runs;
+        self
+    }
+
+    /// The amount of indent of the first line, horizontally separating it
+    /// from the start of the remaining lines.
+    /// If the indent is negative, then the first line will not be indented
+    /// while all the other lines will be indented. By default, this is 0.0.
+    pub fn set_line_indent(&mut self, indent: f32) -> &mut Self {
+        self.line_indent.set_value_and_mark_modified(indent);
+        self
+    }
+
+    /// The amount of indent of the first line, horizontally separating it
+    /// from the start of the remaining lines.
+    /// If the indent is negative, then the first line will not be indented
+    /// while all the other lines will be indented. By default, this is 0.0.
+    pub fn line_indent(&mut self) -> f32 {
+        *self.line_indent
+    }
+
+    /// The space separating each line from the line above and below.
+    /// By default, this is 0.0.
+    pub fn set_line_space(&mut self, space: f32) -> &mut Self {
+        self.line_space.set_value_and_mark_modified(space);
+        self
+    }
+
+    /// The space separating each line from the line above and below.
+    /// By default, this is 0.0.
+    pub fn line_space(&self) -> f32 {
+        *self.line_space
+    }
+
     pub fn wrap_mode(&self) -> WrapMode {
         *self.wrap
     }
@@ -698,16 +813,108 @@ impl FormattedText {
         self
     }
 
-    pub fn build(&mut self) -> Vector2<f32> {
+    /// Returns once all fonts used by this FormattedText are finished loading.
+    pub async fn wait_for_fonts(&mut self) -> Result<(), LoadError> {
+        if let Some(font) = self.font.clone_inner() {
+            font.await?;
+        }
+        for run in self.runs.iter() {
+            if let Some(font) = run.font() {
+                font.clone().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns true if all fonts used by this resource are Ok.
+    /// This `FormattedText` will not build successfully unless this returns true.
+    pub fn are_fonts_loaded(&self) -> bool {
+        if !self.get_font().is_ok() {
+            return false;
+        }
+        for run in self.runs.iter() {
+            if let Some(font) = run.font() {
+                if !font.is_ok() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn are_fonts_loading(&self) -> bool {
+        if !self.get_font().is_loading() {
+            return true;
+        }
+        for run in self.runs.iter() {
+            if let Some(font) = run.font() {
+                if !font.is_loading() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn font_load_error_list(&self) -> Vec<(PathBuf, LoadError)> {
+        let mut list = vec![];
+        if let ResourceState::LoadError { path, error } = &self.get_font().header().state {
+            list.push((path.clone(), error.clone()));
+        }
+        for run in self.runs.iter() {
+            if let Some(font) = run.font() {
+                if let ResourceState::LoadError { path, error } = &font.header().state {
+                    list.push((path.clone(), error.clone()));
+                }
+            }
+        }
+        list
+    }
+
+    pub fn font_loading_summary(&self) -> String {
+        use std::fmt::Write;
+        let mut result = String::default();
+        write!(result, "Primary font: {}", self.get_font().header().state).unwrap();
+        for run in self.runs.iter() {
+            if let Some(font) = run.font() {
+                write!(result, "\nRun {:?}: {}", run.range, font.header().state).unwrap();
+            }
+        }
+        result
+    }
+
+    pub fn measure_and_arrange(&mut self) -> Vector2<f32> {
+        let size = self.measure();
+        self.arrange(self.constraint);
+        size
+    }
+
+    pub fn measure(&mut self) -> Vector2<f32> {
         let mut lines = std::mem::take(&mut self.lines);
         lines.clear();
+        // Fail early if any font is not available.
+        if !self.are_fonts_loaded() {
+            Log::err(format!(
+                "Unable to measure text due to unloaded fonts. {:?}.\n{}",
+                self.text(),
+                self.font_loading_summary(),
+            ));
+            return Vector2::default();
+        }
+        let constraint = Vector2::new(
+            (self.constraint.x - (self.padding.left + self.padding.right)).max(0.0),
+            (self.constraint.y - (self.padding.top + self.padding.bottom)).max(0.0),
+        );
+        let first_indent = self.line_indent.max(0.0);
+        let normal_indent = -self.line_indent.min(0.0);
         let sink = WrapSink {
             lines: &mut lines,
-            max_width: self.constraint.x,
+            normal_width: constraint.x - normal_indent,
+            first_width: constraint.x - first_indent,
         };
         if let Some(mask) = *self.mask_char {
             let advance = GlyphMetrics {
-                font: &mut self.font.data_ref(),
+                font: &mut self.get_font().data_ref(),
                 size: **self.font_size,
             }
             .advance(mask);
@@ -737,33 +944,13 @@ impl FormattedText {
             }
         }
 
-        let mut total_height = 0.0;
-        // Align lines according to desired alignment.
-        for line in lines.iter_mut() {
-            match *self.horizontal_alignment {
-                HorizontalAlignment::Left => line.x_offset = 0.0,
-                HorizontalAlignment::Center => {
-                    if self.constraint.x.is_infinite() {
-                        line.x_offset = 0.0;
-                    } else {
-                        line.x_offset = 0.5 * (self.constraint.x - line.width).max(0.0);
-                    }
-                }
-                HorizontalAlignment::Right => {
-                    if self.constraint.x.is_infinite() {
-                        line.x_offset = 0.0;
-                    } else {
-                        line.x_offset = (self.constraint.x - line.width).max(0.0)
-                    }
-                }
-                HorizontalAlignment::Stretch => line.x_offset = 0.0,
-            }
-        }
+        self.total_height = 0.0;
+
         // Calculate line height
         for line in lines.iter_mut() {
             if self.mask_char.is_some() || self.runs.is_empty() {
                 line.height = GlyphMetrics {
-                    font: &mut self.font.data_ref(),
+                    font: &mut self.get_font().data_ref(),
                     size: **self.font_size,
                 }
                 .ascender();
@@ -777,77 +964,12 @@ impl FormattedText {
                     line.height = line.height.max(h);
                 }
             }
-            total_height += line.height;
+            self.total_height += line.height + self.line_space();
         }
+        self.total_height -= self.line_space();
 
-        // Generate glyphs for each text line.
-        self.glyphs.clear();
-
-        let cursor_y_start = match *self.vertical_alignment {
-            VerticalAlignment::Top => 0.0,
-            VerticalAlignment::Center => {
-                if self.constraint.y.is_infinite() {
-                    0.0
-                } else {
-                    (self.constraint.y - total_height).max(0.0) * 0.5
-                }
-            }
-            VerticalAlignment::Bottom => {
-                if self.constraint.y.is_infinite() {
-                    0.0
-                } else {
-                    (self.constraint.y - total_height).max(0.0)
-                }
-            }
-            VerticalAlignment::Stretch => 0.0,
-        };
-        let mut y: f32 = cursor_y_start.floor();
-        for line in lines.iter_mut() {
-            let mut x = line.x_offset.floor();
-            if let Some(mask) = *self.mask_char {
-                let mut prev = None;
-                let mut metrics = GlyphMetrics {
-                    font: &mut self.font.data_ref(),
-                    size: **self.font_size,
-                };
-                for c in std::iter::repeat_n(mask, line.len()) {
-                    let (glyph, advance) =
-                        build_glyph(&mut metrics, x, y, 0, c, prev, self.super_sampling_scale);
-                    self.glyphs.push(glyph);
-                    x += advance;
-                    prev = Some(c);
-                }
-            } else {
-                let mut prev = None;
-                for (i, &c) in self.text.iter().enumerate().take(line.end).skip(line.begin) {
-                    let font = self.font_at(i);
-                    let font = &mut font.data_ref();
-                    let mut metrics = GlyphMetrics {
-                        font,
-                        size: self.font_size_at(i),
-                    };
-                    match c {
-                        '\n' => {
-                            x += metrics.newline_advance();
-                        }
-                        _ => {
-                            let y1 = y + line.height - metrics.ascender();
-                            let scale = self.super_sampling_scale;
-                            let (glyph, advance) =
-                                build_glyph(&mut metrics, x, y1, i, c, prev, scale);
-                            self.glyphs.push(glyph);
-                            x += advance;
-                        }
-                    }
-                    prev = Some(c);
-                }
-            }
-            line.y_offset = y;
-            y += line.height;
-        }
-
-        let size_x = if self.constraint.x.is_finite() {
-            self.constraint.x
+        let size_x = if constraint.x.is_finite() {
+            constraint.x
         } else {
             lines
                 .iter()
@@ -855,16 +977,16 @@ impl FormattedText {
                 .max_by(f32::total_cmp)
                 .unwrap_or_default()
         };
-        let size_y = if self.constraint.y.is_finite() {
-            self.constraint.y
+        let size_y = if constraint.y.is_finite() {
+            constraint.y
         } else {
             let descender = if self.mask_char.is_some() || self.runs.is_empty() {
                 GlyphMetrics {
-                    font: &mut self.font.data_ref(),
+                    font: &mut self.get_font().data_ref(),
                     size: **self.font_size,
                 }
                 .descender()
-            } else if let Some(line) = self.lines.last() {
+            } else if let Some(line) = lines.last() {
                 (line.begin..line.end)
                     .map(|i| {
                         GlyphMetrics {
@@ -879,10 +1001,128 @@ impl FormattedText {
                 0.0
             };
             // Minus here is because descender has negative value.
-            total_height - descender
+            self.total_height - descender
         };
         self.lines = lines;
-        Vector2::new(size_x, size_y)
+        Vector2::new(
+            size_x + self.padding.left + self.padding.right,
+            size_y + self.padding.top + self.padding.bottom,
+        )
+    }
+
+    pub fn arrange(&mut self, constraint: Vector2<f32>) {
+        self.constraint = constraint;
+        let constraint = Vector2::new(
+            (self.constraint.x - (self.padding.left + self.padding.right)).max(0.0),
+            (self.constraint.y - (self.padding.top + self.padding.bottom)).max(0.0),
+        );
+        let mut lines = std::mem::take(&mut self.lines);
+        let first_indent = self.line_indent.max(0.0);
+        let normal_indent = -self.line_indent.min(0.0);
+        // Align lines according to desired alignment.
+        for (i, line) in lines.iter_mut().enumerate() {
+            let indent = if i == 0 { first_indent } else { normal_indent };
+            match *self.horizontal_alignment {
+                HorizontalAlignment::Left => line.x_offset = indent,
+                HorizontalAlignment::Center => {
+                    if constraint.x.is_infinite() {
+                        line.x_offset = indent;
+                    } else {
+                        line.x_offset = 0.5 * (constraint.x - line.width).max(0.0);
+                    }
+                }
+                HorizontalAlignment::Right => {
+                    if constraint.x.is_infinite() {
+                        line.x_offset = indent;
+                    } else {
+                        line.x_offset = (constraint.x - line.width - indent).max(0.0)
+                    }
+                }
+                HorizontalAlignment::Stretch => line.x_offset = indent,
+            }
+            line.x_offset += self.padding.left;
+        }
+
+        // Generate glyphs for each text line.
+        self.glyphs.clear();
+
+        let cursor_y_start = self.padding.top
+            + match *self.vertical_alignment {
+                VerticalAlignment::Top => 0.0,
+                VerticalAlignment::Center => {
+                    if constraint.y.is_infinite() {
+                        0.0
+                    } else {
+                        (constraint.y - self.total_height).max(0.0) * 0.5
+                    }
+                }
+                VerticalAlignment::Bottom => {
+                    if constraint.y.is_infinite() {
+                        0.0
+                    } else {
+                        (constraint.y - self.total_height).max(0.0)
+                    }
+                }
+                VerticalAlignment::Stretch => 0.0,
+            };
+        let mut y: f32 = cursor_y_start.floor();
+        for line in lines.iter_mut() {
+            let mut x = line.x_offset.floor();
+            if let Some(mask) = *self.mask_char {
+                let mut prev = None;
+                let font = self.get_font();
+                let mut metrics = GlyphMetrics {
+                    font: &mut font.data_ref(),
+                    size: **self.font_size,
+                };
+                for c in std::iter::repeat_n(mask, line.len()) {
+                    let (glyph, advance) =
+                        build_glyph(&mut metrics, x, y, 0, c, prev, self.super_sampling_scale);
+                    self.glyphs.push(glyph);
+                    x += advance;
+                    prev = Some(c);
+                }
+            } else {
+                let mut prev = None;
+                for (i, &c) in self.text.iter().enumerate().take(line.end).skip(line.begin) {
+                    let font = self.font_at(i);
+                    let font = &mut font.data_ref();
+                    let size = self.font_size_at(i);
+                    let mut metrics = GlyphMetrics { font, size };
+                    match c {
+                        '\n' => {
+                            x += metrics.newline_advance();
+                        }
+                        _ => {
+                            let y1 = y + line.height - metrics.ascender();
+                            let scale = self.super_sampling_scale;
+                            let (glyph, advance) =
+                                build_glyph(&mut metrics, x, y1, i, c, prev, scale);
+
+                            if *self.trim_text
+                                && *self.wrap == WrapMode::NoWrap
+                                && line.width > constraint.x
+                            {
+                                let ellipsis_advance = metrics.advance(ELLIPSIS);
+                                if x + ellipsis_advance * 1.5 > constraint.x {
+                                    let (glyph, _) =
+                                        build_glyph(&mut metrics, x, y1, i, ELLIPSIS, prev, scale);
+                                    self.glyphs.push(glyph);
+                                    break;
+                                }
+                            }
+
+                            self.glyphs.push(glyph);
+                            x += advance;
+                        }
+                    }
+                    prev = Some(c);
+                }
+            }
+            line.y_offset = y;
+            y += line.height + self.line_space();
+        }
+        self.lines = lines;
     }
 }
 
@@ -908,7 +1148,7 @@ pub struct FormattedTextBuilder {
     font: FontResource,
     brush: Brush,
     constraint: Vector2<f32>,
-    text: String,
+    text: Vec<char>,
     vertical_alignment: VerticalAlignment,
     horizontal_alignment: HorizontalAlignment,
     wrap: WrapMode,
@@ -919,7 +1159,13 @@ pub struct FormattedTextBuilder {
     shadow_offset: Vector2<f32>,
     font_size: StyledProperty<f32>,
     super_sampling_scaling: f32,
-    runs: Vec<Run>,
+    padding: Thickness,
+    runs: RunSet,
+    /// The amount of indentation on the first line of the text.
+    line_indent: f32,
+    /// The space between lines.
+    line_space: f32,
+    trim_text: bool,
 }
 
 impl FormattedTextBuilder {
@@ -927,7 +1173,7 @@ impl FormattedTextBuilder {
     pub fn new(font: FontResource) -> FormattedTextBuilder {
         FormattedTextBuilder {
             font,
-            text: "".to_owned(),
+            text: Vec::default(),
             horizontal_alignment: HorizontalAlignment::Left,
             vertical_alignment: VerticalAlignment::Top,
             brush: Brush::Solid(Color::WHITE),
@@ -940,7 +1186,11 @@ impl FormattedTextBuilder {
             shadow_offset: Vector2::new(1.0, 1.0),
             font_size: 14.0f32.into(),
             super_sampling_scaling: 1.0,
-            runs: Vec::default(),
+            padding: Thickness::uniform(0.0),
+            runs: RunSet::default(),
+            line_indent: 0.0,
+            line_space: 0.0,
+            trim_text: false,
         }
     }
 
@@ -960,6 +1210,11 @@ impl FormattedTextBuilder {
     }
 
     pub fn with_text(mut self, text: String) -> Self {
+        self.text = text.chars().collect();
+        self
+    }
+
+    pub fn with_chars(mut self, text: Vec<char>) -> Self {
         self.text = text;
         self
     }
@@ -1009,6 +1264,11 @@ impl FormattedTextBuilder {
         self
     }
 
+    pub fn with_padding(mut self, padding: Thickness) -> Self {
+        self.padding = padding;
+        self
+    }
+
     /// Sets desired super sampling scaling.
     pub fn with_super_sampling_scaling(mut self, scaling: f32) -> Self {
         self.super_sampling_scaling = scaling;
@@ -1027,13 +1287,38 @@ impl FormattedTextBuilder {
     /// Later runs potentially overriding earlier runs if the ranges of the runs overlap and the later run
     /// sets a property that conflicts with an earlier run.
     pub fn with_runs<I: IntoIterator<Item = Run>>(mut self, runs: I) -> Self {
-        self.runs.extend(runs);
+        for run in runs {
+            self.runs.push(run);
+        }
+        self
+    }
+
+    /// The amount of indent of the first line, horizontally separating it
+    /// from the start of the remaining lines.
+    /// If the indent is negative, then the first line will not be indented
+    /// while all the other lines will be indented. By default, this is 0.0.
+    pub fn with_line_indent(mut self, indent: f32) -> Self {
+        self.line_indent = indent;
+        self
+    }
+
+    /// The space separating each line from the line above and below.
+    /// By default, this is 0.0.
+    pub fn with_line_space(mut self, space: f32) -> Self {
+        self.line_space = space;
+        self
+    }
+
+    /// A flag, that defines whether the formatted text should add ellipsis (…) to lines that goes
+    /// outside provided bounds.
+    pub fn with_trim_text(mut self, trim: bool) -> Self {
+        self.trim_text = trim;
         self
     }
 
     pub fn build(self) -> FormattedText {
         FormattedText {
-            text: self.text.chars().collect::<Vec<char>>().into(),
+            text: self.text.into(),
             lines: Vec::new(),
             glyphs: Vec::new(),
             vertical_alignment: self.vertical_alignment.into(),
@@ -1046,10 +1331,15 @@ impl FormattedTextBuilder {
             font_size: self.font_size.into(),
             shadow: self.shadow.into(),
             shadow_brush: self.shadow_brush.into(),
-            font: self.font.into(),
+            font: Some(self.font).into(),
             shadow_dilation: self.shadow_dilation.into(),
             shadow_offset: self.shadow_offset.into(),
-            runs: self.runs.into(),
+            runs: self.runs,
+            line_indent: self.line_indent.into(),
+            line_space: self.line_space.into(),
+            padding: self.padding.into(),
+            total_height: 0.0,
+            trim_text: self.trim_text.into(),
         }
     }
 }

@@ -29,7 +29,6 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         visitor::prelude::*,
     },
@@ -40,7 +39,7 @@ use crate::{
     },
 };
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// Listener represents directional microphone-like device. It receives sound from surroundings
@@ -57,8 +56,11 @@ use std::ops::{Deref, DerefMut};
 ///
 /// 2D sound sources (with spatial blend == 0.0) are not influenced by listener's position and
 /// orientation.
-#[derive(Visit, Reflect, Default, Clone, Debug, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Visit, Reflect, Default, Clone, Debug)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "2c7dabc1-5666-4256-b020-01532701e4c6"
+)]
 pub struct Listener {
     base: Base,
 }
@@ -74,12 +76,6 @@ impl Deref for Listener {
 impl DerefMut for Listener {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.base
-    }
-}
-
-impl TypeUuidProvider for Listener {
-    fn type_uuid() -> Uuid {
-        uuid!("2c7dabc1-5666-4256-b020-01532701e4c6")
     }
 }
 
@@ -110,7 +106,7 @@ impl NodeTrait for Listener {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn sync_native(&self, _self_handle: Handle<Node>, context: &mut SyncContext) {
@@ -149,7 +145,7 @@ impl ListenerBuilder {
     }
 
     /// Creates [`Listener`] node and adds it to the scene graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Listener> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

@@ -24,7 +24,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     key::{
         HotKey, HotKeyEditorBuilder, HotKeyEditorMessage, KeyBinding, KeyBindingEditorBuilder,
@@ -49,13 +49,11 @@ impl PropertyEditorDefinition for HotKeyPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<HotKey>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: HotKeyEditorBuilder::new(
-                WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
-            )
-            .with_value(value.clone())
-            .build(ctx.build_context),
-        })
+        Ok(PropertyEditorInstance::simple(
+            HotKeyEditorBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(1.0)))
+                .with_value(value.clone())
+                .build(ctx.build_context),
+        ))
     }
 
     fn create_message(
@@ -63,10 +61,9 @@ impl PropertyEditorDefinition for HotKeyPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<HotKey>()?;
-        Ok(Some(HotKeyEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            HotKeyEditorMessage::Value(value.clone()),
         )))
     }
 
@@ -76,7 +73,7 @@ impl PropertyEditorDefinition for HotKeyPropertyEditorDefinition {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }
@@ -97,13 +94,11 @@ impl PropertyEditorDefinition for KeyBindingPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<KeyBinding>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: KeyBindingEditorBuilder::new(
-                WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
-            )
-            .with_value(value.clone())
-            .build(ctx.build_context),
-        })
+        Ok(PropertyEditorInstance::simple(
+            KeyBindingEditorBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(1.0)))
+                .with_value(value.clone())
+                .build(ctx.build_context),
+        ))
     }
 
     fn create_message(
@@ -111,10 +106,9 @@ impl PropertyEditorDefinition for KeyBindingPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<KeyBinding>()?;
-        Ok(Some(KeyBindingEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            KeyBindingEditorMessage::Value(value.clone()),
         )))
     }
 
@@ -124,7 +118,7 @@ impl PropertyEditorDefinition for KeyBindingPropertyEditorDefinition {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }

@@ -19,65 +19,87 @@
 // SOFTWARE.
 
 use super::fetch_state_node_model_handle;
-use crate::fyrox::{
-    core::pool::Handle,
-    generic_animation::machine::{Machine, State, Transition},
-    graph::BaseSceneGraph,
-    gui::{
-        menu::MenuItemMessage,
-        message::{MessageDirection, UiMessage},
-        popup::{Placement, PopupBuilder, PopupMessage},
-        stack_panel::StackPanelBuilder,
-        widget::WidgetBuilder,
-        BuildContext, RcUiNodeHandle, UiNode, UserInterface,
-    },
-};
-use crate::plugins::absm::{
-    canvas::{AbsmCanvas, AbsmCanvasMessage, Mode},
-    command::{
-        AddStateCommand, AddTransitionCommand, DeleteStateCommand, DeleteTransitionCommand,
-        SetMachineEntryStateCommand,
-    },
-    node::{AbsmNode, AbsmNodeMessage},
-    selection::SelectedEntity,
-    transition::TransitionView,
-};
 use crate::{
     command::{Command, CommandGroup},
+    fyrox::{
+        core::pool::Handle,
+        generic_animation::machine::{Machine, State, Transition},
+        graph::SceneGraph,
+        gui::{
+            menu::MenuItemMessage,
+            message::UiMessage,
+            popup::{Placement, PopupBuilder, PopupMessage},
+            stack_panel::StackPanelBuilder,
+            widget::WidgetBuilder,
+            BuildContext, RcUiNodeHandle, UiNode, UserInterface,
+        },
+    },
     menu::create_menu_item,
     message::MessageSender,
+    plugins::absm::{
+        canvas::{AbsmCanvas, AbsmCanvasMessage, Mode},
+        command::{
+            AddStateCommand, AddTransitionCommand, DeleteStateCommand, DeleteTransitionCommand,
+            SetMachineEntryStateCommand,
+        },
+        node::{AbsmNode, AbsmNodeMessage},
+        selection::SelectedEntity,
+        transition::TransitionView,
+    },
     scene::{commands::ChangeSelectionCommand, Selection},
 };
 
+use fyrox::core::pool::HandlesArrayExtension;
 use fyrox::core::reflect::Reflect;
-use fyrox::gui::menu::ContextMenuBuilder;
+use fyrox::core::uuid::{uuid, Uuid};
+use fyrox::gui::menu::{ContextMenuBuilder, MenuItem};
 
 pub struct CanvasContextMenu {
-    create_state: Handle<UiNode>,
-    connect_all_nodes: Handle<UiNode>,
+    create_state: Handle<MenuItem>,
+    connect_all_nodes: Handle<MenuItem>,
     pub menu: RcUiNodeHandle,
-    pub canvas: Handle<UiNode>,
+    pub canvas: Handle<AbsmCanvas>,
     pub node_context_menu: Option<RcUiNodeHandle>,
 }
 
 impl CanvasContextMenu {
+    pub const CREATE_STATE: Uuid = uuid!("6a3fafe3-0362-4964-a91c-f7a4b1e4e15e");
+    pub const CONNECT_ALL: Uuid = uuid!("3db3f59f-e37a-439d-92fc-7785cf48ac49");
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let create_state;
         let connect_all_nodes;
         let menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new().with_visibility(false)).with_content(
-                StackPanelBuilder::new(WidgetBuilder::new().with_children([
-                    {
-                        create_state = create_menu_item("Create State", vec![], ctx);
-                        create_state
-                    },
-                    {
-                        connect_all_nodes = create_menu_item("Connect all nodes", vec![], ctx);
-                        connect_all_nodes
-                    },
-                ]))
-                .build(ctx),
-            ),
+            PopupBuilder::new(WidgetBuilder::new().with_visibility(false))
+                .with_content(
+                    StackPanelBuilder::new(
+                        WidgetBuilder::new().with_children(
+                            [
+                                {
+                                    create_state = create_menu_item(
+                                        "Create State",
+                                        Self::CREATE_STATE,
+                                        vec![],
+                                        ctx,
+                                    );
+                                    create_state
+                                },
+                                {
+                                    connect_all_nodes = create_menu_item(
+                                        "Connect all nodes",
+                                        Self::CONNECT_ALL,
+                                        vec![],
+                                        ctx,
+                                    );
+                                    connect_all_nodes
+                                },
+                            ]
+                            .to_base(),
+                        ),
+                    )
+                    .build(ctx),
+                )
+                .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -107,7 +129,7 @@ impl CanvasContextMenu {
                     absm_node_handle,
                     layer_index,
                     State {
-                        position: ui.node(self.canvas).screen_to_local(screen_position),
+                        position: ui[self.canvas].screen_to_local(screen_position),
                         name: "New State".to_string(),
                         on_enter_actions: Default::default(),
                         on_leave_actions: Default::default(),
@@ -115,10 +137,7 @@ impl CanvasContextMenu {
                     },
                 ));
             } else if message.destination() == self.connect_all_nodes {
-                let canvas = ui
-                    .node(self.canvas)
-                    .query_component::<AbsmCanvas>()
-                    .unwrap();
+                let canvas = &ui[self.canvas];
                 let state_nodes = canvas.children();
                 let mut states = Vec::default();
                 for source in state_nodes {
@@ -150,17 +169,23 @@ impl CanvasContextMenu {
 }
 
 pub struct NodeContextMenu {
-    create_transition: Handle<UiNode>,
-    remove: Handle<UiNode>,
-    set_as_entry_state: Handle<UiNode>,
-    enter_state: Handle<UiNode>,
-    connect_to_all_nodes: Handle<UiNode>,
+    create_transition: Handle<MenuItem>,
+    remove: Handle<MenuItem>,
+    set_as_entry_state: Handle<MenuItem>,
+    enter_state: Handle<MenuItem>,
+    connect_to_all_nodes: Handle<MenuItem>,
     pub menu: RcUiNodeHandle,
-    pub canvas: Handle<UiNode>,
+    pub canvas: Handle<AbsmCanvas>,
     placement_target: Handle<UiNode>,
 }
 
 impl NodeContextMenu {
+    pub const CREATE_TRANSITION: Uuid = uuid!("4a76fffd-ed28-4451-96f1-72ff9459fc64");
+    pub const REMOVE: Uuid = uuid!("23b98c44-2cbb-499b-98b2-46fde9438c8f");
+    pub const SET_AS_ENTRY_STATE: Uuid = uuid!("bf43a306-58b9-46c8-bd8a-108bdfd1c67b");
+    pub const ENTER_STATE: Uuid = uuid!("78c899a7-b11f-4c25-969d-019272a440a3");
+    pub const CREATE_ALL_TRANSITIONS: Uuid = uuid!("75b69ca2-e11c-4d00-94e6-3e548ec3d526");
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let create_transition;
         let remove;
@@ -168,37 +193,50 @@ impl NodeContextMenu {
         let enter_state;
         let connect_to_all_nodes;
         let menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new().with_visibility(false)).with_content(
-                StackPanelBuilder::new(
-                    WidgetBuilder::new()
-                        .with_child({
-                            create_transition = create_menu_item("Create Transition", vec![], ctx);
-                            create_transition
-                        })
-                        .with_child({
-                            remove = create_menu_item("Remove", vec![], ctx);
-                            remove
-                        })
-                        .with_child({
-                            set_as_entry_state =
-                                create_menu_item("Set As Entry State", vec![], ctx);
-                            set_as_entry_state
-                        })
-                        .with_child({
-                            enter_state = create_menu_item("Enter State", vec![], ctx);
-                            enter_state
-                        })
-                        .with_child({
-                            connect_to_all_nodes = create_menu_item(
-                                "Create all transition from current state",
-                                vec![],
-                                ctx,
-                            );
-                            connect_to_all_nodes
-                        }),
+            PopupBuilder::new(WidgetBuilder::new().with_visibility(false))
+                .with_content(
+                    StackPanelBuilder::new(
+                        WidgetBuilder::new()
+                            .with_child({
+                                create_transition = create_menu_item(
+                                    "Create Transition",
+                                    Self::CREATE_TRANSITION,
+                                    vec![],
+                                    ctx,
+                                );
+                                create_transition
+                            })
+                            .with_child({
+                                remove = create_menu_item("Remove", Self::REMOVE, vec![], ctx);
+                                remove
+                            })
+                            .with_child({
+                                set_as_entry_state = create_menu_item(
+                                    "Set As Entry State",
+                                    Self::SET_AS_ENTRY_STATE,
+                                    vec![],
+                                    ctx,
+                                );
+                                set_as_entry_state
+                            })
+                            .with_child({
+                                enter_state =
+                                    create_menu_item("Enter State", Self::ENTER_STATE, vec![], ctx);
+                                enter_state
+                            })
+                            .with_child({
+                                connect_to_all_nodes = create_menu_item(
+                                    "Create Transitions With All States",
+                                    Self::CREATE_ALL_TRANSITIONS,
+                                    vec![],
+                                    ctx,
+                                );
+                                connect_to_all_nodes
+                            }),
+                    )
+                    .build(ctx),
                 )
-                .build(ctx),
-            ),
+                .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -227,15 +265,14 @@ impl NodeContextMenu {
     ) {
         if let Some(MenuItemMessage::Click) = message.data() {
             if message.destination() == self.create_transition {
-                ui.send_message(AbsmCanvasMessage::switch_mode(
+                ui.send(
                     self.canvas,
-                    MessageDirection::ToWidget,
-                    Mode::CreateTransition {
+                    AbsmCanvasMessage::SwitchMode(Mode::CreateTransition {
                         source: self.placement_target,
                         source_pos: ui.node(self.placement_target).center(),
-                        dest_pos: ui.node(self.canvas).screen_to_local(ui.cursor_position()),
-                    },
-                ))
+                        dest_pos: ui[self.canvas].screen_to_local(ui.cursor_position()),
+                    }),
+                )
             } else if message.destination == self.remove {
                 if let Some(selection) = editor_selection.as_absm() {
                     let states_to_remove = selection
@@ -297,33 +334,27 @@ impl NodeContextMenu {
                     layer: layer_index,
                     entry: ui
                         .node(self.placement_target)
-                        .query_component::<AbsmNode<State<Handle<N>>>>()
+                        .self_or_field_ref::<AbsmNode<State<Handle<N>>>>()
                         .unwrap()
                         .model_handle,
                 });
             } else if message.destination == self.enter_state {
-                ui.send_message(AbsmNodeMessage::enter(
-                    self.placement_target,
-                    MessageDirection::FromWidget,
-                ));
+                ui.post(self.placement_target, AbsmNodeMessage::Enter);
             } else if message.destination == self.connect_to_all_nodes {
-                let canvas = ui
-                    .node(self.canvas)
-                    .cast::<AbsmCanvas>()
-                    .expect("Must be absm canvas");
-
+                let canvas = &ui[self.canvas];
                 let state_nodes = canvas
                     .children()
                     .iter()
                     .cloned()
-                    .filter(|c| ui.node(*c).has_component::<AbsmNode<State<Handle<N>>>>())
+                    .filter(|c| ui.node(*c).is_or_has_field::<AbsmNode<State<Handle<N>>>>())
                     .collect::<Vec<_>>();
-                ui.send_message(AbsmCanvasMessage::commit_transition_to_all_nodes(
+                ui.post(
                     self.canvas,
-                    MessageDirection::FromWidget,
-                    self.placement_target,
-                    state_nodes,
-                ));
+                    AbsmCanvasMessage::CommitTransitionToAllNodes {
+                        source_node: self.placement_target,
+                        dest_nodes: state_nodes,
+                    },
+                );
             }
         } else if let Some(PopupMessage::Placement(Placement::Cursor(target))) = message.data() {
             if message.destination() == self.menu.handle() {
@@ -334,22 +365,31 @@ impl NodeContextMenu {
 }
 
 pub struct TransitionContextMenu {
-    remove: Handle<UiNode>,
+    remove: Handle<MenuItem>,
     pub menu: RcUiNodeHandle,
     placement_target: Handle<UiNode>,
 }
 
 impl TransitionContextMenu {
+    pub const REMOVE_TRANSITION: Uuid = uuid!("57a73a49-7734-421a-bcd4-8caf44bc3a71");
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let remove;
         let menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new().with_visibility(false)).with_content(
-                StackPanelBuilder::new(WidgetBuilder::new().with_child({
-                    remove = create_menu_item("Remove Transition", vec![], ctx);
-                    remove
-                }))
-                .build(ctx),
-            ),
+            PopupBuilder::new(WidgetBuilder::new().with_visibility(false))
+                .with_content(
+                    StackPanelBuilder::new(WidgetBuilder::new().with_child({
+                        remove = create_menu_item(
+                            "Remove Transition",
+                            Self::REMOVE_TRANSITION,
+                            vec![],
+                            ctx,
+                        );
+                        remove
+                    }))
+                    .build(ctx),
+                )
+                .with_restrict_picking(false),
         )
         .build(ctx);
         let menu = RcUiNodeHandle::new(menu, ctx.sender());
@@ -378,7 +418,7 @@ impl TransitionContextMenu {
 
                     let transition_ref = ui
                         .node(self.placement_target)
-                        .query_component::<TransitionView>()
+                        .self_or_field_ref::<TransitionView>()
                         .unwrap();
 
                     let group = vec![

@@ -24,8 +24,7 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::{pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
-    define_constructor,
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
     grid::{Column, GridBuilder, Row},
     message::{MessageDirection, UiMessage},
     numeric::{NumericType, NumericUpDownBuilder, NumericUpDownMessage},
@@ -34,6 +33,8 @@ use crate::{
     BuildContext, Control, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 
+use crate::message::MessageData;
+use crate::numeric::NumericUpDown;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut, Range};
@@ -47,13 +48,7 @@ where
     /// A message, that is used to either modifying or fetching the value of a [`RangeEditor`] widget instance.
     Value(Range<T>),
 }
-
-impl<T: NumericType> RangeEditorMessage<T> {
-    define_constructor!(
-        /// Creates [`RangeEditorMessage::Value`] message.
-        RangeEditorMessage:Value => fn value(Range<T>), layout: false
-    );
-}
+impl<T: NumericType> MessageData for RangeEditorMessage<T> {}
 
 /// Range editor is used to display and edit closed ranges like `0..1`. The widget is generic over numeric type,
 /// so you can display and editor ranges of any type, such as `u32`, `f32`, `f64`, etc.
@@ -66,7 +61,9 @@ impl<T: NumericType> RangeEditorMessage<T> {
 /// # use fyrox_ui::{
 /// #     core::pool::Handle, range::RangeEditorBuilder, widget::WidgetBuilder, BuildContext, UiNode,
 /// # };
-/// fn create_range_editor(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::range::RangeEditor;
+///
+/// fn create_range_editor(ctx: &mut BuildContext) -> Handle<RangeEditor<u32>> {
 ///     RangeEditorBuilder::new(WidgetBuilder::new())
 ///         .with_value(0u32..100u32)
 ///         .build(ctx)
@@ -77,7 +74,7 @@ impl<T: NumericType> RangeEditorMessage<T> {
 ///
 /// ## Value
 ///
-/// To change current value of a range editor, use [`RangeEditorMessage::Value`] message:
+/// To change the current value of a range editor, use [`RangeEditorMessage::Value`] message:
 ///
 /// ```rust
 /// # use fyrox_ui::{
@@ -85,11 +82,7 @@ impl<T: NumericType> RangeEditorMessage<T> {
 /// #     UserInterface,
 /// # };
 /// fn change_value(range_editor: Handle<UiNode>, ui: &UserInterface) {
-///     ui.send_message(RangeEditorMessage::value(
-///         range_editor,
-///         MessageDirection::ToWidget,
-///         5u32..20u32,
-///     ))
+///     ui.send(range_editor, RangeEditorMessage::Value(5u32..20u32))
 /// }
 /// ```
 ///
@@ -105,20 +98,19 @@ impl<T: NumericType> RangeEditorMessage<T> {
 /// # };
 /// #
 /// fn fetch_value(range_editor: Handle<UiNode>, message: &UiMessage) {
-///     if let Some(RangeEditorMessage::Value(range)) = message.data::<RangeEditorMessage<u32>>() {
-///         if message.destination() == range_editor
-///             && message.direction() == MessageDirection::FromWidget
-///         {
-///             println!("The new value is: {:?}", range)
-///         }
+///     if let Some(RangeEditorMessage::Value(range)) = message.data_from::<RangeEditorMessage<u32>>(range_editor) {
+///         println!("The new value is: {:?}", range)
 ///     }
 /// }
 /// ```
 ///
 /// Be very careful about the type of the range when sending a message, you need to send a range of exact type, that match the type
 /// of your editor, otherwise the message have no effect. The same applied to fetching.
-#[derive(Default, Debug, Clone, Reflect, Visit, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Debug, Clone, Reflect, Visit)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "0eb2948e-8485-490e-8719-18a0bb6fe275"
+)]
 pub struct RangeEditor<T>
 where
     T: NumericType,
@@ -127,10 +119,10 @@ where
     pub widget: Widget,
     /// Current value of the range editor.
     pub value: InheritableVariable<Range<T>>,
-    /// A handle to numeric field that is used to show/modify start value of current range.
-    pub start: InheritableVariable<Handle<UiNode>>,
-    /// A handle to numeric field that is used to show/modify end value of current range.
-    pub end: InheritableVariable<Handle<UiNode>>,
+    /// A handle to numeric field that is used to show/modify start value of the current range.
+    pub start: InheritableVariable<Handle<NumericUpDown<T>>>,
+    /// A handle to numeric field that is used to show/modify end value of the current range.
+    pub end: InheritableVariable<Handle<NumericUpDown<T>>>,
 }
 
 impl<T: NumericType> ConstructorProvider<UiNode, UserInterface> for RangeEditor<T> {
@@ -141,6 +133,7 @@ impl<T: NumericType> ConstructorProvider<UiNode, UserInterface> for RangeEditor<
                 |ui| {
                     RangeEditorBuilder::<T>::new(WidgetBuilder::new().with_name("Range Editor"))
                         .build(&mut ui.build_ctx())
+                        .to_base()
                         .into()
                 },
             )
@@ -170,18 +163,6 @@ where
 
 const SYNC_FLAG: u64 = 1;
 
-impl<T> TypeUuidProvider for RangeEditor<T>
-where
-    T: NumericType,
-{
-    fn type_uuid() -> Uuid {
-        combine_uuids(
-            uuid!("0eb2948e-8485-490e-8719-18a0bb6fe275"),
-            T::type_uuid(),
-        )
-    }
-}
-
 impl<T> Control for RangeEditor<T>
 where
     T: NumericType,
@@ -195,56 +176,44 @@ where
                 if message.destination() == self.handle && *self.value != *range {
                     self.value.set_value_and_mark_modified(range.clone());
 
-                    ui.send_message(NumericUpDownMessage::value(
-                        *self.start,
-                        MessageDirection::ToWidget,
-                        range.start,
-                    ));
-                    ui.send_message(NumericUpDownMessage::value(
-                        *self.end,
-                        MessageDirection::ToWidget,
-                        range.end,
-                    ));
+                    ui.send(*self.start, NumericUpDownMessage::Value(range.start));
+                    ui.send(*self.end, NumericUpDownMessage::Value(range.end));
 
-                    ui.send_message(message.reverse());
+                    ui.try_send_response(message);
                 }
             } else if let Some(NumericUpDownMessage::Value(value)) =
                 message.data::<NumericUpDownMessage<T>>()
             {
                 if message.destination() == *self.start {
                     if *value < self.value.end {
-                        ui.send_message(RangeEditorMessage::value(
+                        ui.send(
                             self.handle,
-                            MessageDirection::ToWidget,
-                            Range {
+                            RangeEditorMessage::Value(Range {
                                 start: *value,
                                 end: self.value.end,
-                            },
-                        ));
+                            }),
+                        );
                     } else {
-                        let mut msg = NumericUpDownMessage::value(
+                        let mut msg = UiMessage::for_widget(
                             *self.start,
-                            MessageDirection::ToWidget,
-                            self.value.end,
+                            NumericUpDownMessage::Value(self.value.end),
                         );
                         msg.flags = SYNC_FLAG;
                         ui.send_message(msg);
                     }
                 } else if message.destination() == *self.end {
                     if *value > self.value.start {
-                        ui.send_message(RangeEditorMessage::value(
+                        ui.send(
                             self.handle,
-                            MessageDirection::ToWidget,
-                            Range {
+                            RangeEditorMessage::Value(Range {
                                 start: self.value.start,
                                 end: *value,
-                            },
-                        ));
+                            }),
+                        );
                     } else {
-                        let mut msg = NumericUpDownMessage::value(
+                        let mut msg = UiMessage::for_widget(
                             *self.end,
-                            MessageDirection::ToWidget,
-                            self.value.start,
+                            NumericUpDownMessage::Value(self.value.start),
                         );
                         msg.flags = SYNC_FLAG;
                         ui.send_message(msg);
@@ -283,7 +252,7 @@ where
     }
 
     /// Finished widget building and adds the new instance to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<RangeEditor<T>> {
         let start = NumericUpDownBuilder::new(
             WidgetBuilder::new()
                 .with_margin(Thickness::uniform(1.0))
@@ -329,7 +298,7 @@ where
             end: end.into(),
         };
 
-        ctx.add_node(UiNode::new(editor))
+        ctx.add(editor)
     }
 }
 

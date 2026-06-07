@@ -24,10 +24,7 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, visitor::prelude::*,
-    },
+    core::{algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     message::UiMessage,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
@@ -35,38 +32,36 @@ use crate::{
 
 use fyrox_core::algebra::Matrix3;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::{
-    cell::Cell,
-    ops::{Deref, DerefMut},
-};
+use std::cell::Cell;
 
 /// Screen is a widget that always has the size of the screen of the UI in which it is used. It is
 /// main use case is to provide automatic layout functionality, that will always provide screen size
-/// to its children widgets. This is needed, because the root node of any UI is [`crate::canvas::Canvas`]
+/// to its children widgets. This is needed because the root node of any UI is [`crate::canvas::Canvas`]
 /// which provides infinite bounds as a layout constraint, thus making it impossible for automatic
 /// fitting to the current screen size. For example, Screen widget could be used as a root node for
-/// [`crate::grid::Grid`] widget - in this case the grid instance will always have the size of the
-/// screen and will automatically shrink or expand when the screen size changes. It is ideal choice if
+/// [`crate::grid::Grid`] widget - in this case, the grid instance will always have the size of the
+/// screen and will automatically shrink or expand when the screen size changes. It is an ideal choice if
 /// you want to have some widgets always centered on screen (for example - crosshair, main menu of
 /// your game, etc.).
 ///
 /// ## Example
 ///
-/// The following examples creates a simple main menu of a game with just two buttons. The buttons
+/// The following examples create a simple main menu of a game with just two buttons. The buttons
 /// will always be centered in the current screen bounds.
 ///
 /// ```rust
-/// use fyrox_ui::{
-///     core::pool::Handle,
-///     button::ButtonBuilder,
-///     grid::{Column, GridBuilder, Row},
-///     screen::ScreenBuilder,
-///     stack_panel::StackPanelBuilder,
-///     widget::WidgetBuilder,
-///     BuildContext, UiNode,
-/// };
-///
-/// fn create_always_centered_game_menu(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::{
+/// #     core::pool::Handle,
+/// #     button::ButtonBuilder,
+/// #     grid::{Column, GridBuilder, Row},
+/// #     screen::ScreenBuilder,
+/// #     stack_panel::StackPanelBuilder,
+/// #     widget::WidgetBuilder,
+/// #     BuildContext, UiNode,
+/// # };
+/// # use fyrox_ui::screen::Screen;
+/// #
+/// fn create_always_centered_game_menu(ctx: &mut BuildContext) -> Handle<Screen> {
 ///     // Screen widget will provide current screen size to its Grid widget as a layout constraint,
 ///     // thus making it fit to the current screen bounds.
 ///     ScreenBuilder::new(
@@ -95,8 +90,8 @@ use std::{
 ///                         .build(ctx),
 ///                     ),
 ///             )
-///             // Split the grid into 3 rows and 3 columns. The center cell contain the stack panel
-///             // instance, that basically stacks main menu buttons one on top of another. The center
+///             // Split the grid into 3 rows and 3 columns. The center cell contains the stack panel
+///             // instance that basically stacks main menu buttons one on top of another. The center
 ///             // cell will also be always centered in screen bounds.
 ///             .add_row(Row::stretch())
 ///             .add_row(Row::auto())
@@ -110,8 +105,11 @@ use std::{
 ///     .build(ctx)
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "3bc7649f-a1ba-49be-bc4e-e0624654e40c"
+)]
 pub struct Screen {
     /// Base widget of the screen.
     pub widget: Widget,
@@ -133,6 +131,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Screen {
             .with_variant("Screen", |ui| {
                 ScreenBuilder::new(WidgetBuilder::new().with_name("Screen"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -140,8 +139,6 @@ impl ConstructorProvider<UiNode, UserInterface> for Screen {
 }
 
 crate::define_widget_deref!(Screen);
-
-uuid_provider!(Screen = "3bc7649f-a1ba-49be-bc4e-e0624654e40c");
 
 impl Control for Screen {
     fn measure_override(&self, ui: &UserInterface, _available_size: Vector2<f32>) -> Vector2<f32> {
@@ -196,13 +193,13 @@ impl ScreenBuilder {
 
     /// Finishes building a [`Screen`] widget instance and adds it to the user interface, returning a
     /// handle to the instance.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Screen> {
         let screen = Screen {
             last_visual_transform: Matrix3::default(),
             widget: self.widget_builder.with_need_update(true).build(ctx),
             last_screen_size: Cell::new(Default::default()),
         };
-        ctx.add_node(UiNode::new(screen))
+        ctx.add(screen)
     }
 }
 

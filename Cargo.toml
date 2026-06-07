@@ -21,11 +21,12 @@ members = [
     "fyrox-build-tools",
     "fyrox-texture",
     "fyrox-autotile",
-    "fyrox-material"
-, "fyrox-graphics-gl"]
+    "fyrox-material",
+    "fyrox-graphics-gl"]
 resolver = "2"
 
-[profile.dev]
+[profile.editor-standalone]
+inherits = "dev"
 opt-level = 1
 
 [profile.release]

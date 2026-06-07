@@ -20,25 +20,19 @@
 
 use crate::fyrox::{
     core::{algebra::Vector2, pool::Handle, reflect::prelude::*, visitor::prelude::*},
-    gui::{
-        define_constructor,
-        message::{MessageDirection, UiMessage},
-        UiNode,
-    },
+    gui::{message::UiMessage, UiNode},
 };
+use fyrox::gui::message::MessageData;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SegmentMessage {
     SourcePosition(Vector2<f32>),
     DestPosition(Vector2<f32>),
 }
-
-impl SegmentMessage {
-    define_constructor!(SegmentMessage:SourcePosition => fn source_position(Vector2<f32>), layout: false);
-    define_constructor!(SegmentMessage:DestPosition => fn dest_position(Vector2<f32>), layout: false);
-}
+impl MessageData for SegmentMessage {}
 
 #[derive(Debug, Clone, Reflect, Visit)]
+#[reflect(type_uuid = "fda5a731-e927-40e5-9d96-e19104fbb63e")]
 pub struct Segment {
     pub source: Handle<UiNode>,
     pub source_pos: Vector2<f32>,
@@ -47,20 +41,24 @@ pub struct Segment {
 }
 
 impl Segment {
-    pub fn handle_routed_message(&mut self, self_handle: Handle<UiNode>, message: &mut UiMessage) {
-        if let Some(msg) = message.data::<SegmentMessage>() {
-            if message.destination() == self_handle
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    SegmentMessage::SourcePosition(pos) => {
-                        self.source_pos = *pos;
-                    }
-                    SegmentMessage::DestPosition(pos) => {
-                        self.dest_pos = *pos;
-                    }
+    #[must_use]
+    pub fn handle_routed_message(
+        &mut self,
+        self_handle: Handle<UiNode>,
+        message: &mut UiMessage,
+    ) -> bool {
+        if let Some(msg) = message.data_for::<SegmentMessage>(self_handle) {
+            match msg {
+                SegmentMessage::SourcePosition(pos) => {
+                    self.source_pos = *pos;
+                    return true;
+                }
+                SegmentMessage::DestPosition(pos) => {
+                    self.dest_pos = *pos;
+                    return true;
                 }
             }
         }
+        false
     }
 }

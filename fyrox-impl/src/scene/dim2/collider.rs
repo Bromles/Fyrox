@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Collider is a geometric entity that can be attached to a rigid body to allow participate it
+//! Collider is a geometric entity that can be attached to a rigid body to allow to participate it
 //! participate in contact generation, collision response and proximity queries.
 
 use crate::scene::node::constructor::NodeConstructor;
@@ -29,14 +29,12 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
-        uuid_provider,
         variable::InheritableVariable,
         visitor::prelude::*,
-        ImmutableString, TypeUuidProvider,
+        ImmutableString,
     },
-    graph::{BaseSceneGraph, SceneGraphNode},
+    graph::SceneGraph,
     scene::{
         base::{Base, BaseBuilder},
         collider::InteractionGroups,
@@ -60,6 +58,7 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 /// Ball is an idea sphere shape defined by a single parameters - its radius.
 #[derive(Clone, Debug, Visit, PartialEq, Reflect)]
+#[reflect(type_uuid = "8847dfd3-2d41-4e77-ab68-5d16503eafe0")]
 pub struct BallShape {
     /// Radius of the sphere.
     #[reflect(min_value = 0.001, step = 0.05)]
@@ -74,6 +73,7 @@ impl Default for BallShape {
 
 /// Cuboid shape (rectangle).
 #[derive(Clone, Debug, Visit, PartialEq, Reflect)]
+#[reflect(type_uuid = "47b69ea8-d203-4c4a-9451-fec2d77233b3")]
 pub struct CuboidShape {
     /// Half extents of the box. X - half width, Y - half height.
     /// Actual _size_ will be 2 times bigger.
@@ -91,6 +91,7 @@ impl Default for CuboidShape {
 
 /// Arbitrary capsule shape defined by 2 points (which forms axis) and a radius.
 #[derive(Clone, Debug, Visit, PartialEq, Reflect)]
+#[reflect(type_uuid = "d5c3444c-38eb-4a72-bb70-939fccc7a044")]
 pub struct CapsuleShape {
     /// Begin point of the capsule.
     pub begin: Vector2<f32>,
@@ -114,6 +115,7 @@ impl Default for CapsuleShape {
 
 /// Arbitrary segment shape defined by two points.
 #[derive(Clone, Debug, Visit, PartialEq, Reflect)]
+#[reflect(type_uuid = "53725358-ae6e-4928-b7e2-89b99703a66c")]
 pub struct SegmentShape {
     /// Begin point of the capsule.
     pub begin: Vector2<f32>,
@@ -132,6 +134,7 @@ impl Default for SegmentShape {
 
 /// Arbitrary triangle shape.
 #[derive(Clone, Debug, Visit, PartialEq, Reflect)]
+#[reflect(type_uuid = "7b5c0314-10c7-4593-96f4-ace606ccda8d")]
 pub struct TriangleShape {
     /// First point of the triangle shape.
     pub a: Vector2<f32>,
@@ -155,13 +158,14 @@ impl Default for TriangleShape {
 ///
 /// # Notes
 ///
-/// Currently there is only one way to set geometry - using a scene node as a source of data.
-#[derive(Default, Clone, Copy, PartialEq, Hash, Debug, Visit, Reflect, Eq, TypeUuidProvider)]
-#[type_uuid(id = "1d451699-d76e-4774-87ea-dd3e2751cb39")]
+/// Currently, there is only one way to set geometry - using a scene node as a source of data.
+#[derive(Default, Clone, Copy, PartialEq, Hash, Debug, Visit, Reflect, Eq)]
+#[reflect(type_uuid = "1d451699-d76e-4774-87ea-dd3e2751cb39")]
 pub struct GeometrySource(pub Handle<Node>);
 
 /// Arbitrary triangle mesh shape.
 #[derive(Default, Clone, Debug, PartialEq, Visit, Reflect, Eq)]
+#[reflect(type_uuid = "bdf7cb5f-7a68-4ac1-b261-b6d1b537d8e1")]
 pub struct TrimeshShape {
     /// Geometry sources for the shape.
     pub sources: Vec<GeometrySource>,
@@ -169,6 +173,7 @@ pub struct TrimeshShape {
 
 /// Arbitrary height field shape.
 #[derive(Default, Clone, Debug, PartialEq, Visit, Reflect, Eq)]
+#[reflect(type_uuid = "ff6e1e20-4b32-4607-b4c7-d2398b607232")]
 pub struct HeightfieldShape {
     /// A handle to terrain scene node.
     pub geometry_source: GeometrySource,
@@ -176,6 +181,7 @@ pub struct HeightfieldShape {
 
 /// Arbitrary tile map shape.
 #[derive(Default, Clone, Debug, PartialEq, Visit, Reflect, Eq)]
+#[reflect(type_uuid = "57502a1f-a3df-4c48-ad91-69e321a237dc")]
 pub struct TileMapShape {
     /// A handle to tile map scene node.
     pub tile_map: GeometrySource,
@@ -185,6 +191,7 @@ pub struct TileMapShape {
 
 /// Possible collider shapes.
 #[derive(Clone, Debug, Visit, Reflect, AsRefStr, PartialEq, EnumString, VariantNames)]
+#[reflect(type_uuid = "4615485f-f8db-4405-b4a5-437e74b3f5b8")]
 pub enum ColliderShape {
     /// See [`BallShape`] docs.
     Ball(BallShape),
@@ -203,8 +210,6 @@ pub enum ColliderShape {
     /// See [`TileMapShape`] docs.
     TileMap(TileMapShape),
 }
-
-uuid_provider!(ColliderShape = "4615485f-f8db-4405-b4a5-437e74b3f5b8");
 
 impl Default for ColliderShape {
     fn default() -> Self {
@@ -266,10 +271,13 @@ impl ColliderShape {
     }
 }
 
-/// Collider is a geometric entity that can be attached to a rigid body to allow participate it
-/// participate in contact generation, collision response and proximity queries.
-#[derive(Reflect, Visit, Debug, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+/// Collider is a geometric entity that can be attached to a rigid body to allow to participate in
+/// contact generation, collision response and proximity queries.
+#[derive(Reflect, Visit, Debug)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "2b1659ea-a116-4224-bcd4-7931e3ae3b40"
+)]
 pub struct Collider {
     base: Base,
 
@@ -356,19 +364,13 @@ impl Clone for Collider {
     }
 }
 
-impl TypeUuidProvider for Collider {
-    fn type_uuid() -> Uuid {
-        uuid!("2b1659ea-a116-4224-bcd4-7931e3ae3b40")
-    }
-}
-
 impl Collider {
     /// Sets the new shape to the collider.
     ///
     /// # Performance
     ///
     /// This is relatively expensive operation - it forces the physics engine to recalculate contacts,
-    /// perform collision response, etc. Try avoid calling this method each frame for better
+    /// perform collision response, etc. Try to avoid calling this method each frame for better
     /// performance.
     pub fn set_shape(&mut self, shape: ColliderShape) -> ColliderShape {
         self.shape.set_value_and_mark_modified(shape)
@@ -389,7 +391,7 @@ impl Collider {
     /// # Performance
     ///
     /// This is relatively expensive operation - it forces the physics engine to recalculate contacts,
-    /// perform collision response, etc. Try avoid calling this method each frame for better
+    /// perform collision response, etc. Try to avoid calling this method each frame for better
     /// performance.
     pub fn shape_mut(&mut self) -> &mut ColliderShape {
         self.shape.get_value_mut_and_mark_modified()
@@ -402,7 +404,7 @@ impl Collider {
     /// # Performance
     ///
     /// This is relatively expensive operation - it forces the physics engine to recalculate contacts,
-    /// perform collision response, etc. Try avoid calling this method each frame for better
+    /// perform collision response, etc. Try to avoid calling this method each frame for better
     /// performance.
     pub fn set_restitution(&mut self, restitution: f32) -> f32 {
         self.restitution.set_value_and_mark_modified(restitution)
@@ -420,12 +422,12 @@ impl Collider {
     ///
     /// 1) If a rigid body to which collider is attached have no additional mass, then the rigid body
     ///    won't rotate, only move.
-    /// 2) If the rigid body have some additional mass, then the rigid body will have normal behaviour.
+    /// 2) If the rigid body have some additional mass, then the rigid body will have normal behavior.
     ///
     /// # Performance
     ///
     /// This is relatively expensive operation - it forces the physics engine to recalculate contacts,
-    /// perform collision response, etc. Try avoid calling this method each frame for better
+    /// perform collision response, etc. Try to avoid calling this method each frame for better
     /// performance.
     pub fn set_density(&mut self, density: Option<f32>) -> Option<f32> {
         self.density.set_value_and_mark_modified(density)
@@ -547,7 +549,7 @@ impl Collider {
     /// This includes only cases where two colliders are pressing against each other,
     /// and only if [`ContactPair::has_any_active_contact`] is true.
     /// When `has_any_active_contact` is false, the colliders may merely have overlapping
-    /// bounding boxes. See [`Collider::active_contacts`] for an interator that yields
+    /// bounding boxes. See [`Collider::active_contacts`] for an integrator that yields
     /// only pairs where `has_any_active_contact` is true.
     ///
     /// When a collider is passing through a sensor collider, that goes into the
@@ -593,7 +595,7 @@ impl Collider {
     /// one of the colliders being a sensor.
     /// If [`IntersectionPair::has_any_active_contact`] is true, that means the colliders are actually touching.
     /// When `has_any_active_contact` is false, the colliders may merely have overlapping
-    /// bounding boxes. See [`Collider::active_intersects`] for an interator that yields
+    /// bounding boxes. See [`Collider::active_intersects`] for an integrator that yields
     /// only colliders that actually overlap this collider.
     ///
     /// Each pair produced by this iterator includes the handles of two colliders,
@@ -614,8 +616,8 @@ impl Collider {
     pub fn active_intersects<'a>(
         &self,
         physics: &'a PhysicsWorld,
-    ) -> impl Iterator<Item = Handle<Node>> + 'a {
-        let self_handle = self.handle();
+    ) -> impl Iterator<Item = Handle<Self>> + 'a {
+        let self_handle = self.handle().to_variant();
         self.intersects(physics)
             .filter(|pair| pair.has_any_active_contact)
             .map(move |pair| pair.other(self_handle))
@@ -657,7 +659,7 @@ impl NodeTrait for Collider {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn on_removed_from_graph(&mut self, graph: &mut Graph) {
@@ -680,14 +682,17 @@ impl NodeTrait for Collider {
     fn on_local_transform_changed(&self, context: &mut SyncContext) {
         if self.native.get() != ColliderHandle::invalid() {
             if let Some(native) = context.physics2d.colliders.get_mut(self.native.get()) {
-                native.set_position_wrt_parent(Isometry2 {
-                    rotation: UnitComplex::from_angle(
-                        self.local_transform().rotation().euler_angles().2,
-                    ),
-                    translation: Translation2 {
-                        vector: self.local_transform().position().xy(),
-                    },
-                });
+                native.set_position_wrt_parent(
+                    Isometry2 {
+                        rotation: UnitComplex::from_angle(
+                            self.local_transform().rotation().euler_angles().2,
+                        ),
+                        translation: Translation2 {
+                            vector: self.local_transform().position().xy(),
+                        },
+                    }
+                    .into(),
+                );
             }
         }
     }
@@ -703,9 +708,8 @@ impl NodeTrait for Collider {
 
         if scene
             .graph
-            .try_get(self.parent())
-            .and_then(|p| p.component_ref::<RigidBody>())
-            .is_none()
+            .try_get_of_type::<RigidBody>(self.parent())
+            .is_err()
         {
             message += "2D Collider must be a direct child of a 3D Rigid Body node, \
             otherwise it will not have any effect!";
@@ -719,21 +723,21 @@ impl NodeTrait for Collider {
                     }
                 }
             }
-            ColliderShape::Heightfield(heightfield) => {
-                if !scene.graph.is_valid_handle(heightfield.geometry_source.0) {
-                    message += &format!(
-                        "Heightfield shape data handle {} is invalid!",
-                        heightfield.geometry_source.0
-                    );
-                }
+            ColliderShape::Heightfield(heightfield)
+                if !scene.graph.is_valid_handle(heightfield.geometry_source.0) =>
+            {
+                message += &format!(
+                    "Heightfield shape data handle {} is invalid!",
+                    heightfield.geometry_source.0
+                );
             }
-            ColliderShape::TileMap(tile_map) => {
-                if !scene.graph.is_valid_handle(tile_map.tile_map.0) {
-                    message += &format!(
-                        "Tile map shape data handle {} is invalid!",
-                        tile_map.tile_map.0
-                    );
-                }
+            ColliderShape::TileMap(tile_map)
+                if !scene.graph.is_valid_handle(tile_map.tile_map.0) =>
+            {
+                message += &format!(
+                    "Tile map shape data handle {} is invalid!",
+                    tile_map.tile_map.0
+                );
             }
             _ => (),
         }
@@ -854,8 +858,8 @@ impl ColliderBuilder {
     }
 
     /// Creates collider node and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Collider> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }
 
@@ -884,7 +888,7 @@ mod test {
                 .with_sensor(is_sensor)
                 .build(&mut graph);
 
-            RigidBodyBuilder::new(BaseBuilder::new().with_children(&[collider_sensor]))
+            RigidBodyBuilder::new(BaseBuilder::new().with_child(collider_sensor))
                 .with_body_type(RigidBodyType::Static)
                 .build(&mut graph);
 
@@ -899,17 +903,10 @@ mod test {
         graph.update(Vector2::new(800.0, 600.0), 1.0, Default::default());
 
         // we don't expect contact between regular body and sensor
-        assert_eq!(
-            0,
-            graph[collider_sensor]
-                .as_collider2d()
-                .contacts(&graph.physics2d)
-                .count()
-        );
+        assert_eq!(0, graph[collider_sensor].contacts(&graph.physics2d).count());
         assert_eq!(
             0,
             graph[collider_non_sensor]
-                .as_collider2d()
                 .contacts(&graph.physics2d)
                 .count()
         );
@@ -917,15 +914,11 @@ mod test {
         // we expect intersection between regular body and sensor
         assert_eq!(
             1,
-            graph[collider_sensor]
-                .as_collider2d()
-                .intersects(&graph.physics2d)
-                .count()
+            graph[collider_sensor].intersects(&graph.physics2d).count()
         );
         assert_eq!(
             1,
             graph[collider_non_sensor]
-                .as_collider2d()
                 .intersects(&graph.physics2d)
                 .count()
         );

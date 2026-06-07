@@ -45,7 +45,6 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
@@ -59,14 +58,16 @@ use crate::{
     },
 };
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// See module docs.
-#[derive(Debug, Reflect, Clone, Visit, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Reflect, Clone, Visit)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "c81dcc31-7cb9-465f-abd9-b385ac6f4d37"
+)]
 pub struct PointLight {
-    #[component(include)]
     base_light: BaseLight,
 
     #[reflect(min_value = 0.0, step = 0.001)]
@@ -89,12 +90,6 @@ impl Deref for PointLight {
 impl DerefMut for PointLight {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.base_light.base
-    }
-}
-
-impl TypeUuidProvider for PointLight {
-    fn type_uuid() -> Uuid {
-        uuid!("c81dcc31-7cb9-465f-abd9-b385ac6f4d37")
     }
 }
 
@@ -161,7 +156,7 @@ impl NodeTrait for PointLight {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn debug_draw(&self, ctx: &mut SceneDrawingContext) {
@@ -223,7 +218,7 @@ impl PointLightBuilder {
     }
 
     /// Builds new instance of point light and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<PointLight> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

@@ -28,24 +28,27 @@ use crate::fyrox::{
         button::{ButtonBuilder, ButtonMessage},
         copypasta::ClipboardProvider,
         grid::{Column, GridBuilder, Row},
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         scroll_viewer::ScrollViewerBuilder,
         stack_panel::StackPanelBuilder,
         text::TextBuilder,
         tree::{TreeBuilder, TreeRootBuilder, TreeRootMessage},
         widget::WidgetBuilder,
         window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+        BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
         VerticalAlignment,
     },
 };
 use fyrox::asset::manager::ResourceManager;
+use fyrox::gui::button::Button;
+use fyrox::gui::tree::{Tree, TreeRoot};
+use fyrox::gui::window::{Window, WindowAlignment};
 
 pub struct DependencyViewer {
-    pub window: Handle<UiNode>,
-    tree_root: Handle<UiNode>,
-    close: Handle<UiNode>,
-    copy_to_clipboard: Handle<UiNode>,
+    pub window: Handle<Window>,
+    tree_root: Handle<TreeRoot>,
+    close: Handle<Button>,
+    copy_to_clipboard: Handle<Button>,
     resource_graph: Option<ResourceDependencyGraph>,
 }
 
@@ -53,7 +56,7 @@ fn build_tree_recursively(
     node: &ResourceGraphNode,
     resource_manager: &ResourceManager,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<Tree> {
     let children = node
         .children
         .iter()
@@ -157,27 +160,22 @@ impl DependencyViewer {
         let resource_graph = ResourceDependencyGraph::new(resource);
         let root =
             build_tree_recursively(&resource_graph.root, resource_manager, &mut ui.build_ctx());
-        ui.send_message(TreeRootMessage::items(
-            self.tree_root,
-            MessageDirection::ToWidget,
-            vec![root],
-        ));
-        ui.send_message(WindowMessage::open(
+        ui.send(self.tree_root, TreeRootMessage::Items(vec![root]));
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
         self.resource_graph = Some(resource_graph);
     }
 
     pub fn handle_ui_message(&mut self, message: &UiMessage, ui: &mut UserInterface) {
         if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.close {
-                ui.send_message(WindowMessage::close(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.window, WindowMessage::Close);
             } else if message.destination() == self.copy_to_clipboard {
                 if let Some(mut clipboard) = ui.clipboard_mut() {
                     if let Some(resource_graph) = self.resource_graph.as_ref() {

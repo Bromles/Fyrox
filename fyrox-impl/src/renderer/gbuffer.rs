@@ -31,6 +31,12 @@
 
 use crate::{
     core::{algebra::Vector2, color::Color, math::Rect, sstorage::ImmutableString},
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, GpuFrameBuffer},
+        gpu_texture::{GpuTexture, PixelKind},
+        server::GraphicsServer,
+    },
     renderer::{
         bundle::{BundleRenderContext, RenderDataBundleStorage, SurfaceInstanceData},
         cache::{
@@ -38,12 +44,6 @@ use crate::{
             uniform::{UniformBufferCache, UniformMemoryAllocator},
         },
         debug_renderer::DebugRenderer,
-        framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, GpuFrameBuffer},
-            gpu_texture::{GpuTexture, PixelKind},
-            server::GraphicsServer,
-        },
         observer::Observer,
         occlusion::OcclusionTester,
         resources::RendererResources,
@@ -95,7 +95,7 @@ impl GBuffer {
         )?;
         let normal_texture = server.create_2d_render_target(
             "GBufferNormalTexture",
-            PixelKind::RGBA8,
+            PixelKind::RGB10A2,
             width,
             height,
         )?;
@@ -111,7 +111,7 @@ impl GBuffer {
                 Attachment::color(normal_texture.clone()),
                 Attachment::color(server.create_2d_render_target(
                     "GBufferAmbientTexture",
-                    PixelKind::RGBA16F,
+                    PixelKind::RGB10A2,
                     width,
                     height,
                 )?),
@@ -180,6 +180,8 @@ impl GBuffer {
         &mut self,
         args: GBufferRenderContext,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = args.server.begin_scope("GBuffer");
+
         let mut statistics = RenderPassStatistics::default();
 
         let GBufferRenderContext {
@@ -250,6 +252,7 @@ impl GBuffer {
             }
 
             self.occlusion_tester.try_run_visibility_test(
+                server,
                 graph,
                 None,
                 objects.iter(),

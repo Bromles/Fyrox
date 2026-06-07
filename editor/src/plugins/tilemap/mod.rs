@@ -33,7 +33,6 @@ mod handle_field;
 mod interaction_mode;
 mod macro_inspector;
 mod macro_tab;
-mod misc;
 pub mod palette;
 pub mod panel;
 mod panel_preview;
@@ -83,13 +82,11 @@ use crate::fyrox::{
         parking_lot::{Mutex, MutexGuard},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         visitor::prelude::*,
-        Uuid,
     },
     engine::Engine,
     fxhash::FxHashSet,
-    graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+    graph::{NodeWrapper, SceneGraph},
     gui::{
         border::BorderBuilder,
         brush::Brush,
@@ -124,34 +121,57 @@ use crate::{
     Editor, Message,
 };
 use fyrox::asset::manager::ResourceManager;
+use fyrox::engine::ApplicationLoopController;
+use fyrox::gui::button::Button;
+use fyrox::gui::message::MessageData;
+use std::sync::LazyLock;
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
 
-lazy_static! {
-    static ref VISIBLE_IMAGE: Option<TextureResource> =
-        load_image!("../../../resources/visible.png");
-    static ref BRUSH_IMAGE: Option<TextureResource> = load_image!("../../../resources/brush.png");
-    static ref ERASER_IMAGE: Option<TextureResource> = load_image!("../../../resources/eraser.png");
-    static ref FILL_IMAGE: Option<TextureResource> = load_image!("../../../resources/fill.png");
-    static ref PICK_IMAGE: Option<TextureResource> = load_image!("../../../resources/pipette.png");
-    static ref RECT_FILL_IMAGE: Option<TextureResource> =
-        load_image!("../../../resources/rect_fill.png");
-    static ref NINE_SLICE_IMAGE: Option<TextureResource> =
-        load_image!("../../../resources/nine_slice.png");
-    static ref LINE_IMAGE: Option<TextureResource> = load_image!("../../../resources/line.png");
-    static ref TURN_LEFT_IMAGE: Option<TextureResource> =
-        load_image!("../../../resources/turn_left.png");
-    static ref TURN_RIGHT_IMAGE: Option<TextureResource> =
-        load_image!("../../../resources/turn_right.png");
-    static ref FLIP_X_IMAGE: Option<TextureResource> = load_image!("../../../resources/flip_x.png");
-    static ref FLIP_Y_IMAGE: Option<TextureResource> = load_image!("../../../resources/flip_y.png");
-    static ref RANDOM_IMAGE: Option<TextureResource> = load_image!("../../../resources/die.png");
-    static ref PALETTE_IMAGE: Option<TextureResource> =
-        load_image!("../../../resources/palette.png");
-}
+static VISIBLE_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/visible.png"));
+
+static BRUSH_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/brush.png"));
+
+static ERASER_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/eraser.png"));
+
+static FILL_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/fill.png"));
+
+static PICK_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/pipette.png"));
+
+static RECT_FILL_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/rect_fill.png"));
+
+static NINE_SLICE_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/nine_slice.png"));
+
+static LINE_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/line.png"));
+
+static TURN_LEFT_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/turn_left.png"));
+
+static TURN_RIGHT_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/turn_right.png"));
+
+static FLIP_X_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/flip_x.png"));
+
+static FLIP_Y_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/flip_y.png"));
+
+static RANDOM_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/die.png"));
+
+static PALETTE_IMAGE: LazyLock<Option<TextureResource>> =
+    LazyLock::new(|| load_image!("../../../resources/palette.png"));
 
 /// A structure to keep track of which cells of a tile map brush are involved in macros.
 /// Each macro is expected to keep track of which cells it is using, but this information
@@ -223,7 +243,7 @@ fn make_drawing_mode_button(
     image: Option<TextureResource>,
     tooltip: &str,
     tab_index: Option<usize>,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .with_tab_index(tab_index)
@@ -261,6 +281,7 @@ fn make_drawing_mode_button(
 
 /// The possible drawing mode when the user is editing tiles.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Visit, Reflect)]
+#[reflect(type_uuid = "07ae3005-13ee-46b6-aad5-b7a5bb3e1e8c")]
 pub enum DrawingMode {
     /// Paste the currently selected tiles as a stamp wherever the user clicks or drags the mouse.
     #[default]
@@ -291,6 +312,7 @@ struct OpenTilePanelMessage {
     resource: TileBook,
     center: Option<TileDefinitionHandle>,
 }
+impl MessageData for OpenTilePanelMessage {}
 
 impl OpenTilePanelMessage {
     fn message(resource: TileBook, center: Option<TileDefinitionHandle>) -> UiMessage {
@@ -304,6 +326,7 @@ struct DelayedMessage {
     delay_frames: usize,
     content: UiMessage,
 }
+impl MessageData for DelayedMessage {}
 
 impl DelayedMessage {
     fn message(delay_frames: usize, content: UiMessage) -> UiMessage {
@@ -579,11 +602,11 @@ pub enum SelectionSource {
 
 impl TileMapEditorPlugin {
     fn get_tile_map_mut<'a>(&self, editor: &'a mut Editor) -> Option<&'a mut TileMap> {
-        let entry = editor.scenes.current_scene_entry_mut()?;
+        let entry = editor.scenes.current_scene_entry_mut();
         let game_scene = entry.controller.downcast_mut::<GameScene>()?;
         let scene = &mut editor.engine.scenes[game_scene.scene];
-        let node = scene.graph.try_get_mut(self.tile_map)?;
-        node.component_mut::<TileMap>()
+        let node = scene.graph.try_get_node_mut(self.tile_map).ok()?;
+        node.self_or_field_mut::<TileMap>()
     }
     fn open_panel_for_tile_set(
         &mut self,
@@ -683,16 +706,11 @@ impl TileMapEditorPlugin {
             sender,
         );
         interaction_mode.on_tile_map_selected(tile_map);
-        // Prepare the tile map interaction mode.
-        let Some(entry) = editor.scenes.current_scene_entry_mut() else {
-            // We have somehow lost the scene entry, so remove the effects from the tile map.
-            if let Some(tile_map) = self.get_tile_map_mut(editor) {
-                tile_map.before_effects.clear();
-                tile_map.after_effects.clear();
-            }
-            return;
-        };
-        entry.interaction_modes.add(interaction_mode);
+        editor
+            .scenes
+            .current_scene_entry_mut()
+            .interaction_modes
+            .add(interaction_mode);
     }
 }
 
@@ -701,7 +719,7 @@ impl EditorPlugin for TileMapEditorPlugin {
         editor
             .asset_browser
             .preview_generators
-            .add(TileSet::type_uuid(), TileSetPreview);
+            .add(TileSet::type_info().type_uuid, TileSetPreview);
         let state = editor.engine.resource_manager.state();
         state.constructors_container.add::<AutoTileInstance>();
         state.constructors_container.add::<WfcInstance>();
@@ -726,7 +744,8 @@ impl EditorPlugin for TileMapEditorPlugin {
 
         let palette = self.state.lock().selection_palette();
         if let Some(palette) = ui
-            .try_get_mut(palette)
+            .try_get_node_mut(palette)
+            .ok()
             .and_then(|p| p.cast_mut::<PaletteWidget>())
         {
             palette.sync_selection_to_model();
@@ -771,7 +790,7 @@ impl EditorPlugin for TileMapEditorPlugin {
         }
     }
 
-    fn on_update(&mut self, editor: &mut Editor) {
+    fn on_update(&mut self, editor: &mut Editor, _loop_controller: ApplicationLoopController) {
         self.send_delayed_messages(editor.engine.user_interfaces.first_mut());
 
         self.update_state();
@@ -786,7 +805,8 @@ impl EditorPlugin for TileMapEditorPlugin {
             if let Some(interaction_mode) = editor
                 .scenes
                 .current_scene_entry_mut()
-                .and_then(|s| s.interaction_modes.of_type_mut::<TileMapInteractionMode>())
+                .interaction_modes
+                .of_type_mut::<TileMapInteractionMode>()
             {
                 interaction_mode.sync_to_state();
             }
@@ -822,6 +842,7 @@ impl EditorPlugin for TileMapEditorPlugin {
                     self.brush_macro_list.clone(),
                     editor.message_sender.clone(),
                     editor.engine.resource_manager.clone(),
+                    editor.asset_browser.preview_sender.clone(),
                     &mut ui.build_ctx(),
                 );
                 tile_set_editor.set_tile_resource(&editor.engine.resource_manager, tile_book, ui);
@@ -836,7 +857,7 @@ impl EditorPlugin for TileMapEditorPlugin {
         }
 
         if let Message::SetInteractionMode(uuid) = message {
-            if *uuid == TileMapInteractionMode::type_uuid() && self.panel.is_none() {
+            if *uuid == TileMapInteractionMode::type_info().type_uuid && self.panel.is_none() {
                 if let Some(tile_map) = self.get_tile_map_mut(editor) {
                     let resource = if let Some(brush) = tile_map.active_brush() {
                         TileBook::Brush(brush.clone())
@@ -852,9 +873,7 @@ impl EditorPlugin for TileMapEditorPlugin {
             }
         }
 
-        let Some(entry) = editor.scenes.current_scene_entry_mut() else {
-            return;
-        };
+        let entry = editor.scenes.current_scene_entry_mut();
 
         let Some(selection) = entry.selection.as_graph() else {
             return;
@@ -873,8 +892,9 @@ impl EditorPlugin for TileMapEditorPlugin {
             // Remove the editor data from the currently selected tile map, so it will render as normal.
             if let Some(tile_map) = scene
                 .graph
-                .try_get_mut(self.tile_map)
-                .and_then(|n| n.component_mut::<TileMap>())
+                .try_get_node_mut(self.tile_map)
+                .ok()
+                .and_then(|n| n.self_or_field_mut::<TileMap>())
             {
                 tile_map.before_effects.clear();
                 tile_map.after_effects.clear();
@@ -884,7 +904,7 @@ impl EditorPlugin for TileMapEditorPlugin {
                 .nodes()
                 .iter()
                 .copied()
-                .find(|h| scene.graph.try_get_of_type::<TileMap>(*h).is_some())
+                .find(|h| scene.graph.try_get_of_type::<TileMap>(*h).is_ok())
             {
                 self.on_tile_map_selected(handle, editor);
             }
@@ -920,6 +940,7 @@ pub fn make_named_value_list_option(
             .with_pad_by_corner_radius(false),
     )
     .build(ctx)
+    .to_base()
 }
 
 /// Create the items for the dropdown list list that lets the user select a named value.

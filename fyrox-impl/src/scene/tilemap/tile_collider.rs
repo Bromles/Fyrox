@@ -24,15 +24,16 @@
 //! is a resource that contains triangles to allow an arbitrary shape to be constructed for
 //! any tile.
 
+use super::*;
 use crate::{
     asset::{Resource, ResourceData},
     core::{
-        algebra::{Matrix4, Point2, Point3, Vector2},
+        algebra::{Matrix4, Point3, Vector2},
         reflect::prelude::*,
-        type_traits::prelude::*,
         visitor::prelude::*,
     },
 };
+use fyrox_core::algebra::Point2;
 use std::{
     error::Error,
     fmt::{Debug, Display, Formatter},
@@ -42,23 +43,11 @@ use std::{
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
-use super::*;
-
 /// Supported collider types for tiles.
 #[derive(
-    Clone,
-    Hash,
-    PartialEq,
-    Eq,
-    Default,
-    Visit,
-    Reflect,
-    AsRefStr,
-    EnumString,
-    VariantNames,
-    TypeUuidProvider,
+    Clone, Hash, PartialEq, Eq, Default, Visit, Reflect, AsRefStr, EnumString, VariantNames,
 )]
-#[type_uuid(id = "04a44fec-394f-4497-97d5-fe9e6f915831")]
+#[reflect(type_uuid = "04a44fec-394f-4497-97d5-fe9e6f915831")]
 pub enum TileCollider {
     /// No collider.
     #[default]
@@ -82,7 +71,13 @@ impl Debug for TileCollider {
         match self {
             Self::None => write!(f, "None"),
             Self::Rectangle => write!(f, "Rectangle"),
-            Self::Custom(r) => write!(f, "Custom({})", r.data_ref().deref()),
+            Self::Custom(r) => {
+                if r.is_ok() {
+                    write!(f, "Custom({})", r.data_ref().deref())
+                } else {
+                    f.write_str("Custom(unloaded)")
+                }
+            }
             Self::Mesh => write!(f, "Mesh"),
         }
     }
@@ -151,9 +146,11 @@ impl TileCollider {
                 triangles.push([origin, origin + 2, origin + 3]);
             }
             TileCollider::Custom(resource) => {
-                resource
-                    .data_ref()
-                    .build_collider_shape(transform, position, vertices, triangles);
+                if resource.is_ok() {
+                    resource
+                        .data_ref()
+                        .build_collider_shape(transform, position, vertices, triangles);
+                }
             }
             TileCollider::Mesh => (), // TODO: Add image-to-mesh conversion
         }
@@ -170,8 +167,8 @@ pub type CustomTileColliderResource = Resource<CustomTileCollider>;
 /// a valid string for a custom tile collider. The commas (,) are used to connect two numbers
 /// as being part of the same group. Any other characters are ignored, so this would also be
 /// accepted: "(0,0) (1,1) (1,0) \[0,1,2\]".
-#[derive(Clone, PartialEq, Debug, Default, Visit, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "118da556-a444-4bd9-bd88-12d78d26107f")]
+#[derive(Clone, PartialEq, Debug, Default, Visit, Reflect)]
+#[reflect(type_uuid = "118da556-a444-4bd9-bd88-12d78d26107f")]
 pub struct CustomTileCollider {
     /// The vertices of the triangles, with the boundaries of the tile being between (0,0) and (1,1).
     pub vertices: Vec<Vector2<f32>>,
@@ -180,14 +177,10 @@ pub struct CustomTileCollider {
 }
 
 impl ResourceData for CustomTileCollider {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
         let mut visitor = Visitor::new();
         self.visit("CustomTileCollider", &mut visitor)?;
-        visitor.save_binary_to_file(path)?;
+        visitor.save_ascii_to_file(path)?;
         Ok(())
     }
 

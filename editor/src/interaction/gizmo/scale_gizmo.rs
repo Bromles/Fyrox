@@ -18,30 +18,39 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::BaseSceneGraph;
-use crate::fyrox::{
-    core::{
-        algebra::{Matrix4, UnitQuaternion, Vector2, Vector3},
-        color::Color,
-        math::{plane::Plane, Matrix4Ext},
-        pool::Handle,
-    },
-    scene::{
-        base::BaseBuilder,
-        graph::Graph,
-        mesh::{
-            surface::{SurfaceBuilder, SurfaceData, SurfaceResource},
-            MeshBuilder, RenderPath,
-        },
-        node::Node,
-        transform::TransformBuilder,
-    },
-};
 use crate::{
-    make_color_material, scene::GameScene, set_mesh_diffuse_color,
-    world::selection::GraphSelection, Engine,
+    fyrox::{
+        core::{
+            algebra::{Matrix4, UnitQuaternion, Vector2, Vector3},
+            color::Color,
+            math::{plane::Plane, Matrix4Ext},
+            pool::Handle,
+        },
+        graph::SceneGraph,
+        scene::{
+            base::BaseBuilder,
+            graph::Graph,
+            mesh::{
+                surface::{SurfaceBuilder, SurfaceData, SurfaceResource},
+                MeshBuilder, RenderPath,
+            },
+            node::Node,
+            transform::TransformBuilder,
+        },
+    },
+    interaction::gizmo::utils,
+    make_color_material,
+    scene::{GameScene, Selection},
+    set_mesh_diffuse_color,
+    settings::Settings,
+    Engine,
 };
+use fyrox::core::reflect::prelude::*;
+use fyrox::scene::camera::Camera;
+use fyrox::scene::mesh::Mesh;
 
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable, type_uuid = "0555e074-bbd8-4753-a2ab-56d7092251c1")]
 pub enum ScaleGizmoMode {
     None,
     X,
@@ -50,15 +59,17 @@ pub enum ScaleGizmoMode {
     Uniform,
 }
 
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable, type_uuid = "c8827bb2-1aac-41e7-b2c1-ba04e0dc59e0")]
 pub struct ScaleGizmo {
     mode: ScaleGizmoMode,
-    pub origin: Handle<Node>,
-    x_arrow: Handle<Node>,
-    y_arrow: Handle<Node>,
-    z_arrow: Handle<Node>,
-    x_axis: Handle<Node>,
-    y_axis: Handle<Node>,
-    z_axis: Handle<Node>,
+    pub origin: Handle<Mesh>,
+    x_arrow: Handle<Mesh>,
+    y_arrow: Handle<Mesh>,
+    z_arrow: Handle<Mesh>,
+    x_axis: Handle<Mesh>,
+    y_axis: Handle<Mesh>,
+    z_axis: Handle<Mesh>,
 }
 
 fn make_scale_axis(
@@ -66,7 +77,7 @@ fn make_scale_axis(
     rotation: UnitQuaternion<f32>,
     color: Color,
     name_prefix: &str,
-) -> (Handle<Node>, Handle<Node>) {
+) -> (Handle<Mesh>, Handle<Mesh>) {
     const ARROW_LENGTH: f32 = 0.5;
     const ARROW_THICKNESS: f32 = 0.015;
 
@@ -74,7 +85,7 @@ fn make_scale_axis(
     let axis = MeshBuilder::new(
         BaseBuilder::new()
             .with_cast_shadows(false)
-            .with_children(&[{
+            .with_child({
                 arrow = MeshBuilder::new(
                     BaseBuilder::new()
                         .with_cast_shadows(false)
@@ -95,7 +106,7 @@ fn make_scale_axis(
                 .build()])
                 .build(graph);
                 arrow
-            }])
+            })
             .with_name(name_prefix.to_owned() + "Axis")
             .with_local_transform(
                 TransformBuilder::new()
@@ -178,13 +189,13 @@ impl ScaleGizmo {
     }
 
     pub fn reset_state(&self, graph: &mut Graph) {
-        set_mesh_diffuse_color(graph[self.origin].as_mesh_mut(), Color::opaque(0, 255, 255));
-        set_mesh_diffuse_color(graph[self.x_axis].as_mesh_mut(), Color::RED);
-        set_mesh_diffuse_color(graph[self.x_arrow].as_mesh_mut(), Color::RED);
-        set_mesh_diffuse_color(graph[self.y_axis].as_mesh_mut(), Color::GREEN);
-        set_mesh_diffuse_color(graph[self.y_arrow].as_mesh_mut(), Color::GREEN);
-        set_mesh_diffuse_color(graph[self.z_axis].as_mesh_mut(), Color::BLUE);
-        set_mesh_diffuse_color(graph[self.z_arrow].as_mesh_mut(), Color::BLUE);
+        set_mesh_diffuse_color(&mut graph[self.origin], Color::opaque(0, 255, 255));
+        set_mesh_diffuse_color(&mut graph[self.x_axis], Color::RED);
+        set_mesh_diffuse_color(&mut graph[self.x_arrow], Color::RED);
+        set_mesh_diffuse_color(&mut graph[self.y_axis], Color::GREEN);
+        set_mesh_diffuse_color(&mut graph[self.y_arrow], Color::GREEN);
+        set_mesh_diffuse_color(&mut graph[self.z_axis], Color::BLUE);
+        set_mesh_diffuse_color(&mut graph[self.z_arrow], Color::BLUE);
     }
 
     pub fn set_mode(&mut self, mode: ScaleGizmoMode, graph: &mut Graph) {
@@ -197,19 +208,19 @@ impl ScaleGizmo {
         match self.mode {
             ScaleGizmoMode::None => (),
             ScaleGizmoMode::X => {
-                set_mesh_diffuse_color(graph[self.x_axis].as_mesh_mut(), yellow);
-                set_mesh_diffuse_color(graph[self.x_arrow].as_mesh_mut(), yellow);
+                set_mesh_diffuse_color(&mut graph[self.x_axis], yellow);
+                set_mesh_diffuse_color(&mut graph[self.x_arrow], yellow);
             }
             ScaleGizmoMode::Y => {
-                set_mesh_diffuse_color(graph[self.y_axis].as_mesh_mut(), yellow);
-                set_mesh_diffuse_color(graph[self.y_arrow].as_mesh_mut(), yellow);
+                set_mesh_diffuse_color(&mut graph[self.y_axis], yellow);
+                set_mesh_diffuse_color(&mut graph[self.y_arrow], yellow);
             }
             ScaleGizmoMode::Z => {
-                set_mesh_diffuse_color(graph[self.z_axis].as_mesh_mut(), yellow);
-                set_mesh_diffuse_color(graph[self.z_arrow].as_mesh_mut(), yellow);
+                set_mesh_diffuse_color(&mut graph[self.z_axis], yellow);
+                set_mesh_diffuse_color(&mut graph[self.z_arrow], yellow);
             }
             ScaleGizmoMode::Uniform => {
-                set_mesh_diffuse_color(graph[self.origin].as_mesh_mut(), yellow);
+                set_mesh_diffuse_color(&mut graph[self.origin], yellow);
             }
         }
     }
@@ -235,7 +246,7 @@ impl ScaleGizmo {
 
     pub fn calculate_scale_delta(
         &self,
-        camera: Handle<Node>,
+        camera: Handle<Camera>,
         mouse_offset: Vector2<f32>,
         mouse_position: Vector2<f32>,
         graph: &Graph,
@@ -243,7 +254,7 @@ impl ScaleGizmo {
     ) -> Vector3<f32> {
         let node_global_transform = graph[self.origin].global_transform();
 
-        let camera = &graph[camera].as_camera();
+        let camera = &graph[camera];
         let inv_node_transform = node_global_transform.try_inverse().unwrap_or_default();
 
         // Create two rays in object space.
@@ -297,20 +308,14 @@ impl ScaleGizmo {
         Vector3::default()
     }
 
-    pub fn sync_transform(
+    pub fn sync_with_selection(
         &self,
         graph: &mut Graph,
-        selection: &GraphSelection,
-        scale: Vector3<f32>,
+        camera: Handle<Camera>,
+        settings: &Settings,
+        selection: &Selection,
     ) {
-        if let Some((rotation, position)) = selection.global_rotation_position(graph) {
-            let node = &mut graph[self.origin];
-            node.set_visibility(true);
-            node.local_transform_mut()
-                .set_rotation(rotation)
-                .set_position(position)
-                .set_scale(scale);
-        }
+        utils::sync_gizmo_with_selection(self.origin.to_base(), graph, camera, settings, selection)
     }
 
     pub fn set_visible(&self, graph: &mut Graph, visible: bool) {

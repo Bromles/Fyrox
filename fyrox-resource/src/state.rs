@@ -20,15 +20,9 @@
 
 //! A module that handles resource states.
 
-use crate::untyped::ResourceKind;
-use crate::{
-    core::{reflect::prelude::*, uuid::Uuid, visitor::prelude::*},
-    manager::ResourceManager,
-    ResourceData, ResourceLoadError,
-};
-use fyrox_core::reflect::ReflectHandle;
-use fyrox_core::warn;
-use std::any::{Any, TypeId};
+use crate::{core::reflect::prelude::*, ResourceData, ResourceLoadError, TypedResourceData};
+use std::any::Any;
+use std::fmt::{Debug, Display};
 use std::path::PathBuf;
 use std::{
     ops::{Deref, DerefMut},
@@ -38,7 +32,7 @@ use std::{
 
 #[doc(hidden)]
 #[derive(Reflect, Debug, Default, Clone)]
-#[reflect(hide_all)]
+#[reflect(hide_all, type_uuid = "238a5490-6627-48ef-8035-4b589497293b")]
 pub struct WakersList(Vec<Waker>);
 
 impl Deref for WakersList {
@@ -65,10 +59,12 @@ impl DerefMut for WakersList {
     }
 }
 
-/// Arbitrary loading error, that could be optionally be empty.  
+/// Arbitrary loading error, that could be optionally be empty.
 #[derive(Reflect, Debug, Clone, Default)]
-#[reflect(hide_all)]
+#[reflect(hide_all, type_uuid = "cb2257dc-b344-49e6-972e-cd99be4c3615")]
 pub struct LoadError(pub Option<Arc<dyn ResourceLoadError>>);
+
+impl std::error::Error for LoadError {}
 
 impl LoadError {
     /// Creates new loading error from a value of the given type.
@@ -77,158 +73,28 @@ impl LoadError {
     }
 }
 
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct ResourceDataWrapper(pub Box<dyn ResourceData>);
-
-impl Reflect for ResourceDataWrapper {
-    fn source_path() -> &'static str
-    where
-        Self: Sized,
-    {
-        file!()
-    }
-
-    fn derived_types() -> &'static [TypeId]
-    where
-        Self: Sized,
-    {
-        &[]
-    }
-
-    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
-        Reflect::try_clone_box(&*self.0)
-    }
-
-    fn query_derived_types(&self) -> &'static [TypeId] {
-        self.deref().query_derived_types()
-    }
-
-    fn type_name(&self) -> &'static str {
-        self.deref().type_name()
-    }
-
-    fn doc(&self) -> &'static str {
-        self.deref().doc()
-    }
-
-    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
-        self.deref().fields_ref(func)
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
-        self.deref_mut().fields_mut(func)
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-
-    fn as_any(&self, func: &mut dyn FnMut(&dyn Any)) {
-        self.deref().as_any(func)
-    }
-
-    fn as_any_mut(&mut self, func: &mut dyn FnMut(&mut dyn Any)) {
-        self.deref_mut().as_any_mut(func)
-    }
-
-    fn as_reflect(&self, func: &mut dyn FnMut(&dyn Reflect)) {
-        self.deref().as_reflect(func)
-    }
-
-    fn as_reflect_mut(&mut self, func: &mut dyn FnMut(&mut dyn Reflect)) {
-        self.deref_mut().as_reflect_mut(func)
-    }
-
-    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-        self.deref_mut().set(value)
-    }
-
-    fn assembly_name(&self) -> &'static str {
-        env!("CARGO_PKG_NAME")
-    }
-
-    fn type_assembly_name() -> &'static str
-    where
-        Self: Sized,
-    {
-        env!("CARGO_PKG_NAME")
-    }
-
-    fn set_field(
-        &mut self,
-        field: &str,
-        value: Box<dyn Reflect>,
-        func: &mut dyn FnMut(Result<Box<dyn Reflect>, SetFieldError>),
-    ) {
-        self.deref_mut().set_field(field, value, func)
-    }
-
-    fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
-        self.deref().field(name, func)
-    }
-
-    fn field_mut(&mut self, name: &str, func: &mut dyn FnMut(Option<&mut dyn Reflect>)) {
-        self.deref_mut().field_mut(name, func)
-    }
-
-    fn as_array(&self, func: &mut dyn FnMut(Option<&dyn ReflectArray>)) {
-        self.deref().as_array(func)
-    }
-
-    fn as_array_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectArray>)) {
-        self.deref_mut().as_array_mut(func)
-    }
-
-    fn as_list(&self, func: &mut dyn FnMut(Option<&dyn ReflectList>)) {
-        self.deref().as_list(func)
-    }
-
-    fn as_list_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectList>)) {
-        self.deref_mut().as_list_mut(func)
-    }
-
-    fn as_inheritable_variable(
-        &self,
-        func: &mut dyn FnMut(Option<&dyn ReflectInheritableVariable>),
-    ) {
-        self.deref().as_inheritable_variable(func)
-    }
-
-    fn as_inheritable_variable_mut(
-        &mut self,
-        func: &mut dyn FnMut(Option<&mut dyn ReflectInheritableVariable>),
-    ) {
-        self.deref_mut().as_inheritable_variable_mut(func)
-    }
-
-    fn as_hash_map(&self, func: &mut dyn FnMut(Option<&dyn ReflectHashMap>)) {
-        self.deref().as_hash_map(func)
-    }
-
-    fn as_hash_map_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectHashMap>)) {
-        self.deref_mut().as_hash_map_mut(func)
-    }
-
-    fn as_handle(&self, func: &mut dyn FnMut(Option<&dyn ReflectHandle>)) {
-        self.deref().as_handle(func)
-    }
-
-    fn as_handle_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectHandle>)) {
-        self.deref_mut().as_handle_mut(func)
+impl Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            None => f.write_str("None"),
+            Some(x) => Display::fmt(x, f),
+        }
     }
 }
 
-impl Deref for ResourceDataWrapper {
-    type Target = dyn ResourceData;
+#[doc(hidden)]
+#[derive(Debug, Reflect)]
+#[reflect(type_uuid = "e7675337-0b9b-49b4-962a-03cc571a0ab7")]
+pub struct ResourceDataWrapper(
+    #[reflect(deref, display_name = "Resource Data")] pub Box<dyn ResourceData>,
+);
 
-    fn deref(&self) -> &Self::Target {
+impl ResourceDataWrapper {
+    pub fn inner_ref(&self) -> &dyn ResourceData {
         &*self.0
     }
-}
 
-impl DerefMut for ResourceDataWrapper {
-    fn deref_mut(&mut self) -> &mut Self::Target {
+    pub fn inner_mut(&mut self) -> &mut dyn ResourceData {
         &mut *self.0
     }
 }
@@ -265,18 +131,16 @@ impl Clone for ResourceDataWrapper {
 /// to get the UUID earlier: the UUID is stored in a metadata file which exists only if the resource
 /// is present. It is somewhat possible to get a UUID when a resource is failed to load, but not in
 /// 100% cases.
-#[derive(Debug, Clone, Reflect)]
+#[derive(Clone, Reflect)]
+#[reflect(type_uuid = "3d49c715-4a48-4b41-b8c6-45bcb8b3fd17")]
 pub enum ResourceState {
+    /// Resource is not loaded. In some situations, having a handle to a resource
+    /// can be sufficient even without the resource's data.
+    Unloaded,
     /// Resource is loading from external resource or in the queue to load.
     Pending {
         /// List of wakers to wake future when resource is fully loaded.
         wakers: WakersList,
-        /// A resource path (explicit or implicit). It is used at the loading stage to get a
-        /// real path in the file system. Since resource registry loading is async (especially
-        /// on WASM), it is impossible to fetch the uuid by path immediately. Instead, the resource
-        /// system offloads this task to resource loading tasks, which are able to wait until the
-        /// registry is fully loaded.
-        path: PathBuf,
     },
     /// An error has occurred during the load.
     LoadError {
@@ -288,19 +152,45 @@ pub enum ResourceState {
     },
     /// Actual resource data when it is fully loaded.
     Ok {
-        /// Unique id of the resource.
-        resource_uuid: Uuid,
         /// Actual data of the resource.
         data: ResourceDataWrapper,
     },
 }
 
+impl Debug for ResourceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unloaded => write!(f, "Unloaded"),
+            Self::Pending { .. } => write!(f, "Pending"),
+            Self::LoadError { path, error } => write!(f, "LoadError {:?}: {:?}", error, path),
+            Self::Ok { .. } => write!(f, "Ok"),
+        }
+    }
+}
+
+impl Display for ResourceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unloaded => write!(f, "Unloaded"),
+            Self::Pending { .. } => write!(f, "Pending"),
+            Self::LoadError { path, error } => {
+                if path.as_os_str().is_empty() {
+                    write!(f, "{} (for unknown path)", error)
+                } else {
+                    write!(f, "{} (for {:?})", error, path)
+                }
+            }
+            Self::Ok { .. } => write!(f, "Ok"),
+        }
+    }
+}
+
 impl Default for ResourceState {
     fn default() -> Self {
-        Self::LoadError {
-            path: Default::default(),
-            error: Default::default(),
-        }
+        ResourceState::new_load_error(
+            Default::default(),
+            LoadError::new("Default resource state of unknown type."),
+        )
     }
 }
 
@@ -313,78 +203,11 @@ impl Drop for ResourceState {
 }
 
 impl ResourceState {
-    pub(crate) fn visit(
-        &mut self,
-        kind: ResourceKind,
-        name: &str,
-        visitor: &mut Visitor,
-    ) -> VisitResult {
-        if visitor.is_reading() {
-            let mut type_uuid = Uuid::default();
-            type_uuid.visit("TypeUuid", visitor)?;
-
-            let mut resource_uuid = Uuid::default();
-            if resource_uuid.visit("ResourceUuid", visitor).is_err() {
-                warn!(
-                    "A resource of type {type_uuid} has no uuid! It looks like a resource in \
-              the old format; trying to read it..."
-                );
-            }
-
-            let resource_manager = visitor.blackboard.get::<ResourceManager>().expect(
-                "Resource data constructor container must be \
-                provided when serializing resources!",
-            );
-            let resource_manager_state = resource_manager.state();
-
-            if let Some(mut instance) = resource_manager_state
-                .constructors_container
-                .try_create(&type_uuid)
-            {
-                drop(resource_manager_state);
-
-                if kind == ResourceKind::Embedded {
-                    instance.visit(name, visitor)?;
-                }
-
-                *self = Self::Ok {
-                    resource_uuid,
-                    data: ResourceDataWrapper(instance),
-                };
-            } else {
-                return Err(VisitError::User(format!(
-                    "There's no constructor registered for type {type_uuid}!"
-                )));
-            }
-
-            Ok(())
-        } else if let Self::Ok {
-            resource_uuid,
-            data,
-        } = self
-        {
-            resource_uuid.visit("ResourceUuid", visitor)?;
-
-            let mut type_uuid = data.type_uuid();
-            type_uuid.visit("TypeUuid", visitor)?;
-
-            if kind == ResourceKind::Embedded {
-                data.visit(name, visitor)?;
-            }
-
-            Ok(())
-        } else {
-            // Do not save other variants, because they're needed only for runtime purposes.
-            Ok(())
-        }
-    }
-
     /// Creates new resource in pending state.
     #[inline]
-    pub fn new_pending(path: PathBuf) -> Self {
+    pub fn new_pending() -> Self {
         Self::Pending {
             wakers: Default::default(),
-            path,
         }
     }
 
@@ -396,29 +219,17 @@ impl ResourceState {
 
     /// Creates new resource in [`ResourceState::Ok`] state.
     #[inline]
-    pub fn new_ok<T: ResourceData>(resource_uuid: Uuid, data: T) -> Self {
+    pub fn new_ok<T: ResourceData>(data: T) -> Self {
         Self::Ok {
-            resource_uuid,
             data: ResourceDataWrapper(Box::new(data)),
         }
     }
 
     /// Creates a new resource in [`ResourceState::Ok`] state using arbitrary data.
     #[inline]
-    pub fn new_ok_untyped(resource_uuid: Uuid, data: Box<dyn ResourceData>) -> Self {
+    pub fn new_ok_untyped(data: Box<dyn ResourceData>) -> Self {
         Self::Ok {
-            resource_uuid,
             data: ResourceDataWrapper(data),
-        }
-    }
-
-    /// Tries to get a resource uuid. The uuid is available only for resource in [`ResourceState::Ok`]
-    /// state.
-    #[inline]
-    pub fn resource_uuid(&self) -> Option<Uuid> {
-        match self {
-            ResourceState::Ok { resource_uuid, .. } => Some(*resource_uuid),
-            _ => None,
         }
     }
 
@@ -427,11 +238,15 @@ impl ResourceState {
         matches!(self, ResourceState::Pending { .. })
     }
 
+    /// Checks whether the resource is loaded without errors.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, ResourceState::Ok { .. })
+    }
+
     /// Switches the internal state of the resource to [`ResourceState::Pending`].
-    pub fn switch_to_pending_state(&mut self, path: PathBuf) {
+    pub fn switch_to_pending_state(&mut self) {
         *self = ResourceState::Pending {
             wakers: Default::default(),
-            path,
         };
     }
 
@@ -444,7 +259,7 @@ impl ResourceState {
         let wakers = if let ResourceState::Pending { ref mut wakers, .. } = self {
             std::mem::take(wakers)
         } else {
-            unreachable!()
+            WakersList::default()
         };
 
         *self = state;
@@ -455,9 +270,8 @@ impl ResourceState {
     }
 
     /// Changes internal state to [`ResourceState::Ok`]
-    pub fn commit_ok<T: ResourceData>(&mut self, resource_uuid: Uuid, data: T) {
+    pub fn commit_ok<T: ResourceData>(&mut self, data: T) {
         self.commit(ResourceState::Ok {
-            resource_uuid,
             data: ResourceDataWrapper(Box::new(data)),
         })
     }
@@ -469,27 +283,65 @@ impl ResourceState {
             error: LoadError::new(error),
         })
     }
+
+    /// Tries to get the resource data. Will fail if the resource is not in [`ResourceState::Ok`].
+    pub fn data_ref(&self) -> Option<&ResourceDataWrapper> {
+        match self {
+            ResourceState::Pending { .. }
+            | ResourceState::LoadError { .. }
+            | ResourceState::Unloaded => None,
+            ResourceState::Ok { data, .. } => Some(data),
+        }
+    }
+
+    /// Tries to get the resource data. Will fail if the resource is not in [`ResourceState::Ok`].
+    pub fn data_mut(&mut self) -> Option<&mut ResourceDataWrapper> {
+        match self {
+            ResourceState::Pending { .. }
+            | ResourceState::LoadError { .. }
+            | ResourceState::Unloaded => None,
+            ResourceState::Ok { data, .. } => Some(data),
+        }
+    }
+
+    /// Tries to get the resource data of the given type. Will fail if the resource is not in
+    /// [`ResourceState::Ok`].
+    pub fn data_ref_of_type<T: TypedResourceData>(&self) -> Option<&T> {
+        match self {
+            ResourceState::Pending { .. }
+            | ResourceState::LoadError { .. }
+            | ResourceState::Unloaded => None,
+            ResourceState::Ok { data, .. } => (data.inner_ref() as &dyn Any).downcast_ref::<T>(),
+        }
+    }
+
+    /// Tries to get the resource data of the given type. Will fail if the resource is not in
+    /// [`ResourceState::Ok`].
+    pub fn data_mut_of_type<T: TypedResourceData>(&mut self) -> Option<&mut T> {
+        match self {
+            ResourceState::Pending { .. }
+            | ResourceState::LoadError { .. }
+            | ResourceState::Unloaded => None,
+            ResourceState::Ok { data, .. } => {
+                (data.inner_mut() as &mut dyn Any).downcast_mut::<T>()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use fyrox_core::{
-        reflect::{FieldRef, Reflect},
-        TypeUuidProvider,
-    };
+    use fyrox_core::{reflect::prelude::*, visitor::prelude::*};
     use std::error::Error;
     use std::path::Path;
 
     use super::*;
 
     #[derive(Debug, Default, Clone, Reflect, Visit)]
+    #[reflect(type_uuid = "96a59120-b174-4b2c-9069-1770ec495011")]
     struct Stub {}
 
     impl ResourceData for Stub {
-        fn type_uuid(&self) -> Uuid {
-            Uuid::default()
-        }
-
         fn save(&mut self, _path: &Path) -> Result<(), Box<dyn Error>> {
             Err("Saving is not supported!".to_string().into())
         }
@@ -503,15 +355,9 @@ mod test {
         }
     }
 
-    impl TypeUuidProvider for Stub {
-        fn type_uuid() -> Uuid {
-            Uuid::default()
-        }
-    }
-
     #[test]
     fn resource_state_new_pending() {
-        let state = ResourceState::new_pending(Default::default());
+        let state = ResourceState::new_pending();
 
         assert!(matches!(state, ResourceState::Pending { .. }));
         assert!(state.is_loading());
@@ -527,8 +373,7 @@ mod test {
 
     #[test]
     fn resource_state_new_ok() {
-        let uuid = Uuid::new_v4();
-        let state = ResourceState::new_ok(uuid, Stub {});
+        let state = ResourceState::new_ok(Stub {});
         assert!(matches!(state, ResourceState::Ok { .. }));
         assert!(!state.is_loading());
     }
@@ -536,48 +381,21 @@ mod test {
     #[test]
     fn resource_state_switch_to_pending_state() {
         // from Ok
-        let mut state = ResourceState::new_ok(Uuid::new_v4(), Stub {});
-        state.switch_to_pending_state(Default::default());
+        let mut state = ResourceState::new_ok(Stub {});
+        state.switch_to_pending_state();
 
         assert!(matches!(state, ResourceState::Pending { .. }));
 
         // from LoadError
         let mut state = ResourceState::new_load_error(Default::default(), Default::default());
-        state.switch_to_pending_state(Default::default());
+        state.switch_to_pending_state();
 
         assert!(matches!(state, ResourceState::Pending { .. }));
 
         // from Pending
-        let mut state = ResourceState::new_pending(Default::default());
-        state.switch_to_pending_state(Default::default());
+        let mut state = ResourceState::new_pending();
+        state.switch_to_pending_state();
 
         assert!(matches!(state, ResourceState::Pending { .. }));
-    }
-
-    #[test]
-    fn visit_for_resource_state() {
-        // Visit Pending
-        let mut state = ResourceState::new_pending(Default::default());
-        let mut visitor = Visitor::default();
-
-        assert!(state
-            .visit(ResourceKind::External, "name", &mut visitor)
-            .is_ok());
-
-        // Visit LoadError
-        let mut state = ResourceState::new_load_error(Default::default(), Default::default());
-        let mut visitor = Visitor::default();
-
-        assert!(state
-            .visit(ResourceKind::External, "name", &mut visitor)
-            .is_ok());
-
-        // Visit Ok
-        let mut state = ResourceState::new_ok(Uuid::new_v4(), Stub {});
-        let mut visitor = Visitor::default();
-
-        assert!(state
-            .visit(ResourceKind::External, "name", &mut visitor)
-            .is_ok());
     }
 }

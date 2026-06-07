@@ -21,41 +21,48 @@
 use crate::{
     command::{Command, CommandContext, CommandStack, CommandTrait},
     fyrox::{
+        asset::manager::ResourceManager,
         asset::Resource,
         core::{
-            futures::executor::block_on, math::curve::Curve, pool::Handle, type_traits::prelude::*,
-            visitor::prelude::*,
+            futures::executor::block_on, math::curve::Curve, pool::Handle, reflect::prelude::*,
+            some_or_return, visitor::prelude::*,
         },
         engine::Engine,
         gui::{
             border::BorderBuilder,
             button::{ButtonBuilder, ButtonMessage},
             curve::{CurveEditorBuilder, CurveEditorMessage},
-            file_browser::{FileBrowserMode, FileSelectorMessage},
+            file_browser::FileSelectorMessage,
             grid::{Column, GridBuilder, Row},
             menu::{MenuBuilder, MenuItemBuilder, MenuItemContent, MenuItemMessage},
-            message::{MessageDirection, UiMessage},
+            message::UiMessage,
             messagebox::{MessageBoxBuilder, MessageBoxResult},
             stack_panel::StackPanelBuilder,
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
+        },
+        gui::{
+            button::Button,
+            curve::CurveEditor,
+            file_browser::{FileSelector, FileSelectorMode, FileType},
+            menu::MenuItem,
+            messagebox::MessageBox,
+            style::resource::StyleResourceExt,
+            style::Style,
+            window::{Window, WindowAlignment},
         },
         resource::curve::{CurveResource, CurveResourceState},
     },
     menu::create_menu_item,
     plugin::EditorPlugin,
-    send_sync_message,
     utils::create_file_selector,
-    Editor, MessageBoxButtons, MessageBoxMessage, MSG_SYNC_FLAG,
+    Editor, MessageBoxButtons, MessageBoxMessage,
 };
-use fyrox::asset::manager::ResourceManager;
-use fyrox::core::some_or_return;
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
 use std::{fmt::Debug, path::PathBuf};
 
-#[derive(Debug, ComponentProvider)]
+#[derive(Reflect, Clone, Debug)]
+#[reflect(type_uuid = "f29aa9c7-e0c4-4602-8588-3e8a20ab7cdc")]
 pub struct CurveEditorContext {}
 
 impl CommandContext for CurveEditorContext {}
@@ -87,14 +94,14 @@ impl CommandTrait for ModifyCurveCommand {
 }
 
 struct FileMenu {
-    new: Handle<UiNode>,
-    save: Handle<UiNode>,
-    load: Handle<UiNode>,
+    new: Handle<MenuItem>,
+    save: Handle<MenuItem>,
+    load: Handle<MenuItem>,
 }
 
 struct EditMenu {
-    undo: Handle<UiNode>,
-    redo: Handle<UiNode>,
+    undo: Handle<MenuItem>,
+    redo: Handle<MenuItem>,
 }
 
 struct Menu {
@@ -103,29 +110,33 @@ struct Menu {
 }
 
 pub struct CurveEditorWindow {
-    window: Handle<UiNode>,
-    curve_editor: Handle<UiNode>,
-    ok: Handle<UiNode>,
-    cancel: Handle<UiNode>,
+    window: Handle<Window>,
+    curve_editor: Handle<CurveEditor>,
+    ok: Handle<Button>,
+    cancel: Handle<Button>,
     curve_resource: Option<CurveResource>,
     command_stack: CommandStack,
     menu: Menu,
-    load_file_selector: Handle<UiNode>,
-    save_file_selector: Handle<UiNode>,
+    load_file_selector: Handle<FileSelector>,
+    save_file_selector: Handle<FileSelector>,
     path: PathBuf,
-    save_changes_message_box: Handle<UiNode>,
-    cancel_message_box: Handle<UiNode>,
+    save_changes_message_box: Handle<MessageBox>,
+    cancel_message_box: Handle<MessageBox>,
     modified: bool,
     backup: Curve,
 }
 
 impl CurveEditorWindow {
     pub fn new(ctx: &mut BuildContext) -> Self {
-        let load_file_selector = create_file_selector(ctx, "crv", FileBrowserMode::Open);
+        let file_type = FileType::new()
+            .with_extension("crv")
+            .with_description("Curve");
+        let load_file_selector =
+            create_file_selector(ctx, file_type.clone(), FileSelectorMode::Open);
         let save_file_selector = create_file_selector(
             ctx,
-            "crv",
-            FileBrowserMode::Save {
+            file_type,
+            FileSelectorMode::Save {
                 default_file_name: PathBuf::from("unnamed.crv"),
             },
         );
@@ -309,46 +320,29 @@ impl CurveEditorWindow {
     }
 
     fn destroy(self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::remove(
-            self.cancel_message_box,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::remove(
-            self.save_changes_message_box,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::remove(
-            self.load_file_selector,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::remove(
-            self.save_file_selector,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WindowMessage::close(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.cancel_message_box, WidgetMessage::Remove);
+        ui.send(self.save_changes_message_box, WidgetMessage::Remove);
+        ui.send(self.load_file_selector, WidgetMessage::Remove);
+        ui.send(self.save_file_selector, WidgetMessage::Remove);
+        ui.send(self.window, WindowMessage::Close);
     }
 
     pub fn open(&self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::open_modal(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
     }
 
     fn sync_to_model(&mut self, ui: &UserInterface) {
         if let Some(curve_resource) = self.curve_resource.as_ref() {
-            send_sync_message(
-                ui,
-                CurveEditorMessage::sync(
-                    self.curve_editor,
-                    MessageDirection::ToWidget,
-                    vec![curve_resource.data_ref().curve.clone()],
-                ),
+            ui.send_sync(
+                self.curve_editor,
+                CurveEditorMessage::Sync(vec![curve_resource.data_ref().curve.clone()]),
             );
         }
     }
@@ -372,11 +366,7 @@ impl CurveEditorWindow {
         self.backup = curve.data_ref().curve.clone();
         self.curve_resource = Some(curve);
 
-        ui.send_message(WidgetMessage::enabled(
-            self.curve_editor,
-            MessageDirection::ToWidget,
-            true,
-        ));
+        ui.send(self.curve_editor, WidgetMessage::Enabled(true));
 
         self.sync_to_model(ui);
         self.sync_title(resource_manager, ui);
@@ -398,11 +388,7 @@ impl CurveEditorWindow {
             "Curve Editor".to_string()
         };
 
-        ui.send_message(WindowMessage::title(
-            self.window,
-            MessageDirection::ToWidget,
-            WindowTitle::text(title),
-        ));
+        ui.send(self.window, WindowMessage::Title(WindowTitle::text(title)));
     }
 
     fn revert(&self) {
@@ -411,19 +397,20 @@ impl CurveEditorWindow {
         }
     }
 
-    fn open_save_file_dialog(&self, ui: &UserInterface) {
-        ui.send_message(FileSelectorMessage::root(
+    fn open_save_file_dialog(&self, resource_manager: &ResourceManager, ui: &UserInterface) {
+        ui.send(
             self.save_file_selector,
-            MessageDirection::ToWidget,
-            Some(std::env::current_dir().unwrap()),
-        ));
+            FileSelectorMessage::Root(Some(resource_manager.registry_folder())),
+        );
 
-        ui.send_message(WindowMessage::open_modal(
+        ui.send(
             self.save_file_selector,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
     }
 
     pub fn handle_ui_message(mut self, message: &UiMessage, engine: &mut Engine) -> Option<Self> {
@@ -432,12 +419,13 @@ impl CurveEditorWindow {
         if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.cancel {
                 if self.modified && self.curve_resource.is_some() {
-                    ui.send_message(MessageBoxMessage::open(
+                    ui.send(
                         self.cancel_message_box,
-                        MessageDirection::ToWidget,
-                        None,
-                        None,
-                    ));
+                        MessageBoxMessage::Open {
+                            text: None,
+                            title: None,
+                        },
+                    );
                 } else {
                     self.destroy(ui);
                     return None;
@@ -445,12 +433,13 @@ impl CurveEditorWindow {
             } else if message.destination() == self.ok {
                 if self.modified && self.curve_resource.is_some() {
                     if self.path == PathBuf::default() {
-                        ui.send_message(MessageBoxMessage::open(
+                        ui.send(
                             self.save_changes_message_box,
-                            MessageDirection::ToWidget,
-                            None,
-                            None,
-                        ));
+                            MessageBoxMessage::Open {
+                                text: None,
+                                title: None,
+                            },
+                        );
                     } else {
                         self.save();
                         self.destroy(ui);
@@ -461,22 +450,17 @@ impl CurveEditorWindow {
                     return None;
                 }
             }
-        } else if let Some(CurveEditorMessage::Sync(curve)) = message.data() {
-            if message.destination() == self.curve_editor
-                && message.direction() == MessageDirection::FromWidget
-                && message.flags != MSG_SYNC_FLAG
-            {
-                if let Some(curve_resource) = self.curve_resource.as_ref() {
-                    self.command_stack.do_command(
-                        Command::new(ModifyCurveCommand {
-                            curve_resource: curve_resource.clone(),
-                            curve: curve.first().cloned().unwrap(),
-                        }),
-                        &mut CurveEditorContext {},
-                    );
+        } else if let Some(CurveEditorMessage::Sync(curve)) = message.data_from(self.curve_editor) {
+            if let Some(curve_resource) = self.curve_resource.as_ref() {
+                self.command_stack.do_command(
+                    Command::new(ModifyCurveCommand {
+                        curve_resource: curve_resource.clone(),
+                        curve: curve.first().cloned().unwrap(),
+                    }),
+                    &mut CurveEditorContext {},
+                );
 
-                    self.modified = true;
-                }
+                self.modified = true;
             }
         } else if let Some(MenuItemMessage::Click) = message.data() {
             if message.destination() == self.menu.edit.undo {
@@ -488,18 +472,19 @@ impl CurveEditorWindow {
 
                 self.sync_to_model(ui);
             } else if message.destination() == self.menu.file.load {
-                ui.send_message(FileSelectorMessage::root(
+                ui.send(
                     self.load_file_selector,
-                    MessageDirection::ToWidget,
-                    Some(std::env::current_dir().unwrap()),
-                ));
+                    FileSelectorMessage::Root(Some(engine.resource_manager.registry_folder())),
+                );
 
-                ui.send_message(WindowMessage::open_modal(
+                ui.send(
                     self.load_file_selector,
-                    MessageDirection::ToWidget,
-                    true,
-                    true,
-                ));
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Center,
+                        modal: true,
+                        focus_content: true,
+                    },
+                );
             } else if message.destination() == self.menu.file.new {
                 self.path = Default::default();
 
@@ -510,7 +495,7 @@ impl CurveEditorWindow {
                 );
             } else if message.destination() == self.menu.file.save {
                 if self.path == PathBuf::default() {
-                    self.open_save_file_dialog(ui);
+                    self.open_save_file_dialog(&engine.resource_manager, ui);
                 } else {
                     self.save();
                 }
@@ -527,32 +512,32 @@ impl CurveEditorWindow {
                 self.path.clone_from(path);
                 self.save();
             }
-        } else if let Some(MessageBoxMessage::Close(result)) = message.data() {
-            if message.destination() == self.save_changes_message_box {
-                match result {
-                    MessageBoxResult::No => {
-                        self.revert();
-                        self.destroy(ui);
-                        return None;
-                    }
-                    MessageBoxResult::Yes => {
-                        if self.path == PathBuf::default() {
-                            self.open_save_file_dialog(ui);
-                        } else {
-                            self.save();
-                            self.destroy(ui);
-                            return None;
-                        }
-                    }
-                    _ => (),
-                }
-            } else if message.destination() == self.cancel_message_box {
-                if let MessageBoxResult::Yes = result {
+        } else if let Some(MessageBoxMessage::Close(result)) =
+            message.data_from(self.save_changes_message_box)
+        {
+            match result {
+                MessageBoxResult::No => {
                     self.revert();
                     self.destroy(ui);
                     return None;
                 }
+                MessageBoxResult::Yes => {
+                    if self.path == PathBuf::default() {
+                        self.open_save_file_dialog(&engine.resource_manager, ui);
+                    } else {
+                        self.save();
+                        self.destroy(ui);
+                        return None;
+                    }
+                }
+                _ => (),
             }
+        } else if let Some(MessageBoxMessage::Close(MessageBoxResult::Yes)) =
+            message.data_from(self.cancel_message_box)
+        {
+            self.revert();
+            self.destroy(ui);
+            return None;
         }
 
         Some(self)
@@ -562,10 +547,12 @@ impl CurveEditorWindow {
 #[derive(Default)]
 pub struct CurveEditorPlugin {
     curve_editor_window: Option<CurveEditorWindow>,
-    open_curve_editor: Handle<UiNode>,
+    open_curve_editor: Handle<MenuItem>,
 }
 
 impl CurveEditorPlugin {
+    pub const CURVE_EDITOR: Uuid = uuid!("20705d17-741d-45bf-a9ba-ec3cee34ac2b");
+
     fn on_open_curve_editor_clicked(&mut self, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
         let ctx = &mut ui.build_ctx();
@@ -580,12 +567,11 @@ impl EditorPlugin for CurveEditorPlugin {
     fn on_start(&mut self, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
         let ctx = &mut ui.build_ctx();
-        self.open_curve_editor = create_menu_item("Curve Editor", vec![], ctx);
-        ui.send_message(MenuItemMessage::add_item(
+        self.open_curve_editor = create_menu_item("Curve Editor", Self::CURVE_EDITOR, vec![], ctx);
+        ui.send(
             editor.menu.utils_menu.menu,
-            MessageDirection::ToWidget,
-            self.open_curve_editor,
-        ));
+            MenuItemMessage::AddItem(self.open_curve_editor),
+        );
     }
 
     fn on_ui_message(&mut self, message: &mut UiMessage, editor: &mut Editor) {

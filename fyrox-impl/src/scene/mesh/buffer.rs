@@ -35,6 +35,7 @@ use crate::{
 use bytemuck::Pod;
 use fxhash::FxHasher;
 use fyrox_core::visitor::pod::PodVecView;
+use fyrox_core::visitor::BinaryBlob;
 use std::{
     alloc::Layout,
     fmt::{Display, Formatter},
@@ -57,8 +58,11 @@ pub trait VertexTrait: Copy + 'static {
 /// Data type for a vertex attribute component.
 #[derive(Reflect, Copy, Clone, PartialOrd, PartialEq, Eq, Ord, Hash, Visit, Debug)]
 #[repr(u8)]
+#[derive(Default)]
+#[reflect(type_uuid = "c131e587-c400-4185-93fb-fbfbd11c1d8b")]
 pub enum VertexAttributeDataType {
     /// 32-bit floating-point.
+    #[default]
     F32,
     /// 32-bit unsigned integer.
     U32,
@@ -66,12 +70,6 @@ pub enum VertexAttributeDataType {
     U16,
     /// 8-bit unsigned integer.
     U8,
-}
-
-impl Default for VertexAttributeDataType {
-    fn default() -> Self {
-        Self::F32
-    }
 }
 
 impl VertexAttributeDataType {
@@ -89,8 +87,11 @@ impl VertexAttributeDataType {
 /// room for any custom data - it may be fit into `TexCoordN` attributes.
 #[derive(Reflect, Copy, Clone, PartialOrd, PartialEq, Eq, Ord, Hash, Visit, Debug)]
 #[repr(u32)]
+#[derive(Default)]
+#[reflect(type_uuid = "17839987-f47f-4dd4-9a66-4c39b301681f")]
 pub enum VertexAttributeUsage {
     /// Vertex position. Usually `Vector2<f32>` or `Vector3<f32>`.
+    #[default]
     Position = 0,
     /// Vertex normal. Usually `Vector3<f32>`, more rare `Vector3<u16>` (F16).
     Normal = 1,
@@ -139,12 +140,6 @@ pub enum VertexAttributeUsage {
     Count,
 }
 
-impl Default for VertexAttributeUsage {
-    fn default() -> Self {
-        Self::Position
-    }
-}
-
 /// Input vertex attribute descriptor used to construct layouts and feed vertex buffer.
 #[derive(Debug, Hash)]
 pub struct VertexAttributeDescriptor {
@@ -176,6 +171,7 @@ pub struct VertexAttributeDescriptor {
 /// Vertex attribute is a simple "bridge" between raw data and its interpretation. In
 /// other words it defines how to treat raw data in vertex shader.
 #[derive(Reflect, Visit, Copy, Clone, Default, Debug, Hash)]
+#[reflect(type_uuid = "705f8ad3-69b4-4b39-99aa-a3f97e319202")]
 pub struct VertexAttribute {
     /// Claimed usage of the attribute. It could be Position, Normal, etc.
     pub usage: VertexAttributeUsage,
@@ -205,8 +201,26 @@ pub struct VertexAttribute {
     pub normalized: bool,
 }
 
+impl Display for VertexAttribute {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Vertex Attribute:\n\tUsage: {:?}\n\tData Type: {:?}\n\tComponent Count: {}\n\t\
+            Divisor: {}\n\tOffset: {}\n\tBinding Point:{}\n\tNormalized: {}",
+            self.usage,
+            self.data_type,
+            self.size,
+            self.divisor,
+            self.offset,
+            self.shader_location,
+            self.normalized
+        )
+    }
+}
+
 /// Bytes storage of a vertex buffer.
 #[derive(Reflect, Clone, Debug)]
+#[reflect(type_uuid = "493045ee-fba2-4c5f-a5cd-c27034d1ec71")]
 pub struct BytesStorage {
     bytes: Vec<u8>,
     #[reflect(hidden)]
@@ -386,6 +400,7 @@ impl Deref for BytesStorage {
 /// Vertex size cannot be more than 256 bytes, this limitation shouldn't be a problem because almost every GPU supports up to
 /// 16 vertex attributes with 16 bytes of size each, which gives exactly 256 bytes.
 #[derive(Reflect, Clone, Visit, Default, Debug)]
+#[reflect(type_uuid = "edab7161-6695-4e2a-b947-13305709d451")]
 pub struct VertexBuffer {
     dense_layout: Vec<VertexAttribute>,
     sparse_layout: [Option<VertexAttribute>; VertexAttributeUsage::Count as usize],
@@ -1453,10 +1468,22 @@ impl VertexWriteTrait for VertexViewMut<'_> {
 }
 
 /// A buffer for data that defines connections between vertices.
-#[derive(Reflect, Visit, Default, Clone, Debug)]
+#[derive(Reflect, Default, Clone, Debug)]
+#[reflect(type_uuid = "ed9f9aa9-e1fb-4f58-b1cb-162d51dbc9e7")]
 pub struct TriangleBuffer {
     triangles: Vec<TriangleDefinition>,
     modifications_counter: u64,
+}
+
+impl Visit for TriangleBuffer {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        let mut guard = visitor.enter_region(name)?;
+        BinaryBlob {
+            vec: &mut self.triangles,
+        }
+        .visit("Data", &mut guard)?;
+        Ok(())
+    }
 }
 
 fn calculate_triangle_buffer_hash(triangles: &[TriangleDefinition]) -> u64 {
@@ -1638,7 +1665,7 @@ pub struct AttributeViewRefMut<'a, T> {
 
 impl<'a, T> AttributeViewRefMut<'a, T> {
     /// Tries to fetch attribute data at the given index.
-    pub fn get(&'a self, i: usize) -> Option<&'a mut T> {
+    pub fn get(&'a mut self, i: usize) -> Option<&'a mut T> {
         if i < self.count {
             Some(unsafe { &mut *((self.ptr.add(i * self.stride)) as *mut T) })
         } else {

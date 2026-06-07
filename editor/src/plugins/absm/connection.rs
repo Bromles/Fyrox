@@ -21,28 +21,33 @@
 use crate::fyrox::{
     core::{
         algebra::Vector2, color::Color, math::Rect, pool::Handle, reflect::prelude::*,
-        type_traits::prelude::*, uuid_provider, visitor::prelude::*,
+        visitor::prelude::*,
     },
     gui::{
         brush::Brush,
         define_widget_deref,
         draw::{CommandTexture, Draw, DrawingContext},
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         widget::{Widget, WidgetBuilder, WidgetMessage},
         BuildContext, Control, UiNode, UserInterface,
     },
 };
 use crate::plugins::absm::segment::Segment;
 use crate::utils::fetch_node_screen_center;
+use fyrox::graph::SceneGraph;
 
+use crate::plugins::absm::canvas::AbsmCanvas;
+use crate::plugins::absm::socket::Socket;
 use fyrox::material::MaterialResource;
-use std::ops::{Deref, DerefMut};
 
 const PICKED_BRUSH: Brush = Brush::Solid(Color::opaque(100, 100, 100));
 const NORMAL_BRUSH: Brush = Brush::Solid(Color::opaque(80, 80, 80));
 
-#[derive(Debug, Clone, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Debug, Clone, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "c802b6fa-a5ef-4464-a097-749c731ffde0"
+)]
 pub struct Connection {
     widget: Widget,
     pub segment: Segment,
@@ -72,8 +77,6 @@ pub fn draw_connection(
     drawing_context.commit(clip_bounds, brush, CommandTexture::None, material, None);
 }
 
-uuid_provider!(Connection = "c802b6fa-a5ef-4464-a097-749c731ffde0");
-
 impl Control for Connection {
     fn draw(&self, drawing_context: &mut DrawingContext) {
         draw_connection(
@@ -88,23 +91,23 @@ impl Control for Connection {
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
-        self.segment.handle_routed_message(self.handle(), message);
+        if self.segment.handle_routed_message(self.handle(), message) {
+            self.invalidate_visual();
+        }
 
         if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
                 WidgetMessage::MouseEnter => {
-                    ui.send_message(WidgetMessage::foreground(
+                    ui.send(
                         self.handle(),
-                        MessageDirection::ToWidget,
-                        PICKED_BRUSH.clone().into(),
-                    ));
+                        WidgetMessage::Foreground(PICKED_BRUSH.clone().into()),
+                    );
                 }
                 WidgetMessage::MouseLeave => {
-                    ui.send_message(WidgetMessage::foreground(
+                    ui.send(
                         self.handle(),
-                        MessageDirection::ToWidget,
-                        NORMAL_BRUSH.clone().into(),
-                    ));
+                        WidgetMessage::Foreground(NORMAL_BRUSH.clone().into()),
+                    );
                 }
                 _ => (),
             }
@@ -114,9 +117,9 @@ impl Control for Connection {
 
 pub struct ConnectionBuilder {
     widget_builder: WidgetBuilder,
-    source_socket: Handle<UiNode>,
+    source_socket: Handle<Socket>,
     source_node: Handle<UiNode>,
-    dest_socket: Handle<UiNode>,
+    dest_socket: Handle<Socket>,
     dest_node: Handle<UiNode>,
 }
 
@@ -131,12 +134,12 @@ impl ConnectionBuilder {
         }
     }
 
-    pub fn with_source_socket(mut self, source: Handle<UiNode>) -> Self {
+    pub fn with_source_socket(mut self, source: Handle<Socket>) -> Self {
         self.source_socket = source;
         self
     }
 
-    pub fn with_dest_socket(mut self, dest: Handle<UiNode>) -> Self {
+    pub fn with_dest_socket(mut self, dest: Handle<Socket>) -> Self {
         self.dest_socket = dest;
         self
     }
@@ -151,8 +154,8 @@ impl ConnectionBuilder {
         self
     }
 
-    pub fn build(self, canvas: Handle<UiNode>, ctx: &mut BuildContext) -> Handle<UiNode> {
-        let canvas_ref = ctx.try_get_node(canvas);
+    pub fn build(self, canvas: Handle<AbsmCanvas>, ctx: &mut BuildContext) -> Handle<Connection> {
+        let canvas_ref = ctx.inner().try_get(canvas).ok();
 
         let connection = Connection {
             widget: self
@@ -161,11 +164,11 @@ impl ConnectionBuilder {
                 .with_clip_to_bounds(false)
                 .build(ctx),
             segment: Segment {
-                source: self.source_socket,
+                source: self.source_socket.to_base(),
                 source_pos: canvas_ref
                     .map(|c| c.screen_to_local(fetch_node_screen_center(self.source_socket, ctx)))
                     .unwrap_or_default(),
-                dest: self.dest_socket,
+                dest: self.dest_socket.to_base(),
                 dest_pos: canvas_ref
                     .map(|c| c.screen_to_local(fetch_node_screen_center(self.dest_socket, ctx)))
                     .unwrap_or_default(),
@@ -174,7 +177,7 @@ impl ConnectionBuilder {
             dest_node: self.dest_node,
         };
 
-        ctx.add_node(UiNode::new(connection))
+        ctx.add(connection)
     }
 }
 

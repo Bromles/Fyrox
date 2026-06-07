@@ -1,24 +1,27 @@
 [package]
 name = "fyrox-project-manager"
-version = "1.0.0-rc.1"
+version = "2.0.0-rc.1"
 edition = "2021"
 authors = ["Dmitry Stepanov <d1maxa@yandex.ru>"]
 license = "MIT"
 description = "Project manager for Fyrox engine"
 keywords = ["fyrox", "project", "manager"]
 categories = ["game-development"]
-include = ["/src/**/*", "/Cargo.toml", "/LICENSE", "/README.md", "/resources/**/*"]
+include = ["/src/**/*", "/Cargo.toml", "/LICENSE", "/README.md", "/resources/**/*", "/pm.version"]
 homepage = "https://fyrox.rs"
 repository = "https://github.com/FyroxEngine/Fyrox"
-rust-version = "1.86"
+rust-version = "1.87"
 
 [dependencies]
-fyrox = { version = "1.0.0-rc.1", path = "../fyrox" }
-fyrox-template-core = { version = "1.0.0-rc.1", path = "../template-core" }
-fyrox-build-tools = { version = "1.0.0-rc.1", path = "../fyrox-build-tools" }
+fyrox = { version = "2.0.0-rc.1", path = "../fyrox" }
+fyrox-template-core = { version = "2.0.0-rc.1", path = "../template-core" }
+fyrox-build-tools = { version = "2.0.0-rc.1", path = "../fyrox-build-tools" }
 serde = { version = "1", features = ["derive"] }
-ron = "0.8.1"
+ron = "0.11.0"
 open = "5.0.1"
-cargo_metadata = "0.19.0"
+cargo_metadata = "0.22.0"
 serde_json = "1.0.133"
 directories = "5.0.1"
+
+[build-dependencies]
+toml_edit = "0.23.5"

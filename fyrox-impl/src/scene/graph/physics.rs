@@ -23,8 +23,8 @@
 use crate::{
     core::{
         algebra::{
-            DMatrix, Dyn, Isometry3, Matrix4, Point3, Translation, Translation3, UnitQuaternion,
-            UnitVector3, VecStorage, Vector2, Vector3,
+            Isometry3, Matrix4, Point3, Translation, Translation3, UnitQuaternion, UnitVector3,
+            Vector2, Vector3,
         },
         arrayvec::ArrayVec,
         instant,
@@ -33,17 +33,16 @@ use crate::{
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
-        uuid_provider,
         variable::{InheritableVariable, VariableFlags},
         visitor::prelude::*,
-        BiDirHashMap,
+        BiDirHashMap, SafeLock,
     },
     scene::{
         self,
         collider::{self, ColliderShape, GeometrySource},
         debug::SceneDrawingContext,
         graph::{isometric_global_transform, Graph, NodePool},
-        joint::{JointLocalFrames, JointParams},
+        joint::{JointLocalFrames, JointMotorParams, JointParams},
         mesh::{
             buffer::{VertexAttributeUsage, VertexReadTrait},
             Mesh,
@@ -54,6 +53,7 @@ use crate::{
     },
     utils::raw_mesh::{RawMeshBuilder, RawVertex},
 };
+use rapier3d::geometry::Array2;
 use rapier3d::{
     dynamics::{
         CCDSolver, GenericJoint, GenericJointBuilder, ImpulseJointHandle, ImpulseJointSet,
@@ -65,22 +65,24 @@ use rapier3d::{
         InteractionGroups, NarrowPhase, Ray, SharedShape,
     },
     parry::{query::ShapeCastOptions, shape::HeightField},
-    pipeline::{DebugRenderPipeline, EventHandler, PhysicsPipeline, QueryPipeline},
+    pipeline::{DebugRenderPipeline, EventHandler, PhysicsPipeline},
     prelude::{HeightFieldCellStatus, JointAxis, MassProperties},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     cmp::Ordering,
     fmt::{Debug, Formatter},
     hash::Hash,
-    num::NonZeroUsize,
     sync::Arc,
     time::Duration,
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
-use fyrox_graph::{BaseSceneGraph, SceneGraphNode};
+use fyrox_graph::{NodeWrapper, SceneGraph};
 pub use rapier3d::geometry::shape::*;
+use rapier3d::math::{Pose3, Vec3};
+use rapier3d::parry::query::DefaultQueryDispatcher;
+use rapier3d::prelude::FrictionModel;
 
 /// Shape-dependent identifier.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -127,6 +129,7 @@ impl From<rapier2d::geometry::FeatureId> for FeatureId {
     Copy, Clone, Debug, PartialEq, Eq, Visit, Reflect, VariantNames, EnumString, AsRefStr, Default,
 )]
 #[repr(u32)]
+#[reflect(type_uuid = "775d5598-c283-4b44-9cc0-2e23dc8936f4")]
 pub enum CoefficientCombineRule {
     /// The two coefficients are averaged.
     #[default]
@@ -137,9 +140,9 @@ pub enum CoefficientCombineRule {
     Multiply,
     /// The greatest coefficient is chosen.
     Max,
+    /// The clamped sum of the two coefficients.
+    ClampedSum = 4,
 }
-
-uuid_provider!(CoefficientCombineRule = "775d5598-c283-4b44-9cc0-2e23dc8936f4");
 
 impl From<rapier3d::dynamics::CoefficientCombineRule> for CoefficientCombineRule {
     fn from(v: rapier3d::dynamics::CoefficientCombineRule) -> Self {
@@ -150,6 +153,9 @@ impl From<rapier3d::dynamics::CoefficientCombineRule> for CoefficientCombineRule
                 CoefficientCombineRule::Multiply
             }
             rapier3d::dynamics::CoefficientCombineRule::Max => CoefficientCombineRule::Max,
+            rapier3d::dynamics::CoefficientCombineRule::ClampedSum => {
+                CoefficientCombineRule::ClampedSum
+            }
         }
     }
 }
@@ -163,6 +169,9 @@ impl Into<rapier3d::dynamics::CoefficientCombineRule> for CoefficientCombineRule
                 rapier3d::dynamics::CoefficientCombineRule::Multiply
             }
             CoefficientCombineRule::Max => rapier3d::dynamics::CoefficientCombineRule::Max,
+            CoefficientCombineRule::ClampedSum => {
+                rapier3d::dynamics::CoefficientCombineRule::ClampedSum
+            }
         }
     }
 }
@@ -176,6 +185,9 @@ impl Into<rapier2d::dynamics::CoefficientCombineRule> for CoefficientCombineRule
                 rapier2d::dynamics::CoefficientCombineRule::Multiply
             }
             CoefficientCombineRule::Max => rapier2d::dynamics::CoefficientCombineRule::Max,
+            CoefficientCombineRule::ClampedSum => {
+                rapier2d::dynamics::CoefficientCombineRule::ClampedSum
+            }
         }
     }
 }
@@ -206,7 +218,7 @@ impl PhysicsPerformanceStatistics {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Intersection {
     /// A handle of the collider with which intersection was detected.
-    pub collider: Handle<Node>,
+    pub collider: Handle<collider::Collider>,
 
     /// A normal at the intersection position.
     pub normal: Vector3<f32>,
@@ -324,9 +336,9 @@ pub struct ContactManifold {
     /// The contact normal of all the contacts of this manifold, expressed in the local space of the second shape.
     pub local_n2: Vector3<f32>,
     /// The first rigid-body involved in this contact manifold.
-    pub rigid_body1: Handle<Node>,
+    pub rigid_body1: Handle<rigidbody::RigidBody>,
     /// The second rigid-body involved in this contact manifold.
-    pub rigid_body2: Handle<Node>,
+    pub rigid_body2: Handle<rigidbody::RigidBody>,
     /// The world-space contact normal shared by all the contact in this contact manifold.
     pub normal: Vector3<f32>,
 }
@@ -335,9 +347,9 @@ pub struct ContactManifold {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContactPair {
     /// The first collider involved in the contact pair.
-    pub collider1: Handle<Node>,
+    pub collider1: Handle<collider::Collider>,
     /// The second collider involved in the contact pair.
-    pub collider2: Handle<Node>,
+    pub collider2: Handle<collider::Collider>,
     /// The set of contact manifolds between the two colliders.
     /// All contact manifold contain themselves contact points between the colliders.
     pub manifolds: Vec<ContactManifold>,
@@ -352,7 +364,7 @@ impl ContactPair {
     /// may be the first member of some pairs and the second member of other pairs.
     /// This method simplifies determining which objects a collider has collided with.
     #[inline]
-    pub fn other(&self, subject: Handle<Node>) -> Handle<Node> {
+    pub fn other(&self, subject: Handle<collider::Collider>) -> Handle<collider::Collider> {
         if subject == self.collider1 {
             self.collider2
         } else {
@@ -373,15 +385,15 @@ impl ContactPair {
                             .points
                             .iter()
                             .map(|p| ContactData {
-                                local_p1: p.local_p1.coords,
-                                local_p2: p.local_p2.coords,
+                                local_p1: p.local_p1.into(),
+                                local_p2: p.local_p2.into(),
                                 dist: p.dist,
                                 impulse: p.data.impulse,
                                 tangent_impulse: p.data.tangent_impulse,
                             })
                             .collect(),
-                        local_n1: m.local_n1,
-                        local_n2: m.local_n2,
+                        local_n1: m.local_n1.into(),
+                        local_n2: m.local_n2.into(),
                         rigid_body1: m.data.rigid_body1.and_then(|h| {
                             physics
                                 .bodies
@@ -394,11 +406,11 @@ impl ContactPair {
                                 .get(h)
                                 .map(|b| Handle::decode_from_u128(b.user_data))
                         })?,
-                        normal: m.data.normal,
+                        normal: m.data.normal.into(),
                     })
                 })
                 .collect(),
-            has_any_active_contact: c.has_any_active_contact,
+            has_any_active_contact: c.has_any_active_contact(),
         })
     }
 }
@@ -407,9 +419,9 @@ impl ContactPair {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntersectionPair {
     /// The first collider involved in the contact pair.
-    pub collider1: Handle<Node>,
+    pub collider1: Handle<collider::Collider>,
     /// The second collider involved in the contact pair.
-    pub collider2: Handle<Node>,
+    pub collider2: Handle<collider::Collider>,
     /// Is there any active contact in this contact pair?
     /// When false, this pair may just mean that bounding boxes are touching.
     pub has_any_active_contact: bool,
@@ -422,7 +434,7 @@ impl IntersectionPair {
     /// may be the first member of some pairs and the second member of other pairs.
     /// This method simplifies determining which objects a collider has collided with.
     #[inline]
-    pub fn other(&self, subject: Handle<Node>) -> Handle<Node> {
+    pub fn other(&self, subject: Handle<collider::Collider>) -> Handle<collider::Collider> {
         if subject == self.collider1 {
             self.collider2
         } else {
@@ -452,8 +464,8 @@ fn convert_joint_params(
     };
 
     let mut joint = GenericJointBuilder::new(locked_axis)
-        .local_frame1(local_frame1)
-        .local_frame2(local_frame2)
+        .local_frame1(local_frame1.into())
+        .local_frame2(local_frame2.into())
         .build();
 
     match params {
@@ -511,11 +523,14 @@ fn make_trimesh(
     let root_inv_transform = owner_inv_transform;
 
     for &source in sources {
-        if let Some(mesh) = nodes.try_borrow(source.0).and_then(|n| n.cast::<Mesh>()) {
+        if let Ok(mesh) = nodes.try_get_or_field_ref::<Mesh>(source.0) {
             let global_transform = root_inv_transform * mesh.global_transform();
 
             for surface in mesh.surfaces() {
                 let shared_data = surface.data();
+                if !shared_data.is_ok() {
+                    continue;
+                }
                 let shared_data = shared_data.data_ref();
 
                 let vertices = &shared_data.vertex_buffer;
@@ -564,10 +579,10 @@ fn make_trimesh(
 
     let raw_mesh = mesh_builder.build();
 
-    let vertices: Vec<Point3<f32>> = raw_mesh
+    let vertices: Vec<Vec3> = raw_mesh
         .vertices
         .into_iter()
-        .map(|v| Point3::new(v.x, v.y, v.z))
+        .map(|v| Vec3::new(v.x, v.y, v.z))
         .collect();
 
     let indices = raw_mesh
@@ -585,7 +600,7 @@ fn make_trimesh(
             ),
         );
 
-        SharedShape::trimesh(vec![Point3::new(0.0, 0.0, 0.0)], vec![[0, 0, 0]]).ok()
+        SharedShape::trimesh(vec![Vec3::new(0.0, 0.0, 0.0)], vec![[0, 0, 0]]).ok()
     } else {
         SharedShape::trimesh(vertices, indices).ok()
     }
@@ -653,10 +668,10 @@ fn make_polyhedron_shape(owner_inv_transform: Matrix4<f32>, mesh: &Mesh) -> Shar
 
     let raw_mesh = mesh_builder.build();
 
-    let vertices: Vec<Point3<f32>> = raw_mesh
+    let vertices: Vec<Vec3> = raw_mesh
         .vertices
         .into_iter()
-        .map(|v| Point3::new(v.x, v.y, v.z))
+        .map(|v| Vec3::new(v.x, v.y, v.z))
         .collect();
 
     let indices = raw_mesh
@@ -713,43 +728,40 @@ fn make_heightfield(terrain: &Terrain) -> Option<SharedShape> {
     }
     let x_scale = terrain.chunk_size().x * scale.x * col_range as f32;
     let z_scale = terrain.chunk_size().y * scale.z * row_range as f32;
-    let x_pos = terrain.chunk_size().x * scale.x * chunk_min.x as f32;
-    let z_pos = terrain.chunk_size().y * scale.z * chunk_min.y as f32;
     let mut hf = HeightField::new(
-        DMatrix::from_data(VecStorage::new(
-            Dyn(nrows as usize),
-            Dyn(ncols as usize),
-            data,
-        )),
-        Vector3::new(x_scale, 1.0, z_scale),
+        Array2::new(nrows as usize, ncols as usize, data),
+        Vec3::new(x_scale, 1.0, z_scale),
     );
-    hf.cells_statuses_mut()
-        .fill(HeightFieldCellStatus::CELL_REMOVED);
-    let hole_mask_size = terrain.hole_mask_size();
-    for chunk in terrain.chunks_ref() {
-        let texture = chunk.hole_mask().map(|t| t.data_ref());
-        let hole_mask = texture.as_ref().map(|t| t.data_of_type::<u8>().unwrap());
-        let pos = (chunk.grid_position() - chunk_min).map(|x| x as u32);
-        let (ox, oy) = (pos.x * chunk_size.x, pos.y * chunk_size.y);
+    if terrain.holes_enabled() {
+        let hole_mask_size = terrain.hole_mask_size();
+        for chunk in terrain.chunks_ref() {
+            let texture = chunk.hole_mask().map(|t| t.data_ref());
+            let hole_mask = texture.as_ref().map(|t| t.data_of_type::<u8>().unwrap());
+            let pos = (chunk.grid_position() - chunk_min).map(|x| x as u32);
+            let (ox, oy) = (pos.x * chunk_size.x, pos.y * chunk_size.y);
 
-        for iy in 0..hole_mask_size.y {
-            for ix in 0..hole_mask_size.x {
-                let is_hole = hole_mask
-                    .map(|m| m[(iy * hole_mask_size.x + ix) as usize] < 128)
-                    .unwrap_or_default();
-                let (x, y) = (ox + ix, oy + iy);
-                if !is_hole {
-                    hf.set_cell_status(y as usize, x as usize, HeightFieldCellStatus::empty());
+            for iy in 0..hole_mask_size.y {
+                for ix in 0..hole_mask_size.x {
+                    let is_hole = hole_mask
+                        .map(|m| m[(iy * hole_mask_size.x + ix) as usize] < 128)
+                        .unwrap_or_default();
+                    let (x, y) = (ox + ix, oy + iy);
+                    if is_hole {
+                        hf.set_cell_status(
+                            y as usize,
+                            x as usize,
+                            HeightFieldCellStatus::CELL_REMOVED,
+                        );
+                    } else {
+                        hf.set_cell_status(y as usize, x as usize, HeightFieldCellStatus::empty());
+                    }
                 }
             }
         }
     }
     // HeightField colliders naturally have their origin at their centers,
     // so to position the collider correctly we must add half of the size to x and z.
-    Some(SharedShape::compound(vec![(
-        Isometry3::translation(x_scale * 0.5 + x_pos, 0.0, z_scale * 0.5 + z_pos),
-        SharedShape::new(hf),
-    )]))
+    Some(SharedShape::new(hf))
 }
 
 // Converts descriptor in a shared shape.
@@ -766,22 +778,22 @@ fn collider_shape_into_native_shape(
             Some(SharedShape::cylinder(cylinder.half_height, cylinder.radius))
         }
         ColliderShape::Cone(cone) => Some(SharedShape::cone(cone.half_height, cone.radius)),
-        ColliderShape::Cuboid(cuboid) => {
-            Some(SharedShape(Arc::new(Cuboid::new(cuboid.half_extents))))
-        }
+        ColliderShape::Cuboid(cuboid) => Some(SharedShape(Arc::new(Cuboid::new(
+            cuboid.half_extents.into(),
+        )))),
         ColliderShape::Capsule(capsule) => Some(SharedShape::capsule(
-            Point3::from(capsule.begin),
-            Point3::from(capsule.end),
+            capsule.begin.into(),
+            capsule.end.into(),
             capsule.radius,
         )),
         ColliderShape::Segment(segment) => Some(SharedShape::segment(
-            Point3::from(segment.begin),
-            Point3::from(segment.end),
+            segment.begin.into(),
+            segment.end.into(),
         )),
         ColliderShape::Triangle(triangle) => Some(SharedShape::triangle(
-            Point3::from(triangle.a),
-            Point3::from(triangle.b),
-            Point3::from(triangle.c),
+            triangle.a.into(),
+            triangle.b.into(),
+            triangle.c.into(),
         )),
         ColliderShape::Trimesh(trimesh) => {
             if trimesh.sources.is_empty() {
@@ -796,12 +808,12 @@ fn collider_shape_into_native_shape(
             }
         }
         ColliderShape::Heightfield(heightfield) => pool
-            .try_borrow(heightfield.geometry_source.0)
-            .and_then(|n| n.cast::<Terrain>())
+            .try_get_or_field_ref::<Terrain>(heightfield.geometry_source.0)
+            .ok()
             .and_then(make_heightfield),
         ColliderShape::Polyhedron(polyhedron) => pool
-            .try_borrow(polyhedron.geometry_source.0)
-            .and_then(|n| n.cast::<Mesh>())
+            .try_get_or_field_ref::<Mesh>(polyhedron.geometry_source.0)
+            .ok()
             .map(|mesh| make_polyhedron_shape(owner_inv_global_transform, mesh)),
     }
 }
@@ -814,10 +826,11 @@ fn collider_shape_into_native_shape(
 /// each parameter.
 #[derive(Copy, Clone, Visit, Reflect, Debug, PartialEq)]
 #[visit(optional)]
+#[reflect(type_uuid = "bd4ca07f-34a5-4cf8-a70e-24919124545b")]
 pub struct IntegrationParameters {
     /// The time step length, default is None - this means that physics simulation will use engine's
     /// time step.
-    #[reflect(min_value = 0.0, description = "The time step length (default: None)")]
+    #[reflect(min_value = 0.0)]
     pub dt: Option<f32>,
 
     /// Minimum timestep size when using CCD with multiple substeps (default `1.0 / 60.0 / 100.0`)
@@ -828,113 +841,35 @@ pub struct IntegrationParameters {
     /// Setting this to a large value will reduce the opportunity to performing CCD substepping,
     /// resulting in potentially more time dropped by the motion-clamping mechanism. Setting this
     /// to an very small value may lead to numerical instabilities.
-    #[reflect(
-        min_value = 0.0,
-        description = "Minimum timestep size when using CCD with multiple\
-         substeps (default `1.0 / 60.0 / 100.0`)"
-    )]
+    #[reflect(min_value = 0.0)]
     pub min_ccd_dt: f32,
 
-    /// The damping ratio used by the springs for contact constraint stabilization.
-    /// Larger values make the constraints more compliant (allowing more visible penetrations
-    /// before stabilization). Default `5.0`.
-    #[reflect(
-        min_value = 0.0,
-        description = "The damping ratio used by the springs for contact constraint stabilization.
-Larger values make the constraints more compliant (allowing more visible penetrations
-before stabilization). Default `5.0`."
-    )]
-    pub contact_damping_ratio: f32,
-
-    /// The natural frequency used by the springs for contact constraint regularization.
-    /// Increasing this value will make it so that penetrations get fixed more quickly at the
-    /// expense of potential jitter effects due to overshooting. In order to make the simulation
-    /// look stiffer, it is recommended to increase the `contact_damping_ratio` instead of this
-    /// value. Default: `30.0`
-    #[reflect(
-        min_value = 0.0,
-        description = "The natural frequency used by the springs for contact constraint regularization.
-Increasing this value will make it so that penetrations get fixed more quickly at the
-expense of potential jitter effects due to overshooting. In order to make the simulation
-look stiffer, it is recommended to increase the `contact_damping_ratio` instead of this
-value. Default: `30.0`"
-    )]
-    pub contact_natural_frequency: f32,
-
-    /// The natural frequency used by the springs for joint constraint regularization.
-    /// Increasing this value will make it so that penetrations get fixed more quickly.
-    /// Default: `1.0e6`
-    #[reflect(
-        min_value = 0.0,
-        description = "The natural frequency used by the springs for joint constraint regularization.
-Increasing this value will make it so that penetrations get fixed more quickly. Default: `1.0e6`."
-    )]
-    pub joint_natural_frequency: f32,
-
-    /// The fraction of critical damping applied to the joint for constraints regularization.
-    /// (default `0.8`).
-    #[reflect(
-        min_value = 0.0,
-        description = "The fraction of critical damping applied to the joint for \
-        constraints regularization (default: `0.8`)."
-    )]
-    pub joint_damping_ratio: f32,
-
     /// Amount of penetration the engine wont attempt to correct (default: `0.002m`).
-    #[reflect(
-        min_value = 0.0,
-        description = "Amount of penetration the engine wont attempt to correct (default: `0.002m`)."
-    )]
+    #[reflect(min_value = 0.0)]
     pub allowed_linear_error: f32,
 
     /// Maximum amount of penetration the solver will attempt to resolve in one timestep (default: `10.0`).
-    #[reflect(
-        min_value = 0.0,
-        description = "Maximum amount of penetration the solver will attempt to resolve in one timestep (default: `10.0`)."
-    )]
+    #[reflect(min_value = 0.0)]
     pub normalized_max_corrective_velocity: f32,
 
     /// The maximal distance separating two objects that will generate predictive contacts (default: `0.002`).
-    #[reflect(
-        min_value = 0.0,
-        description = "The maximal distance separating two objects that will generate \
-        predictive contacts (default: `0.002`)."
-    )]
+    #[reflect(min_value = 0.0)]
     pub prediction_distance: f32,
 
     /// The number of solver iterations run by the constraints solver for calculating forces (default: `4`).
-    #[reflect(
-        min_value = 0.0,
-        description = "The number of solver iterations run by the constraints solver for calculating forces (default: `4`)."
-    )]
+    #[reflect(min_value = 0.0)]
     pub num_solver_iterations: usize,
 
-    /// Number of addition friction resolution iteration run during the last solver sub-step (default: `4`).
-    #[reflect(
-        min_value = 0.0,
-        description = "Number of addition friction resolution iteration run during the last solver sub-step (default: `4`)."
-    )]
-    pub num_additional_friction_iterations: usize,
-
     /// Number of internal Project Gauss Seidel (PGS) iterations run at each solver iteration (default: `1`).
-    #[reflect(
-        min_value = 0.0,
-        description = "Number of internal Project Gauss Seidel (PGS) iterations run at each solver iteration (default: `1`)."
-    )]
+    #[reflect(min_value = 0.0)]
     pub num_internal_pgs_iterations: usize,
 
     /// Minimum number of dynamic bodies in each active island (default: `128`).
-    #[reflect(
-        min_value = 0.0,
-        description = "Minimum number of dynamic bodies in each active island (default: `128`)."
-    )]
+    #[reflect(min_value = 0.0)]
     pub min_island_size: u32,
 
     /// Maximum number of substeps performed by the  solver (default: `4`).
-    #[reflect(
-        min_value = 0.0,
-        description = "Maximum number of substeps performed by the  solver (default: `4`)."
-    )]
+    #[reflect(min_value = 0.0)]
     pub max_ccd_substeps: u32,
 
     /// The coefficient in `[0, 1]` applied to warmstart impulses, i.e., impulses that are used as the
@@ -959,16 +894,11 @@ impl Default for IntegrationParameters {
         Self {
             dt: None,
             min_ccd_dt: 1.0 / 60.0 / 100.0,
-            contact_damping_ratio: 5.0,
-            contact_natural_frequency: 30.0,
-            joint_natural_frequency: 1.0e6,
-            joint_damping_ratio: 1.0,
             warmstart_coefficient: 1.0,
             allowed_linear_error: 0.002,
             normalized_max_corrective_velocity: 10.0,
             prediction_distance: 0.002,
             num_internal_pgs_iterations: 1,
-            num_additional_friction_iterations: 4,
             num_solver_iterations: 4,
             min_island_size: 128,
             max_ccd_substeps: 4,
@@ -982,6 +912,7 @@ impl Default for IntegrationParameters {
 /// methods, mostly for ray casting. You should add physical entities using scene graph nodes, such
 /// as RigidBody, Collider, Joint.
 #[derive(Visit, Reflect)]
+#[reflect(type_uuid = "17e663b8-98a4-46db-be71-a336246f571a")]
 pub struct PhysicsWorld {
     /// A flag that defines whether physics simulation is enabled or not.
     pub enabled: InheritableVariable<bool>,
@@ -1039,9 +970,6 @@ pub struct PhysicsWorld {
     #[visit(skip)]
     #[reflect(hidden)]
     event_handler: Box<dyn EventHandler>,
-    #[visit(skip)]
-    #[reflect(hidden)]
-    query: RefCell<QueryPipeline>,
     #[visit(skip)]
     #[reflect(hidden)]
     debug_render_pipeline: Mutex<DebugRenderPipeline>,
@@ -1152,23 +1080,40 @@ impl PhysicsWorld {
                 map: Default::default(),
             },
             event_handler: Box::new(()),
-            query: RefCell::new(Default::default()),
             performance_statistics: Default::default(),
             debug_render_pipeline: Default::default(),
         }
     }
 
-    pub(super) fn update(&mut self, dt: f32) {
+    /// Update the physics pipeline with a timestep of the given length.
+    ///
+    /// * `dt`: The amount of time that has passed since the previous update.
+    ///   This may be overriden by [`PhysicsWorld::integration_parameters`] if
+    ///   `integration_parameters.dt` is `Some`, in which case that value is used
+    ///   instead of this argument.
+    /// * `dt_enabled`: If this is true then `dt` is used as usual, but if this is false
+    ///   then both the `dt` argument and `integration_parameters.dt` are ignored and
+    ///   a `dt` of zero is used instead, freezing all physics. This corresponds to the
+    ///   [`GraphUpdateSwitches::physics_dt`](crate::scene::graph::GraphUpdateSwitches::physics_dt).
+    pub(super) fn update(&mut self, dt: f32, dt_enabled: bool) {
         let time = instant::Instant::now();
+        let parameter_dt = self.integration_parameters.dt;
+        let parameter_dt = if parameter_dt == Some(0.0) {
+            None
+        } else {
+            parameter_dt
+        };
+        let dt = if dt_enabled {
+            parameter_dt.unwrap_or(dt)
+        } else {
+            0.0
+        };
 
         if *self.enabled {
             let integration_parameters = rapier3d::dynamics::IntegrationParameters {
-                dt: self.integration_parameters.dt.unwrap_or(dt),
+                dt,
                 min_ccd_dt: self.integration_parameters.min_ccd_dt,
-                contact_damping_ratio: self.integration_parameters.contact_damping_ratio,
-                contact_natural_frequency: self.integration_parameters.contact_natural_frequency,
-                joint_natural_frequency: self.integration_parameters.joint_natural_frequency,
-                joint_damping_ratio: self.integration_parameters.joint_damping_ratio,
+                contact_softness: rapier3d::dynamics::SpringCoefficients::contact_defaults(),
                 warmstart_coefficient: self.integration_parameters.warmstart_coefficient,
                 length_unit: self.integration_parameters.length_unit,
                 normalized_allowed_linear_error: self.integration_parameters.allowed_linear_error,
@@ -1176,13 +1121,7 @@ impl PhysicsWorld {
                     .integration_parameters
                     .normalized_max_corrective_velocity,
                 normalized_prediction_distance: self.integration_parameters.prediction_distance,
-                num_solver_iterations: NonZeroUsize::new(
-                    self.integration_parameters.num_solver_iterations,
-                )
-                .unwrap(),
-                num_additional_friction_iterations: self
-                    .integration_parameters
-                    .num_additional_friction_iterations,
+                num_solver_iterations: self.integration_parameters.num_solver_iterations,
                 num_internal_pgs_iterations: self
                     .integration_parameters
                     .num_internal_pgs_iterations,
@@ -1191,12 +1130,11 @@ impl PhysicsWorld {
                     .num_internal_stabilization_iterations,
                 min_island_size: self.integration_parameters.min_island_size as usize,
                 max_ccd_substeps: self.integration_parameters.max_ccd_substeps as usize,
+                friction_model: FrictionModel::default(),
             };
 
-            let mut query = self.query.borrow_mut();
-
             self.pipeline.step(
-                &self.gravity,
+                (*self.gravity).into(),
                 &integration_parameters,
                 &mut self.islands,
                 &mut self.broad_phase,
@@ -1206,7 +1144,6 @@ impl PhysicsWorld {
                 &mut self.joints.set,
                 &mut self.multibody_joints.set,
                 &mut self.ccd_solver,
-                Some(&mut query),
                 &(),
                 &*self.event_handler,
             );
@@ -1269,7 +1206,7 @@ impl PhysicsWorld {
     /// Draws physics world. Very useful for debugging, it allows you to see where are
     /// rigid bodies, which colliders they have and so on.
     pub fn draw(&self, context: &mut SceneDrawingContext) {
-        self.debug_render_pipeline.lock().render(
+        self.debug_render_pipeline.safe_lock().render(
             context,
             &self.bodies,
             &self.colliders,
@@ -1283,37 +1220,34 @@ impl PhysicsWorld {
     pub fn cast_ray<S: QueryResultsStorage>(&self, opts: RayCastOptions, query_buffer: &mut S) {
         let time = instant::Instant::now();
 
-        let query = self.query.borrow_mut();
-
-        query_buffer.clear();
-        let ray = Ray::new(
-            opts.ray_origin,
-            opts.ray_direction
-                .try_normalize(f32::EPSILON)
-                .unwrap_or_default(),
-        );
-        query.intersections_with_ray(
+        let query = self.broad_phase.as_query_pipeline(
+            &DefaultQueryDispatcher,
             &self.bodies,
             &self.colliders,
-            &ray,
-            opts.max_len,
-            true,
             rapier3d::pipeline::QueryFilter::new().groups(InteractionGroups::new(
                 u32_to_group(opts.groups.memberships.0),
                 u32_to_group(opts.groups.filter.0),
+                Default::default(),
             )),
-            |handle, intersection| {
-                query_buffer.push(Intersection {
-                    collider: Handle::decode_from_u128(
-                        self.colliders.get(handle).unwrap().user_data,
-                    ),
-                    normal: intersection.normal,
-                    position: ray.point_at(intersection.time_of_impact),
-                    feature: intersection.feature.into(),
-                    toi: intersection.time_of_impact,
-                })
-            },
         );
+
+        query_buffer.clear();
+        let ray = Ray::new(
+            opts.ray_origin.into(),
+            opts.ray_direction
+                .try_normalize(f32::EPSILON)
+                .unwrap_or_default()
+                .into(),
+        );
+        for (_, collider, intersection) in query.intersect_ray(ray, opts.max_len, true) {
+            query_buffer.push(Intersection {
+                collider: Handle::decode_from_u128(collider.user_data),
+                normal: intersection.normal.into(),
+                position: ray.point_at(intersection.time_of_impact).into(),
+                feature: intersection.feature.into(),
+                toi: intersection.time_of_impact,
+            });
+        }
         if opts.sort_results {
             query_buffer.sort_intersections_by(|a, b| {
                 if a.toi > b.toi {
@@ -1366,7 +1300,10 @@ impl PhysicsWorld {
                 let h = Handle::decode_from_u128(self.colliders.get(handle).unwrap().user_data);
                 pred(
                     h,
-                    graph.node(h).component_ref::<collider::Collider>().unwrap(),
+                    graph
+                        .node(h)
+                        .self_or_field_ref::<collider::Collider>()
+                        .unwrap(),
                 )
             } else {
                 true
@@ -1376,22 +1313,29 @@ impl PhysicsWorld {
         let filter = rapier3d::pipeline::QueryFilter {
             flags: rapier3d::pipeline::QueryFilterFlags::from_bits(filter.flags.bits()).unwrap(),
             groups: filter.groups.map(|g| {
-                InteractionGroups::new(u32_to_group(g.memberships.0), u32_to_group(g.filter.0))
+                InteractionGroups::new(
+                    u32_to_group(g.memberships.0),
+                    u32_to_group(g.filter.0),
+                    Default::default(),
+                )
             }),
             exclude_collider: filter
                 .exclude_collider
-                .and_then(|h| graph.try_get(h))
-                .and_then(|n| n.component_ref::<collider::Collider>())
+                .and_then(|h| graph.try_get_of_type::<collider::Collider>(h).ok())
                 .map(|c| c.native.get()),
             exclude_rigid_body: filter
                 .exclude_collider
-                .and_then(|h| graph.try_get(h))
-                .and_then(|n| n.component_ref::<rigidbody::RigidBody>())
+                .and_then(|h| graph.try_get_of_type::<rigidbody::RigidBody>(h).ok())
                 .map(|c| c.native.get()),
             predicate: Some(&predicate),
         };
 
-        let query = self.query.borrow_mut();
+        let query = self.broad_phase.as_query_pipeline(
+            &DefaultQueryDispatcher,
+            &self.bodies,
+            &self.colliders,
+            filter,
+        );
 
         let opts = ShapeCastOptions {
             max_time_of_impact: max_toi,
@@ -1401,24 +1345,16 @@ impl PhysicsWorld {
         };
 
         query
-            .cast_shape(
-                &self.bodies,
-                &self.colliders,
-                shape_pos,
-                shape_vel,
-                shape,
-                opts,
-                filter,
-            )
+            .cast_shape(&Pose3::from(*shape_pos), (*shape_vel).into(), shape, opts)
             .map(|(handle, toi)| {
                 (
                     Handle::decode_from_u128(self.colliders.get(handle).unwrap().user_data),
                     TOI {
                         toi: toi.time_of_impact,
-                        witness1: toi.witness1,
-                        witness2: toi.witness2,
-                        normal1: toi.normal1,
-                        normal2: toi.normal2,
+                        witness1: toi.witness1.into(),
+                        witness2: toi.witness2.into(),
+                        normal1: UnitVector3::new_normalize(toi.normal1.into()),
+                        normal2: UnitVector3::new_normalize(toi.normal2.into()),
                         status: toi.status.into(),
                     },
                 )
@@ -1432,7 +1368,7 @@ impl PhysicsWorld {
     ) {
         if let Some(native) = self.bodies.get_mut(rigid_body.native.get()) {
             native.set_position(
-                isometry_from_global_transform(new_global_transform),
+                isometry_from_global_transform(new_global_transform).into(),
                 // Do not wake up body, it is too expensive and must be done **only** by explicit
                 // `wake_up` call!
                 false,
@@ -1451,7 +1387,7 @@ impl PhysicsWorld {
                     let local_transform: Matrix4<f32> = parent_transform
                         .try_inverse()
                         .unwrap_or_else(Matrix4::identity)
-                        * native.position().to_homogeneous();
+                        * Isometry3::from(*native.position()).to_homogeneous();
 
                     let new_local_rotation = UnitQuaternion::from_matrix_eps(
                         &local_transform.basis(),
@@ -1480,10 +1416,10 @@ impl PhysicsWorld {
 
                     rigid_body
                         .lin_vel
-                        .set_value_with_flags(*native.linvel(), VariableFlags::MODIFIED);
+                        .set_value_with_flags(native.linvel().into(), VariableFlags::MODIFIED);
                     rigid_body
                         .ang_vel
-                        .set_value_with_flags(*native.angvel(), VariableFlags::MODIFIED);
+                        .set_value_with_flags(native.angvel().into(), VariableFlags::MODIFIED);
                     rigid_body.sleeping = native.is_sleeping();
                 }
             }
@@ -1505,7 +1441,7 @@ impl PhysicsWorld {
         // 1) `get_mut` is **very** expensive because it forces physics engine to recalculate contacts
         //    and a lot of other stuff, this is why we need `anything_changed` flag.
         if rigid_body_node.native.get() != RigidBodyHandle::invalid() {
-            let mut actions = rigid_body_node.actions.lock();
+            let mut actions = rigid_body_node.actions.safe_lock();
             if rigid_body_node.need_sync_model() || !actions.is_empty() {
                 if let Some(native) = self.bodies.get_mut(rigid_body_node.native.get()) {
                     // Sync native rigid body's properties with scene node's in case if they
@@ -1515,10 +1451,10 @@ impl PhysicsWorld {
                         .try_sync_model(|v| native.set_body_type(v.into(), false));
                     rigid_body_node
                         .lin_vel
-                        .try_sync_model(|v| native.set_linvel(v, false));
+                        .try_sync_model(|v| native.set_linvel(v.into(), true));
                     rigid_body_node
                         .ang_vel
-                        .try_sync_model(|v| native.set_angvel(v, false));
+                        .try_sync_model(|v| native.set_angvel(v.into(), true));
                     rigid_body_node.mass.try_sync_model(|v| {
                         match *rigid_body_node.mass_properties_type {
                             RigidBodyMassPropertiesType::Default => {
@@ -1530,9 +1466,9 @@ impl PhysicsWorld {
                             } => {
                                 native.set_additional_mass_properties(
                                     MassProperties::new(
-                                        Point3::from(center_of_mass),
+                                        center_of_mass.into(),
                                         v,
-                                        principal_inertia,
+                                        principal_inertia.into(),
                                     ),
                                     false,
                                 );
@@ -1550,9 +1486,9 @@ impl PhysicsWorld {
                             } => {
                                 native.set_additional_mass_properties(
                                     MassProperties::new(
-                                        Point3::from(center_of_mass),
+                                        center_of_mass.into(),
                                         *rigid_body_node.mass,
-                                        principal_inertia,
+                                        principal_inertia.into(),
                                     ),
                                     false,
                                 );
@@ -1569,16 +1505,10 @@ impl PhysicsWorld {
                         .ccd_enabled
                         .try_sync_model(|v| native.enable_ccd(v));
                     rigid_body_node.can_sleep.try_sync_model(|v| {
-                        let activation = native.activation_mut();
                         if v {
-                            activation.normalized_linear_threshold =
-                                RigidBodyActivation::default_normalized_linear_threshold();
-                            activation.angular_threshold =
-                                RigidBodyActivation::default_angular_threshold();
+                            *native.activation_mut() = RigidBodyActivation::active();
                         } else {
-                            activation.sleeping = false;
-                            activation.normalized_linear_threshold = -1.0;
-                            activation.angular_threshold = -1.0;
+                            *native.activation_mut() = RigidBodyActivation::cannot_sleep();
                         };
                     });
                     rigid_body_node
@@ -1625,33 +1555,35 @@ impl PhysicsWorld {
                     while let Some(action) = actions.pop_front() {
                         match action {
                             ApplyAction::Force(force) => {
-                                native.add_force(force, false);
+                                native.add_force(force.into(), false);
                                 rigid_body_node.reset_forces.set(true);
                             }
                             ApplyAction::Torque(torque) => {
-                                native.add_torque(torque, false);
+                                native.add_torque(torque.into(), false);
                                 rigid_body_node.reset_forces.set(true);
                             }
                             ApplyAction::ForceAtPoint { force, point } => {
-                                native.add_force_at_point(force, Point3::from(point), false);
+                                native.add_force_at_point(force.into(), point.into(), false);
                                 rigid_body_node.reset_forces.set(true);
                             }
-                            ApplyAction::Impulse(impulse) => native.apply_impulse(impulse, false),
+                            ApplyAction::Impulse(impulse) => {
+                                native.apply_impulse(impulse.into(), false)
+                            }
                             ApplyAction::TorqueImpulse(impulse) => {
-                                native.apply_torque_impulse(impulse, false)
+                                native.apply_torque_impulse(impulse.into(), false)
                             }
                             ApplyAction::ImpulseAtPoint { impulse, point } => {
-                                native.apply_impulse_at_point(impulse, Point3::from(point), false)
+                                native.apply_impulse_at_point(impulse.into(), point.into(), false)
                             }
                             ApplyAction::WakeUp => native.wake_up(true),
                             ApplyAction::NextTranslation(position) => {
-                                native.set_next_kinematic_translation(position)
+                                native.set_next_kinematic_translation(position.into())
                             }
                             ApplyAction::NextRotation(rotation) => {
-                                native.set_next_kinematic_rotation(rotation)
+                                native.set_next_kinematic_rotation(rotation.into())
                             }
                             ApplyAction::NextPosition(position) => {
-                                native.set_next_kinematic_position(position)
+                                native.set_next_kinematic_position(position.into())
                             }
                         }
                     }
@@ -1659,17 +1591,14 @@ impl PhysicsWorld {
             }
         } else {
             let mut builder = RigidBodyBuilder::new(rigid_body_node.body_type().into())
-                .position(isometry_from_global_transform(
-                    &rigid_body_node.global_transform(),
-                ))
+                .pose(isometry_from_global_transform(&rigid_body_node.global_transform()).into())
                 .ccd_enabled(rigid_body_node.is_ccd_enabled())
                 .additional_mass(rigid_body_node.mass())
-                .angvel(*rigid_body_node.ang_vel)
-                .linvel(*rigid_body_node.lin_vel)
+                .angvel((*rigid_body_node.ang_vel).into())
+                .linvel((*rigid_body_node.lin_vel).into())
                 .linear_damping(*rigid_body_node.lin_damping)
                 .angular_damping(*rigid_body_node.ang_damping)
                 .can_sleep(rigid_body_node.is_can_sleep())
-                .sleeping(rigid_body_node.is_sleeping())
                 .dominance_group(rigid_body_node.dominance())
                 .gravity_scale(rigid_body_node.gravity_scale())
                 .enabled_rotations(
@@ -1687,9 +1616,9 @@ impl PhysicsWorld {
                     principal_inertia,
                 } => {
                     builder = builder.additional_mass_properties(MassProperties::new(
-                        Point3::from(center_of_mass),
+                        center_of_mass.into(),
                         *rigid_body_node.mass,
-                        principal_inertia,
+                        principal_inertia.into(),
                     ));
                 }
             };
@@ -1740,12 +1669,14 @@ impl PhysicsWorld {
                         native.set_collision_groups(InteractionGroups::new(
                             u32_to_group(v.memberships.0),
                             u32_to_group(v.filter.0),
+                            Default::default(),
                         ))
                     });
                     collider_node.solver_groups.try_sync_model(|v| {
                         native.set_solver_groups(InteractionGroups::new(
                             u32_to_group(v.memberships.0),
                             u32_to_group(v.filter.0),
+                            Default::default(),
                         ))
                     });
                     collider_node
@@ -1783,9 +1714,8 @@ impl PhysicsWorld {
                     }
                 }
             }
-        } else if let Some(parent_body) = nodes
-            .try_borrow(collider_node.parent())
-            .and_then(|n| n.cast::<scene::rigidbody::RigidBody>())
+        } else if let Ok(parent_body) =
+            nodes.try_get_or_field_ref::<scene::rigidbody::RigidBody>(collider_node.parent())
         {
             if parent_body.native.get() != RigidBodyHandle::invalid() {
                 let inv_global_transform = isometric_global_transform(nodes, handle)
@@ -1799,23 +1729,28 @@ impl PhysicsWorld {
                     nodes,
                 ) {
                     let mut builder = ColliderBuilder::new(shape)
-                        .position(Isometry3 {
-                            rotation: **collider_node.local_transform().rotation(),
-                            translation: Translation3 {
-                                vector: **collider_node.local_transform().position(),
-                            },
-                        })
+                        .position(
+                            Isometry3 {
+                                rotation: **collider_node.local_transform().rotation(),
+                                translation: Translation3 {
+                                    vector: **collider_node.local_transform().position(),
+                                },
+                            }
+                            .into(),
+                        )
                         .friction(collider_node.friction())
                         .restitution(collider_node.restitution())
                         .collision_groups(InteractionGroups::new(
                             u32_to_group(collider_node.collision_groups().memberships.0),
                             u32_to_group(collider_node.collision_groups().filter.0),
+                            Default::default(),
                         ))
                         .friction_combine_rule(collider_node.friction_combine_rule().into())
                         .restitution_combine_rule(collider_node.restitution_combine_rule().into())
                         .solver_groups(InteractionGroups::new(
                             u32_to_group(collider_node.solver_groups().memberships.0),
                             u32_to_group(collider_node.solver_groups().filter.0),
+                            Default::default(),
                         ))
                         .sensor(collider_node.is_sensor());
 
@@ -1854,19 +1789,56 @@ impl PhysicsWorld {
 
         if let Some(native) = self.joints.set.get_mut(joint.native.get(), false) {
             joint.body1.try_sync_model(|v| {
-                if let Some(rigid_body_node) = nodes.typed_ref(v) {
+                if let Ok(rigid_body_node) = nodes.try_get(v) {
                     native.body1 = rigid_body_node.native.get();
                 }
             });
             joint.body2.try_sync_model(|v| {
-                if let Some(rigid_body_node) = nodes.typed_ref(v) {
+                if let Ok(rigid_body_node) = nodes.try_get(v) {
                     native.body2 = rigid_body_node.native.get();
                 }
             });
             joint.params.try_sync_model(|v| {
                 native.data =
                     // Preserve local frames.
-                    convert_joint_params(v, native.data.local_frame1, native.data.local_frame2)
+                    convert_joint_params(v, native.data.local_frame1.into(), native.data.local_frame2.into())
+            });
+            joint.motor_params.try_sync_model(|v|{
+                // For prismatic and revolute joints, the free axis is defined to be the x axis.
+                // If you want the joint to translate / rotate along a different axis, you can rotate the joint itself.
+                let joint_axes: &[JointAxis] = match joint.params.get_value_ref(){
+                    JointParams::PrismaticJoint(_) => &[JointAxis::LinX][..], // slice the array to unify arrays of different lengths.
+                    JointParams::RevoluteJoint(_) => &[JointAxis::AngX][..],
+                    JointParams::BallJoint(_) => &[JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ][..],
+                    _ => {
+                        Log::warn("Try to modify motor parameters for unsupported joint type, this operation will be ignored.");
+                        return;
+                    }
+                };
+                for joint_axis in joint_axes {
+                    // Force based motor model is better in the Fyrox's context
+                    native.data.set_motor_model(*joint_axis, rapier3d::prelude::MotorModel::ForceBased);
+                    let JointMotorParams {
+                        target_vel,
+                        target_pos,
+                        stiffness,
+                        damping,
+                        max_force
+                    } = v;
+                    native.data.set_motor(*joint_axis, target_pos, target_vel, stiffness, damping);
+                    native.data.set_motor_max_force(*joint_axis, max_force);
+                }
+                // wake up the bodies connected to the joint to ensure they respond to the motor changes immediately
+                // however, the rigid bodies may fall asleep any time later unless Joint::set_motor_* functions are called periodically,
+                // or the rigid bodies are set to cannot sleep
+                let Some(body1) = self.bodies.get_mut(native.body1) else {
+                    return;
+                };
+                body1.wake_up(true);
+                let Some(body2) = self.bodies.get_mut(native.body2) else {
+                    return;
+                };
+                body2.wake_up(true);
             });
             joint.contacts_enabled.try_sync_model(|v| {
                 native.data.set_contacts_enabled(v);
@@ -1874,10 +1846,9 @@ impl PhysicsWorld {
 
             let mut local_frames = joint.local_frames.borrow_mut();
             if local_frames.is_none() {
-                if let (Some(body1), Some(body2)) = (
-                    nodes.typed_ref(joint.body1()),
-                    nodes.typed_ref(joint.body2()),
-                ) {
+                if let (Ok(body1), Ok(body2)) =
+                    (nodes.try_get(joint.body1()), nodes.try_get(joint.body2()))
+                {
                     let (local_frame1, local_frame2) = calculate_local_frames(joint, body1, body2);
                     native.data =
                         convert_joint_params((*joint.params).clone(), local_frame1, local_frame2);
@@ -1893,12 +1864,26 @@ impl PhysicsWorld {
             // native bodies exists.
             if let (Some(body1), Some(body2)) = (
                 nodes
-                    .typed_ref(body1_handle)
+                    .try_get(body1_handle)
+                    .ok()
                     .filter(|b| self.bodies.get(b.native.get()).is_some()),
                 nodes
-                    .typed_ref(body2_handle)
+                    .try_get(body2_handle)
+                    .ok()
                     .filter(|b| self.bodies.get(b.native.get()).is_some()),
             ) {
+                let native_body1 = body1.native.get();
+                let native_body2 = body2.native.get();
+
+                if self.bodies.get(native_body1).is_none()
+                    || self.bodies.get(native_body2).is_none()
+                {
+                    // A joint may be synced before the connected bodies, this way the connected
+                    // rigid bodies does not have native rigid bodies, and in this case we should
+                    // simply skip the joint and initialize it on the next frame.
+                    return;
+                }
+
                 // Calculate local frames first (if needed).
                 let mut local_frames = joint.local_frames.borrow_mut();
                 let (local_frame1, local_frame2) = local_frames
@@ -1920,9 +1905,6 @@ impl PhysicsWorld {
                         )
                     })
                     .unwrap_or_else(|| calculate_local_frames(joint, body1, body2));
-
-                let native_body1 = body1.native.get();
-                let native_body2 = body2.native.get();
 
                 let mut native_joint = convert_joint_params(params, local_frame1, local_frame2);
                 native_joint.contacts_enabled = joint.is_contacts_enabled();

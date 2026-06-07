@@ -21,14 +21,14 @@
 use crate::command::{Command, CommandGroup};
 use crate::fyrox::generic_animation::machine::Machine;
 use crate::fyrox::generic_animation::AnimationContainer;
-use crate::fyrox::graph::{PrefabData, SceneGraphNode};
+use crate::fyrox::graph::{NodeWrapper, PrefabData};
 use crate::fyrox::{
     core::pool::{ErasedHandle, Handle},
     generic_animation::{
         machine::{MachineLayer, PoseNode, State},
         Animation,
     },
-    graph::{BaseSceneGraph, SceneGraph},
+    graph::SceneGraph,
     gui::{
         border::BorderBuilder,
         message::{MessageDirection, UiMessage},
@@ -55,21 +55,20 @@ use crate::plugins::absm::{
     state_viewer::context::{CanvasContextMenu, ConnectionContextMenu, NodeContextMenu},
     AbsmEditor,
 };
-use crate::{
-    scene::{commands::ChangeSelectionCommand, Selection},
-    send_sync_message,
-};
+use crate::scene::{commands::ChangeSelectionCommand, Selection};
 
+use crate::plugins::absm::canvas::AbsmCanvas;
 use fyrox::core::reflect::Reflect;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
+use fyrox::gui::window::Window;
 use std::cmp::Ordering;
 
 mod context;
 
 pub struct StateViewer {
-    pub window: Handle<UiNode>,
-    canvas: Handle<UiNode>,
+    pub window: Handle<Window>,
+    canvas: Handle<AbsmCanvas>,
     state: ErasedHandle,
     canvas_context_menu: CanvasContextMenu,
     node_context_menu: NodeContextMenu,
@@ -84,7 +83,7 @@ fn create_socket<N: Reflect>(
     show_index: bool,
     parent_node: Handle<PoseNode<Handle<N>>>,
     ui: &mut UserInterface,
-) -> Handle<UiNode> {
+) -> Handle<Socket> {
     SocketBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(2.0)))
         .with_direction(direction)
         .with_parent_node(parent_node.into())
@@ -98,7 +97,7 @@ fn create_sockets<N: Reflect>(
     direction: SocketDirection,
     parent_node: Handle<PoseNode<Handle<N>>>,
     ui: &mut UserInterface,
-) -> Vec<Handle<UiNode>> {
+) -> Vec<Handle<Socket>> {
     (0..count)
         .map(|index| create_socket(direction, index, true, parent_node, ui))
         .collect::<Vec<_>>()
@@ -109,7 +108,7 @@ fn fetch_pose_node_model_handle<N: Reflect>(
     ui: &UserInterface,
 ) -> Handle<PoseNode<Handle<N>>> {
     ui.node(handle)
-        .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+        .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
         .unwrap()
         .model_handle
 }
@@ -119,7 +118,7 @@ fn fetch_socket_pose_node_model_handle<N: Reflect>(
     ui: &UserInterface,
 ) -> Handle<PoseNode<Handle<N>>> {
     ui.node(handle)
-        .query_component::<Socket>()
+        .self_or_field_ref::<Socket>()
         .unwrap()
         .parent_node
         .into()
@@ -131,10 +130,11 @@ fn make_play_animation_name<P, G, N>(
 ) -> String
 where
     P: PrefabData<Graph = G>,
-    G: SceneGraph<Node = N, Prefab = P>,
-    N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+    G: SceneGraph<NodeWrapper = N, Prefab = P>,
+    N: NodeWrapper<SceneGraph = G, ResourceData = P>,
 {
-    if let Some(animation) = animation_container.and_then(|container| container.try_get(animation))
+    if let Some(animation) =
+        animation_container.and_then(|container| container.try_get(animation).ok())
     {
         format!("Play Animation: {}", animation.name())
     } else {
@@ -148,8 +148,8 @@ fn make_pose_node_name<P, G, N>(
 ) -> String
 where
     P: PrefabData<Graph = G>,
-    G: SceneGraph<Node = N, Prefab = P>,
-    N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+    G: SceneGraph<NodeWrapper = N, Prefab = P>,
+    N: NodeWrapper<SceneGraph = G, ResourceData = P>,
 {
     match model_ref {
         PoseNode::PlayAnimation(play_animation) => {
@@ -216,8 +216,8 @@ impl StateViewer {
         ui: &UserInterface,
     ) where
         P: PrefabData<Graph = G>,
-        G: SceneGraph<Node = N, Prefab = P>,
-        N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+        G: SceneGraph<NodeWrapper = N, Prefab = P>,
+        N: NodeWrapper<SceneGraph = G, ResourceData = P>,
     {
         assert!(state.is_some());
 
@@ -226,6 +226,7 @@ impl StateViewer {
         let (state_name, exists) = machine.layers()[layer_index]
             .states()
             .try_borrow(state)
+            .ok()
             .map(|state| {
                 (
                     format!(
@@ -239,37 +240,33 @@ impl StateViewer {
             })
             .unwrap_or_else(|| (String::from("<No State>"), false));
 
-        ui.send_message(WindowMessage::title(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            WindowTitle::text(format!("State Viewer - {state_name}")),
-        ));
+            WindowMessage::Title(WindowTitle::text(format!("State Viewer - {state_name}"))),
+        );
 
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             self.canvas_context_menu.menu.handle(),
-            MessageDirection::ToWidget,
-            exists,
-        ));
+            WidgetMessage::Enabled(exists),
+        );
     }
 
     pub fn clear(&mut self, ui: &UserInterface) {
         self.state = Default::default();
 
-        for &child in ui.node(self.canvas).children() {
-            ui.send_message(WidgetMessage::remove(child, MessageDirection::ToWidget));
+        for &child in ui[self.canvas].children() {
+            ui.send(child, WidgetMessage::Remove);
         }
 
-        ui.send_message(WindowMessage::title(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            WindowTitle::text("State Viewer - No State"),
-        ));
+            WindowMessage::Title(WindowTitle::text("State Viewer - No State")),
+        );
 
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             self.canvas_context_menu.menu.handle(),
-            MessageDirection::ToWidget,
-            false,
-        ));
+            WidgetMessage::Enabled(false),
+        );
     }
 
     pub fn handle_ui_message<P, G, N>(
@@ -283,8 +280,8 @@ impl StateViewer {
         editor_selection: &Selection,
     ) where
         P: PrefabData<Graph = G>,
-        G: SceneGraph<Node = N, Prefab = P>,
-        N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+        G: SceneGraph<NodeWrapper = N, Prefab = P>,
+        N: NodeWrapper<SceneGraph = G, ResourceData = P>,
     {
         if let Some(layer) = machine.layers().get(layer_index) {
             if message.destination() == self.canvas {
@@ -309,30 +306,28 @@ impl StateViewer {
 
                             sender.do_command(CommandGroup::from(commands));
                         }
-                        AbsmCanvasMessage::SelectionChanged(selection) => {
-                            if message.direction() == MessageDirection::FromWidget {
-                                let selection = Selection::new(AbsmSelection {
-                                    absm_node_handle,
-                                    layer: Some(layer_index),
-                                    entities: selection
-                                        .iter()
-                                        .filter_map(|n| {
-                                            let node_ref = ui.node(*n);
+                        AbsmCanvasMessage::SelectionChanged(selection)
+                            if message.direction() == MessageDirection::FromWidget =>
+                        {
+                            let selection = Selection::new(AbsmSelection {
+                                absm_node_handle,
+                                layer: Some(layer_index),
+                                entities: selection
+                                    .iter()
+                                    .filter_map(|n| {
+                                        let node_ref = ui.node(*n);
 
-                                            node_ref
-                                                .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
-                                                .map(|state_node| {
-                                                    SelectedEntity::PoseNode(
-                                                        state_node.model_handle,
-                                                    )
-                                                })
-                                        })
-                                        .collect::<Vec<_>>(),
-                                });
+                                        node_ref
+                                            .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
+                                            .map(|state_node| {
+                                                SelectedEntity::PoseNode(state_node.model_handle)
+                                            })
+                                    })
+                                    .collect::<Vec<_>>(),
+                            });
 
-                                if !selection.is_empty() && &selection != editor_selection {
-                                    sender.do_command(ChangeSelectionCommand::new(selection));
-                                }
+                            if !selection.is_empty() && &selection != editor_selection {
+                                sender.do_command(ChangeSelectionCommand::new(selection));
                             }
                         }
                         AbsmCanvasMessage::CommitConnection {
@@ -343,7 +338,7 @@ impl StateViewer {
                                 fetch_socket_pose_node_model_handle(*source_socket, ui);
 
                             let dest_socket_ref =
-                                ui.node(*dest_socket).query_component::<Socket>().unwrap();
+                                ui.node(*dest_socket).self_or_field_ref::<Socket>().unwrap();
                             let dest_node = fetch_socket_pose_node_model_handle(*dest_socket, ui);
 
                             let dest_node_ref = &layer.nodes()[dest_node];
@@ -421,44 +416,43 @@ impl StateViewer {
         animation_container: Option<&AnimationContainer<Handle<N>>>,
     ) where
         P: PrefabData<Graph = G>,
-        G: SceneGraph<Node = N, Prefab = P>,
-        N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+        G: SceneGraph<NodeWrapper = N, Prefab = P>,
+        N: NodeWrapper<SceneGraph = G, ResourceData = P>,
     {
-        if let Some(parent_state_ref) = machine_layer.states().try_borrow(self.state.into()) {
+        if let Ok(parent_state_ref) = machine_layer.states().try_borrow(self.state.into()) {
             let current_selection = fetch_selection(editor_selection);
 
             let mut views = Vec::new();
             if self.prev_layer != current_selection.layer
-                || current_selection.absm_node_handle != self.prev_absm.into()
+                || current_selection.absm_node_handle != Handle::<N>::from(self.prev_absm)
             {
                 self.prev_layer = current_selection.layer;
                 self.prev_absm = current_selection.absm_node_handle.into();
                 self.clear(ui);
             } else {
-                views = ui
-                    .node(self.canvas)
+                views = ui[self.canvas]
                     .children()
                     .iter()
                     .cloned()
                     .filter(|h| {
                         if let Some(pose_node) = ui
                             .node(*h)
-                            .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                            .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                         {
                             if machine_layer
                                 .nodes()
                                 .try_borrow(pose_node.model_handle)
-                                .is_some_and(|node| node.parent_state == self.state.into())
+                                .ok()
+                                .is_some_and(|node| {
+                                    node.parent_state
+                                        == Handle::<State<Handle<N>>>::from(self.state)
+                                })
                             {
                                 true
                             } else {
                                 // Remove every node that does not belong to a state or its data model was
                                 // removed.
-                                send_sync_message(
-                                    ui,
-                                    WidgetMessage::remove(*h, MessageDirection::ToWidget),
-                                );
-
+                                ui.send_sync(*h, WidgetMessage::Remove);
                                 false
                             }
                         } else {
@@ -472,7 +466,7 @@ impl StateViewer {
                 .nodes()
                 .pair_iter()
                 .filter_map(|(h, n)| {
-                    if n.parent_state == self.state.into() {
+                    if n.parent_state == Handle::<State<Handle<N>>>::from(self.state) {
                         Some(h)
                     } else {
                         None
@@ -486,7 +480,7 @@ impl StateViewer {
                     for &pose_definition in models.iter() {
                         if views.iter().all(|v| {
                             ui.node(*v)
-                                .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                                .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                                 .unwrap()
                                 .model_handle
                                 != pose_definition
@@ -551,16 +545,9 @@ impl StateViewer {
                             .with_model_handle(pose_definition)
                             .build(&mut ui.build_ctx());
 
-                            send_sync_message(
-                                ui,
-                                WidgetMessage::link(
-                                    node_view,
-                                    MessageDirection::ToWidget,
-                                    self.canvas,
-                                ),
-                            );
+                            ui.send_sync(node_view, WidgetMessage::link_with(self.canvas));
 
-                            views.push(node_view);
+                            views.push(node_view.to_base());
                         }
                     }
                 }
@@ -569,7 +556,7 @@ impl StateViewer {
                     for &view in views.clone().iter() {
                         let view_ref = ui
                             .node(view)
-                            .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                            .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                             .unwrap();
 
                         if machine_layer
@@ -577,11 +564,7 @@ impl StateViewer {
                             .pair_iter()
                             .all(|(h, _)| view_ref.model_handle != h)
                         {
-                            send_sync_message(
-                                ui,
-                                WidgetMessage::remove(view, MessageDirection::ToWidget),
-                            );
-
+                            ui.send_sync(view, WidgetMessage::Remove);
                             if let Some(position) = views.iter().position(|s| *s == view) {
                                 views.remove(position);
                             }
@@ -595,7 +578,7 @@ impl StateViewer {
             for &view in &views {
                 let view_ref = ui
                     .node(view)
-                    .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                    .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                     .unwrap();
                 let model_handle = view_ref.model_handle;
                 let model_ref = &machine_layer.nodes()[model_handle];
@@ -604,10 +587,7 @@ impl StateViewer {
 
                 let new_name = make_pose_node_name(model_ref, animation_container);
                 if new_name != view_ref.name_value {
-                    send_sync_message(
-                        ui,
-                        AbsmNodeMessage::name(view, MessageDirection::ToWidget, new_name),
-                    );
+                    ui.send_sync(view, AbsmNodeMessage::Name(new_name));
                 }
 
                 if view_ref.base.input_sockets.len() != children.len() {
@@ -617,52 +597,29 @@ impl StateViewer {
                         view_ref.model_handle,
                         ui,
                     );
-
-                    send_sync_message(
-                        ui,
-                        AbsmNodeMessage::input_sockets(
-                            view,
-                            MessageDirection::ToWidget,
-                            input_sockets,
-                        ),
-                    );
+                    ui.send_sync(view, AbsmNodeMessage::InputSockets(input_sockets));
                 }
 
                 if position != model_ref.position {
-                    send_sync_message(
-                        ui,
-                        WidgetMessage::desired_position(
-                            view,
-                            MessageDirection::ToWidget,
-                            model_ref.position,
-                        ),
-                    );
+                    ui.send_sync(view, WidgetMessage::DesiredPosition(model_ref.position));
                 }
 
-                if model_ref.parent_state == self.state.into() {
-                    send_sync_message(
-                        ui,
-                        AbsmNodeMessage::normal_color(
-                            view,
-                            MessageDirection::ToWidget,
-                            if model_handle == parent_state_ref.root {
-                                ui.style.property(AbsmEditor::NORMAL_ROOT_COLOR)
-                            } else {
-                                ui.style.property(Style::BRUSH_LIGHTER_PRIMARY)
-                            },
-                        ),
+                if model_ref.parent_state == Handle::<State<Handle<N>>>::from(self.state) {
+                    ui.send_sync(
+                        view,
+                        AbsmNodeMessage::NormalBrush(if model_handle == parent_state_ref.root {
+                            ui.style.property(AbsmEditor::NORMAL_ROOT_COLOR)
+                        } else {
+                            ui.style.property(Style::BRUSH_LIGHTER_PRIMARY)
+                        }),
                     );
-                    send_sync_message(
-                        ui,
-                        AbsmNodeMessage::selected_color(
-                            view,
-                            MessageDirection::ToWidget,
-                            if model_handle == parent_state_ref.root {
-                                ui.style.property(AbsmEditor::SELECTED_ROOT_COLOR)
-                            } else {
-                                ui.style.property(Style::BRUSH_LIGHTER)
-                            },
-                        ),
+                    ui.send_sync(
+                        view,
+                        AbsmNodeMessage::SelectedBrush(if model_handle == parent_state_ref.root {
+                            ui.style.property(AbsmEditor::SELECTED_ROOT_COLOR)
+                        } else {
+                            ui.style.property(Style::BRUSH_LIGHTER)
+                        }),
                     );
                 }
             }
@@ -673,9 +630,9 @@ impl StateViewer {
             // Sync connections - remove old ones and create new. Since there is no separate data model
             // for connection we can't find which connection has changed and sync only it, instead we
             // removing every connection and create new.
-            for child in ui.node(self.canvas).children().iter().cloned() {
-                if ui.node(child).has_component::<Connection>() {
-                    send_sync_message(ui, WidgetMessage::remove(child, MessageDirection::ToWidget));
+            for child in ui[self.canvas].children().iter().cloned() {
+                if ui.node(child).is_or_has_field::<Connection>() {
+                    ui.send_sync(child, WidgetMessage::Remove);
                 }
             }
 
@@ -684,7 +641,7 @@ impl StateViewer {
                     .iter()
                     .filter_map(|v| {
                         ui.node(*v)
-                            .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                            .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                     })
                     .find(|v| v.model_handle == model)
                     .unwrap();
@@ -701,7 +658,7 @@ impl StateViewer {
                             .iter()
                             .filter_map(|v| {
                                 ui.node(*v)
-                                    .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                                    .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                             })
                             .find(|v| v.model_handle == child)
                             .unwrap();
@@ -716,18 +673,8 @@ impl StateViewer {
                         .with_dest_node(dest_handle)
                         .build(self.canvas, &mut ui.build_ctx());
 
-                        send_sync_message(
-                            ui,
-                            WidgetMessage::link(
-                                connection,
-                                MessageDirection::ToWidget,
-                                self.canvas,
-                            ),
-                        );
-                        send_sync_message(
-                            ui,
-                            WidgetMessage::lowermost(connection, MessageDirection::ToWidget),
-                        );
+                        ui.send_sync(connection, WidgetMessage::link_with(self.canvas));
+                        ui.send_sync(connection, WidgetMessage::Lowermost);
                     }
                 }
             }
@@ -743,7 +690,7 @@ impl StateViewer {
                     }
                     SelectedEntity::PoseNode(pose_node) => views.iter().cloned().find(|s| {
                         ui.node(*s)
-                            .query_component::<AbsmNode<PoseNode<Handle<N>>>>()
+                            .self_or_field_ref::<AbsmNode<PoseNode<Handle<N>>>>()
                             .unwrap()
                             .model_handle
                             == *pose_node
@@ -751,29 +698,15 @@ impl StateViewer {
                 })
                 .collect::<Vec<_>>();
 
-            send_sync_message(
-                ui,
-                AbsmCanvasMessage::selection_changed(
-                    self.canvas,
-                    MessageDirection::ToWidget,
-                    new_selection,
-                ),
+            ui.send_sync(
+                self.canvas,
+                AbsmCanvasMessage::SelectionChanged(new_selection),
             );
-
-            send_sync_message(
-                ui,
-                AbsmCanvasMessage::force_sync_dependent_objects(
-                    self.canvas,
-                    MessageDirection::ToWidget,
-                ),
-            );
+            ui.send_sync(self.canvas, AbsmCanvasMessage::ForceSyncDependentObjects);
         } else {
             // Clean the canvas.
-            for child in ui.node(self.canvas).children() {
-                send_sync_message(
-                    ui,
-                    WidgetMessage::remove(*child, MessageDirection::ToWidget),
-                );
+            for child in ui[self.canvas].children() {
+                ui.send_sync(*child, WidgetMessage::Remove);
             }
         }
     }

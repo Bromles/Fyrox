@@ -23,43 +23,54 @@
 #![warn(missing_docs)]
 
 use crate::core::{algebra::Vector2, color::Color, reflect::prelude::*, visitor::prelude::*};
-use fyrox_core::uuid_provider;
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 /// Gradient point defines a point on a surface with a color.
 #[derive(Clone, Debug, PartialEq, Reflect, Visit, Default)]
+#[reflect(type_uuid = "e8503ec6-a1d0-4a9b-ab91-0d3f126254dd")]
 pub struct GradientPoint {
-    /// A distance from an origin of the gradient.
+    /// A distance from the origin of the gradient.
     pub stop: f32,
     /// Color of the point.
     pub color: Color,
 }
 
-uuid_provider!(GradientPoint = "e8503ec6-a1d0-4a9b-ab91-0d3f126254dd");
-
 /// Brush defines a way to fill an arbitrary surface.
 #[derive(Clone, Debug, PartialEq, Reflect, Visit, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "eceb3805-73b6-47e0-8582-38a01f7b70e1")]
 pub enum Brush {
     /// A brush, that fills a surface with a solid color.
     Solid(Color),
-    /// A brush, that fills a surface with a linear gradient, which is defined by two points in local coordinates
+    /// A brush, that fills a surface with a linear gradient, which is defined by two points in normalized coordinates
     /// and a set of stop points. See [`GradientPoint`] for more info.
     LinearGradient {
-        /// Beginning of the gradient in local coordinates.
+        /// Beginning of the gradient in normalized coordinates.
         from: Vector2<f32>,
-        /// End of the gradient in local coordinates.
+        /// End of the gradient in normalized coordinates.
         to: Vector2<f32>,
         /// Stops of the gradient.
         stops: Vec<GradientPoint>,
     },
-    /// A brush, that fills a surface with a radial gradient, which is defined by a center point in local coordinates
+    /// A brush, that fills a surface with a radial gradient, which is defined by a center point in normalized coordinates
     /// and a set of stop points. See [`GradientPoint`] for more info.
     RadialGradient {
-        /// Center of the gradient in local coordinates.
+        /// Center of the gradient in normalized coordinates.
         center: Vector2<f32>,
         /// Stops of the gradient.
         stops: Vec<GradientPoint>,
     },
+}
+
+impl Brush {
+    /// Creates a new [`Brush::Solid`] using the given RGB color.
+    pub fn solid(r: u8, g: u8, b: u8) -> Self {
+        Self::Solid(Color::opaque(r, g, b))
+    }
+
+    /// Creates a new transparent [`Brush::Solid`].
+    pub fn transparent() -> Self {
+        Self::Solid(Color::TRANSPARENT)
+    }
 }
 
 impl From<Color> for Brush {
@@ -67,8 +78,6 @@ impl From<Color> for Brush {
         Brush::Solid(color)
     }
 }
-
-uuid_provider!(Brush = "eceb3805-73b6-47e0-8582-38a01f7b70e1");
 
 impl Default for Brush {
     fn default() -> Self {

@@ -23,34 +23,31 @@
 
 #![warn(missing_docs)]
 
-use crate::formatted_text::Run;
-use crate::style::StyledProperty;
 use crate::{
     brush::Brush,
     core::{
-        algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, visitor::prelude::*,
+        algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*, visitor::prelude::*,
     },
-    define_constructor,
     draw::DrawingContext,
     font::FontResource,
-    formatted_text::{FormattedText, FormattedTextBuilder, WrapMode},
-    message::{MessageDirection, UiMessage},
-    style::{resource::StyleResourceExt, Style},
+    formatted_text::{FormattedText, FormattedTextBuilder, Run, RunSet, WrapMode},
+    message::{MessageData, UiMessage},
+    style::{resource::StyleResourceExt, Style, StyledProperty},
     widget::{Widget, WidgetBuilder},
-    BuildContext, Control, HorizontalAlignment, UiNode, UserInterface, VerticalAlignment,
+    BBCode, BuildContext, Control, HorizontalAlignment, UiNode, UserInterface, VerticalAlignment,
+    WidgetMessage,
 };
-
+use fyrox_core::algebra::Matrix3;
+use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut},
-};
+use std::cell::RefCell;
 
 /// Possible messages that can be used to alternate [`Text`] widget state at runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextMessage {
-    /// Used to set new text of the widget.
+    /// Used to set a new text and runs with BBCode tags.
+    BBCode(String),
+    /// Used to set a new text or to receive the changed text.
     Text(String),
     /// Used to set new text wrapping mode of the widget. See [Text](Text#text-alignment-and-word-wrapping) for usage
     /// examples.
@@ -73,59 +70,10 @@ pub enum TextMessage {
     ShadowOffset(Vector2<f32>),
     /// Used to set font height of the widget.
     FontSize(StyledProperty<f32>),
+    /// Used to set the new set of runs in the text.
+    Runs(RunSet),
 }
-
-impl TextMessage {
-    define_constructor!(
-        /// Creates new [`TextMessage::Text`] message.
-        TextMessage:Text => fn text(String), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::Wrap`] message.
-        TextMessage:Wrap => fn wrap(WrapMode), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::Font`] message.
-        TextMessage:Font => fn font(FontResource), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::VerticalAlignment`] message.
-        TextMessage:VerticalAlignment => fn vertical_alignment(VerticalAlignment), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::HorizontalAlignment`] message.
-        TextMessage:HorizontalAlignment => fn horizontal_alignment(HorizontalAlignment), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::Shadow`] message.
-        TextMessage:Shadow => fn shadow(bool), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::ShadowDilation`] message.
-        TextMessage:ShadowDilation => fn shadow_dilation(f32), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::ShadowBrush`] message.
-        TextMessage:ShadowBrush => fn shadow_brush(Brush), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::ShadowOffset`] message.
-        TextMessage:ShadowOffset => fn shadow_offset(Vector2<f32>), layout: false
-    );
-
-    define_constructor!(
-        /// Creates new [`TextMessage::FontSize`] message.
-        TextMessage:FontSize => fn font_size(StyledProperty<f32>), layout: false
-    );
-}
+impl MessageData for TextMessage {}
 
 /// Text is a simple widget that allows you to print text on screen. It has various options like word wrapping, text
 /// alignment, and so on.
@@ -137,9 +85,9 @@ impl TextMessage {
 /// ```rust
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     text::TextBuilder, widget::WidgetBuilder, UiNode, UserInterface
+/// #     text::{Text, TextBuilder}, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
-/// fn create_text(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_text(ui: &mut UserInterface, text: &str) -> Handle<Text> {
 ///     TextBuilder::new(WidgetBuilder::new())
 ///         .with_text(text)
 ///         .build(&mut ui.build_ctx())
@@ -156,10 +104,10 @@ impl TextMessage {
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     text::TextBuilder, widget::WidgetBuilder, HorizontalAlignment, UiNode, UserInterface,
+/// #     text::{Text, TextBuilder}, widget::WidgetBuilder, HorizontalAlignment, UiNode, UserInterface,
 /// #     VerticalAlignment,
 /// # };
-/// fn create_centered_text(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_centered_text(ui: &mut UserInterface, text: &str) -> Handle<Text> {
 ///     TextBuilder::new(WidgetBuilder::new())
 ///         .with_horizontal_text_alignment(HorizontalAlignment::Center)
 ///         .with_vertical_text_alignment(VerticalAlignment::Center)
@@ -180,10 +128,10 @@ impl TextMessage {
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     formatted_text::WrapMode, text::TextBuilder, widget::WidgetBuilder, UiNode,
+/// #     formatted_text::WrapMode, text::{Text, TextBuilder}, widget::WidgetBuilder, UiNode,
 /// #     UserInterface,
 /// # };
-/// fn create_text_with_word_wrap(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_text_with_word_wrap(ui: &mut UserInterface, text: &str) -> Handle<Text> {
 ///     TextBuilder::new(WidgetBuilder::new())
 ///         .with_wrap(WrapMode::Word)
 ///         .with_text(text)
@@ -202,8 +150,9 @@ impl TextMessage {
 /// #     border::BorderBuilder, brush::Brush, text::TextBuilder, widget::WidgetBuilder, UiNode,
 /// #     UserInterface,
 /// # };
+/// # use fyrox_ui::border::Border;
 /// #
-/// fn create_text_with_background(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_text_with_background(ui: &mut UserInterface, text: &str) -> Handle<Border> {
 ///     let text_widget =
 ///         TextBuilder::new(WidgetBuilder::new().with_foreground(Brush::Solid(Color::RED).into()))
 ///             .with_text(text)
@@ -222,14 +171,14 @@ impl TextMessage {
 ///
 /// ## Fonts and colors
 ///
-/// To set a color of the text just use [`WidgetBuilder::with_foreground`] while building the text instance:
+/// To set a color of the text, just use [`WidgetBuilder::with_foreground`] while building the text instance:
 ///
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::{color::Color, pool::Handle},
-/// #     brush::Brush, text::TextBuilder, widget::WidgetBuilder, UiNode, UserInterface
+/// #     brush::Brush, text::{Text, TextBuilder}, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
-/// fn create_text(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_text(ui: &mut UserInterface, text: &str) -> Handle<Text> {
 ///     //               vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 ///     TextBuilder::new(WidgetBuilder::new().with_foreground(Brush::Solid(Color::RED).into()))
 ///         .with_text(text)
@@ -243,13 +192,13 @@ impl TextMessage {
 /// # use fyrox_resource::manager::ResourceManager;
 /// # use fyrox_ui::{
 /// #     core::{futures::executor::block_on, pool::Handle},
-/// #     text::TextBuilder,
+/// #     text::{Text, TextBuilder},
 /// #     font::{Font, FontResource},
 /// #     widget::WidgetBuilder,
 /// #     UiNode, UserInterface,
 /// # };
 ///
-/// fn create_text(ui: &mut UserInterface, resource_manager: &ResourceManager, text: &str) -> Handle<UiNode> {
+/// fn create_text(ui: &mut UserInterface, resource_manager: &ResourceManager, text: &str) -> Handle<Text> {
 ///     TextBuilder::new(WidgetBuilder::new())
 ///         .with_font(resource_manager.request::<Font>("path/to/your/font.ttf"))
 ///         .with_text(text)
@@ -262,22 +211,22 @@ impl TextMessage {
 ///
 /// ### Font size
 ///
-/// Use [`TextBuilder::with_font_size`] or send [`TextMessage::font_size`] to your Text widget instance
+/// Use [`TextBuilder::with_font_size`] or send [`TextMessage::FontSize`] to your Text widget instance
 /// to set the font size of it.
 ///
 /// ## Shadows
 ///
 /// Text widget supports shadows effect to add contrast to your text, which could be useful to make text readable independent
-/// on the background colors. This effect could be used for subtitles. Shadows are pretty easy to add, all you need to do
+///  of the background colors. This effect could be used for subtitles. Shadows are pretty easy to add, all you need to do
 /// is to enable them, setup desired thickness, offset and brush (solid color or gradient).
 ///
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::{algebra::Vector2, color::Color, pool::Handle},
-/// #     brush::Brush, text::TextBuilder, widget::WidgetBuilder, UiNode, UserInterface
+/// #     brush::Brush, text::{Text, TextBuilder}, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
 /// #
-/// fn create_red_text_with_black_shadows(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_red_text_with_black_shadows(ui: &mut UserInterface, text: &str) -> Handle<Text> {
 ///     TextBuilder::new(WidgetBuilder::new().with_foreground(Brush::Solid(Color::RED).into()))
 ///         .with_text(text)
 ///         // Enable shadows.
@@ -292,11 +241,57 @@ impl TextMessage {
 /// }
 /// ```
 ///
+/// ## Runs
+///
+/// Formatting options such as fonts, shadows, sizes, and brushes can be independently controlled
+/// for each character in text by adding formatting runs to the text with [`Run`].
+/// Each run has a range of `char` positions within the text and fields to control formatting.
+///
+/// ```rust,no_run
+/// # use fyrox_ui::{
+/// #     core::{algebra::Vector2, color::Color, pool::Handle},
+/// #     brush::Brush, text::{Text, TextBuilder}, widget::WidgetBuilder, UiNode, UserInterface,
+/// #     formatted_text::Run,
+/// # };
+/// #
+/// fn create_text_with_red_run(ui: &mut UserInterface, text: &str) -> Handle<Text> {
+///     TextBuilder::new(WidgetBuilder::new())
+///         .with_text(text)
+///         .with_run(Run::new(5..22).with_brush(Brush::Solid(Color::RED)).with_shadow(true))
+///         .build(&mut ui.build_ctx())
+/// }
+/// ```
+///
+/// ## BBCode
+///
+/// Text widget supports BBCode to add runs of various formatting to text.
+/// The available tags are:
+/// * `[b]` **bold text** `[/b]`
+/// * `[i]` *italic text* `[/i]`
+/// * `[color=red]` red text `[/color]` (can be shortened to `[c=red]`... `[/c]`, and can use hex color as in `[color=#FF0000]`)
+/// * `[size=24]` large text `[/size]` (can be shortened to `[s=24]` ... `[/s]`)
+/// * `[shadow]` shadowed text `[/shadow]` (can be shortened to `[sh]` ... `[/sh]` and can change shadow color with `[shadow=blue]`)
+/// * `[br]` for a line break.
+///
+/// ```rust,no_run
+/// # use fyrox_ui::{
+/// #     core::{algebra::Vector2, color::Color, pool::Handle},
+/// #     brush::Brush, text::{Text, TextBuilder}, widget::WidgetBuilder, UiNode, UserInterface
+/// # };
+/// #
+/// fn create_text_with_bbcode(ui: &mut UserInterface) -> Handle<Text> {
+///     TextBuilder::new(WidgetBuilder::new())
+///         .with_bbcode("BBCode example: [b][c=blue]bold and blue[/c][/b]")
+///         .build(&mut ui.build_ctx())
+/// }
+/// ```
+///
 /// ## Messages
 ///
-/// Text widget can accept the following list of messages at runtime (respective constructors are name with small letter -
+/// Text widget can accept the following list of messages at runtime (respective constructors are named with small letter -
 /// `TextMessage::Text -> TextMessage::text(widget_handle, direction, text)`):
 ///
+/// - [`TextMessage::BBCode`] - sets the text and formatting runs using BBCode.
 /// - [`TextMessage::Text`] - sets new text for a `Text` widget.
 /// - [`TextMessage::Wrap`] - sets new [wrapping mode](Text#text-alignment-and-word-wrapping).
 /// - [`TextMessage::Font`] - sets new [font](Text#fonts-and-colors)
@@ -306,6 +301,7 @@ impl TextMessage {
 /// - [`TextMessage::ShadowDilation`] - sets "thickness" of the shadows under the tex.
 /// - [`TextMessage::ShadowBrush`] - sets shadow brush (allows you to change color and even make shadow with color gradients).
 /// - [`TextMessage::ShadowOffset`] - sets offset of the shadows.
+/// - [`TextMessage::Runs`] - sets the formatting runs for the text.
 ///
 /// An example of changing text at runtime could be something like this:
 ///
@@ -317,21 +313,31 @@ impl TextMessage {
 /// #     text::TextMessage
 /// # };
 /// fn request_change_text(ui: &UserInterface, text_widget_handle: Handle<UiNode>, text: &str) {
-///     ui.send_message(TextMessage::text(
-///         text_widget_handle,
-///         MessageDirection::ToWidget,
-///         text.to_owned(),
-///     ))
+///     ui.send(text_widget_handle, TextMessage::Text(text.to_owned()))
 /// }
 /// ```
 ///
 /// Please keep in mind, that like any other situation when you "changing" something via messages, you should remember
 /// that the change is **not** immediate.
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "22f7f502-7622-4ecb-8c5f-ba436e7ee823"
+)]
 pub struct Text {
     /// Base widget of the Text widget.
     pub widget: Widget,
+    /// Text that may have BBCode tags to automatically generate formatting runs.
+    /// The available tags are:
+    /// * `[b]` **bold text** `[/b]`
+    /// * `[i]` *italic text* `[/i]`
+    /// * `[color=red]` red text `[/color]` (can be shortened to `[c=red]`... `[/c]`, and can use hex color as in `[color=#FF0000]`)
+    /// * `[size=24]` large text `[/size]` (can be shortened to `[s=24]` ... `[/s]`)
+    /// * `[shadow]` shadowed text `[/shadow]` (can be shortened to `[sh]` ... `[/sh]` and can change shadow color with `[shadow=blue]`)
+    /// * `[br]` for a line break.
+    #[visit(optional)]
+    #[reflect(hidden)]
+    pub bbcode: InheritableVariable<String>,
     /// [`FormattedText`] instance that is used to layout text and generate drawing commands.
     pub formatted_text: RefCell<FormattedText>,
 }
@@ -343,6 +349,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Text {
                 TextBuilder::new(WidgetBuilder::new().with_name("Text"))
                     .with_text("Text")
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Visual")
@@ -351,15 +358,18 @@ impl ConstructorProvider<UiNode, UserInterface> for Text {
 
 crate::define_widget_deref!(Text);
 
-uuid_provider!(Text = "22f7f502-7622-4ecb-8c5f-ba436e7ee823");
-
 impl Control for Text {
     fn measure_override(&self, _: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
         self.formatted_text
             .borrow_mut()
             .set_super_sampling_scale(self.visual_max_scaling())
             .set_constraint(available_size)
-            .build()
+            .measure()
+    }
+
+    fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
+        self.formatted_text.borrow_mut().arrange(final_size);
+        self.widget.arrange_override(ui, final_size)
     }
 
     fn draw(&self, drawing_context: &mut DrawingContext) {
@@ -375,20 +385,35 @@ impl Control for Text {
         );
     }
 
-    fn on_visual_transform_changed(&self) {
-        self.formatted_text
-            .borrow_mut()
-            .set_super_sampling_scale(self.visual_max_scaling())
-            .build();
+    fn on_visual_transform_changed(
+        &self,
+        _old_transform: &Matrix3<f32>,
+        _new_transform: &Matrix3<f32>,
+    ) {
+        let mut text = self.formatted_text.borrow_mut();
+        let new_super_sampling_scale = self.visual_max_scaling();
+        if new_super_sampling_scale != text.super_sampling_scale() {
+            text.set_super_sampling_scale(new_super_sampling_scale)
+                .measure_and_arrange();
+        }
     }
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
         if message.destination() == self.handle() {
-            if let Some(msg) = message.data::<TextMessage>() {
+            if let Some(msg) = message.data::<WidgetMessage>() {
+                if let WidgetMessage::Style(style) = msg {
+                    self.formatted_text.borrow_mut().set_style(style);
+                    self.invalidate_layout();
+                }
+            } else if let Some(msg) = message.data::<TextMessage>() {
                 let mut text_ref = self.formatted_text.borrow_mut();
                 match msg {
+                    TextMessage::BBCode(text) => {
+                        drop(text_ref);
+                        self.set_bbcode(text.clone());
+                    }
                     TextMessage::Text(text) => {
                         text_ref.set_text(text);
                         drop(text_ref);
@@ -457,6 +482,11 @@ impl Control for Text {
                             self.invalidate_layout();
                         }
                     }
+                    TextMessage::Runs(runs) => {
+                        text_ref.set_runs(runs.clone());
+                        drop(text_ref);
+                        self.invalidate_layout();
+                    }
                 }
             }
         }
@@ -464,6 +494,23 @@ impl Control for Text {
 }
 
 impl Text {
+    /// Modifies the content of the text, with BBCode tags used to set the formatting runs.
+    /// The available tags are:
+    /// * `[b]` **bold text** `[/b]`
+    /// * `[i]` *italic text* `[/i]`
+    /// * `[color=red]` red text `[/color]` (can be shortened to `[c=red]`... `[/c]`, and can use hex color as in `[color=#FF0000]`)
+    /// * `[size=24]` large text `[/size]` (can be shortened to `[s=24]` ... `[/s]`)
+    /// * `[shadow]` shadowed text `[/shadow]` (can be shortened to `[sh]` ... `[/sh]` and can change shadow color with `[shadow=blue]`)
+    /// * `[br]` for a line break.
+    pub fn set_bbcode(&mut self, code: String) {
+        self.bbcode.set_value_and_mark_modified(code);
+        let code: BBCode = self.bbcode.parse().unwrap();
+        let mut formatted = self.formatted_text.borrow_mut();
+        let font = formatted.get_font();
+        formatted.set_runs(code.build_runs(&font));
+        formatted.set_text(code.text);
+        self.invalidate_layout();
+    }
     /// Returns current text wrapping mode of the widget.
     pub fn wrap_mode(&self) -> WrapMode {
         self.formatted_text.borrow().wrap_mode()
@@ -493,6 +540,7 @@ impl Text {
 /// TextBuilder is used to create instances of [`Text`] widget and register them in the user interface.
 pub struct TextBuilder {
     widget_builder: WidgetBuilder,
+    bbcode: Option<String>,
     text: Option<String>,
     font: Option<FontResource>,
     vertical_text_alignment: VerticalAlignment,
@@ -504,6 +552,7 @@ pub struct TextBuilder {
     shadow_offset: Vector2<f32>,
     font_size: Option<StyledProperty<f32>>,
     runs: Vec<Run>,
+    trim_text: bool,
 }
 
 impl TextBuilder {
@@ -511,6 +560,7 @@ impl TextBuilder {
     pub fn new(widget_builder: WidgetBuilder) -> Self {
         Self {
             widget_builder,
+            bbcode: None,
             text: None,
             font: None,
             vertical_text_alignment: VerticalAlignment::Top,
@@ -522,7 +572,16 @@ impl TextBuilder {
             shadow_offset: Vector2::new(1.0, 1.0),
             font_size: None,
             runs: Vec::default(),
+            trim_text: true,
         }
+    }
+
+    /// Sets the desired text of the widget, with BBcode tags that will
+    /// automatically generate the formatting runs and replace any other
+    /// runs set through this builder.
+    pub fn with_bbcode<P: Into<String>>(mut self, text: P) -> Self {
+        self.bbcode = Some(text.into());
+        self
     }
 
     /// Sets the desired text of the widget.
@@ -608,8 +667,15 @@ impl TextBuilder {
         self
     }
 
+    /// A flag, that defines whether the formatted text should add ellipsis (…) to lines that goes
+    /// outside provided bounds.
+    pub fn with_trim_text(mut self, trim: bool) -> Self {
+        self.trim_text = trim;
+        self
+    }
+
     /// Finishes text widget creation and registers it in the user interface, returning its handle to you.
-    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<Text> {
         let font = if let Some(font) = self.font {
             font
         } else {
@@ -620,27 +686,35 @@ impl TextBuilder {
             self.widget_builder.foreground = Some(ctx.style.property(Style::BRUSH_TEXT));
         }
 
+        let text_builder = if let Some(bbcode) = &self.bbcode {
+            let code: BBCode = bbcode.parse().unwrap();
+            code.build_formatted_text(font)
+        } else {
+            FormattedTextBuilder::new(font)
+                .with_text(self.text.unwrap_or_default())
+                .with_runs(self.runs)
+        };
+        let formatted_text = text_builder
+            .with_vertical_alignment(self.vertical_text_alignment)
+            .with_horizontal_alignment(self.horizontal_text_alignment)
+            .with_wrap(self.wrap)
+            .with_shadow(self.shadow)
+            .with_shadow_brush(self.shadow_brush)
+            .with_shadow_dilation(self.shadow_dilation)
+            .with_shadow_offset(self.shadow_offset)
+            .with_trim_text(self.trim_text)
+            .with_font_size(
+                self.font_size
+                    .unwrap_or_else(|| ctx.style.property(Style::FONT_SIZE)),
+            )
+            .build();
+
         let text = Text {
             widget: self.widget_builder.build(ctx),
-            formatted_text: RefCell::new(
-                FormattedTextBuilder::new(font)
-                    .with_text(self.text.unwrap_or_default())
-                    .with_vertical_alignment(self.vertical_text_alignment)
-                    .with_horizontal_alignment(self.horizontal_text_alignment)
-                    .with_wrap(self.wrap)
-                    .with_shadow(self.shadow)
-                    .with_shadow_brush(self.shadow_brush)
-                    .with_shadow_dilation(self.shadow_dilation)
-                    .with_shadow_offset(self.shadow_offset)
-                    .with_font_size(
-                        self.font_size
-                            .unwrap_or_else(|| ctx.style.property(Style::FONT_SIZE)),
-                    )
-                    .with_runs(self.runs)
-                    .build(),
-            ),
+            bbcode: self.bbcode.unwrap_or_default().into(),
+            formatted_text: RefCell::new(formatted_text),
         };
-        ctx.add_node(UiNode::new(text))
+        ctx.add(text)
     }
 }
 

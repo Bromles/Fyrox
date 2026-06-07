@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use std::fmt::{Display, Formatter};
 use std::{io::Error, path::Path};
 
 #[derive(Debug)]
@@ -26,9 +27,36 @@ pub enum FileError {
     Custom(String),
 }
 
+impl std::error::Error for FileError {}
+
+impl Display for FileError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileError::Io(err) => {
+                write!(f, "Io error: {err}")
+            }
+            FileError::Custom(err) => {
+                write!(f, "{err}")
+            }
+        }
+    }
+}
+
 impl From<std::io::Error> for FileError {
     fn from(e: Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl From<&str> for FileError {
+    fn from(value: &str) -> Self {
+        Self::Custom(value.to_string())
+    }
+}
+
+impl From<String> for FileError {
+    fn from(value: String) -> Self {
+        Self::Custom(value)
     }
 }
 

@@ -21,61 +21,49 @@
 //! The Window widget provides a standard window that can contain another widget. See [`Window`] docs
 //! for more info and usage examples.
 
-use crate::style::StyledProperty;
+use crate::button::Button;
+use crate::grid::Grid;
+use crate::message::MessageData;
+use crate::vector_image::VectorImage;
 use crate::{
     border::BorderBuilder,
     brush::Brush,
     button::{ButtonBuilder, ButtonMessage},
     core::{
-        algebra::Vector2, color::Color, math::Rect, pool::Handle, reflect::prelude::*,
-        type_traits::prelude::*, uuid_provider, visitor::prelude::*,
+        algebra::Vector2, color::Color, log::Log, math::Rect, pool::Handle, reflect::prelude::*,
+        visitor::prelude::*,
     },
     decorator::DecoratorBuilder,
-    define_constructor,
     font::FontResource,
     grid::{Column, GridBuilder, Row},
-    message::{CursorIcon, KeyCode, MessageDirection, UiMessage},
+    message::{CursorIcon, KeyCode, UiMessage},
     navigation::NavigationLayerBuilder,
-    style::resource::StyleResourceExt,
-    style::Style,
+    style::{resource::StyleResourceExt, Style, StyledProperty},
     text::{Text, TextBuilder, TextMessage},
     vector_image::{Primitive, VectorImageBuilder},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, HorizontalAlignment, RestrictionEntry, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
-
-use fyrox_core::log::Log;
-use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::{BaseSceneGraph, SceneGraph};
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut},
+use fyrox_core::pool::ObjectOrVariant;
+use fyrox_graph::{
+    constructor::{ConstructorProvider, GraphNodeConstructor},
+    SceneGraph,
 };
+use std::cell::RefCell;
 
-/// A set of possible messages that can be used to modify the state of a window or listen to changes
-/// in the window.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WindowMessage {
-    /// Opens a window.
-    Open {
-        /// A flag that defines whether the window should be centered or not.
-        center: bool,
-        /// A flag that defines whether the content of the window should be focused when the window
-        /// is opening.
-        focus_content: bool,
-    },
-
-    /// Opens a window at the given local coordinates.
-    OpenAt {
-        position: Vector2<f32>,
-        /// A flag that defines whether the content of the window should be focused when the window
-        /// is opening.
-        focus_content: bool,
-    },
-
-    /// Opens a window (optionally modal) and aligns it relative the to the given node.
-    OpenAndAlign {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WindowAlignment {
+    /// No specific alignment.
+    None,
+    /// Center of the parent widget (in most cases - center of the screen, if the parent is not
+    /// specified).
+    Center,
+    /// Position (in local coordinates) relative to the left top corner of the parent widget
+    /// bounds. In most cases, it is just screen coordinates.
+    Position(Vector2<f32>),
+    /// Relative alignment to the specified widget.
+    Relative {
         /// A handle of a node to which the sender of this message should be aligned to.
         relative_to: Handle<UiNode>,
         /// Horizontal alignment of the widget.
@@ -84,19 +72,19 @@ pub enum WindowMessage {
         vertical_alignment: VerticalAlignment,
         /// Margins for each side.
         margin: Thickness,
+    },
+}
+
+/// A set of possible messages that can be used to modify the state of a window or listen to changes
+/// in the window.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowMessage {
+    /// Opens a window.
+    Open {
+        /// A flag that defines whether the window should be centered or not.
+        alignment: WindowAlignment,
         /// Should the window be opened in modal mode or not.
         modal: bool,
-        /// A flag that defines whether the content of the window should be focused when the window
-        /// is opening.
-        focus_content: bool,
-    },
-
-    /// Opens window in modal mode. Modal mode does **not** blocks current thread, instead
-    /// it just restricts mouse and keyboard events only to window so other content is not
-    /// clickable/type-able. Closing a window removes that restriction.
-    OpenModal {
-        /// A flag that defines whether the window should be centered or not.
-        center: bool,
         /// A flag that defines whether the content of the window should be focused when the window
         /// is opening.
         focus_content: bool,
@@ -109,16 +97,16 @@ pub enum WindowMessage {
     /// instead of putting window in system tray, it just collapses internal content panel.
     Minimize(bool),
 
-    /// Forces the window to take the inner size of main application window.
+    /// Forces the window to take the inner size of the main application window.
     Maximize(bool),
 
-    /// Whether or not window can be minimized by _ mark. false hides _ mark.
+    /// Whether window can be minimized by _ mark. false hides _ mark.
     CanMinimize(bool),
 
-    /// Whether or not window can be closed by X mark. false hides X mark.
+    /// Whether window can be closed by X mark. false hides X mark.
     CanClose(bool),
 
-    /// Whether or not window can be resized by resize grips.
+    /// Whether window can be resized by resize grips.
     CanResize(bool),
 
     /// Indicates that move has been started. You should never send this message by hand.
@@ -138,79 +126,11 @@ pub enum WindowMessage {
     /// be able to drag it.
     SafeBorderSize(Option<Vector2<f32>>),
 }
+impl MessageData for WindowMessage {}
 
-impl WindowMessage {
-    define_constructor!(
-        /// Creates [`WindowMessage::Open`] message.
-        WindowMessage:Open => fn open(center: bool, focus_content: bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::OpenAt`] message.
-        WindowMessage:OpenAt => fn open_at(position: Vector2<f32>, focus_content: bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::OpenAndAlign`] message.
-        WindowMessage:OpenAndAlign => fn open_and_align(
-            relative_to: Handle<UiNode>,
-            horizontal_alignment: HorizontalAlignment,
-            vertical_alignment: VerticalAlignment,
-            margin: Thickness,
-            modal: bool,
-            focus_content: bool
-        ), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::OpenModal`] message.
-        WindowMessage:OpenModal => fn open_modal(center: bool, focus_content: bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::Close`] message.
-        WindowMessage:Close => fn close(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::Minimize`] message.
-        WindowMessage:Minimize => fn minimize(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::Maximize`] message.
-        WindowMessage:Maximize => fn maximize(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::CanMinimize`] message.
-        WindowMessage:CanMinimize => fn can_minimize(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::CanClose`] message.
-        WindowMessage:CanClose => fn can_close(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::CanResize`] message.
-        WindowMessage:CanResize => fn can_resize(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::MoveStart`] message.
-        WindowMessage:MoveStart => fn move_start(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::Move`] message.
-        WindowMessage:Move => fn move_to(Vector2<f32>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::MoveEnd`] message.
-        WindowMessage:MoveEnd => fn move_end(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::Title`] message.
-        WindowMessage:Title => fn title(WindowTitle), layout: false
-    );
-    define_constructor!(
-        /// Creates [`WindowMessage::SafeBorderSize`] message.
-        WindowMessage:SafeBorderSize => fn safe_border_size(Option<Vector2<f32>>), layout: false
-    );
-}
-
-/// The state of a window's size, as controlled by the buttons on the top-right corner.
+/// The state of a window's size, as controlled by the buttons in the top-right corner.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Visit, Reflect)]
+#[reflect(type_uuid = "6fe81569-a19a-4034-9ae3-392a2c3fb656")]
 pub enum WindowSizeState {
     /// The window is neither maximized nor minimized, showing its content and free to move around the screen.
     #[default]
@@ -221,7 +141,7 @@ pub enum WindowSizeState {
     Maximized,
 }
 
-/// The Window widget provides a standard window that can contain another widget. Based on setting
+/// The Window widget provides a standard window that can contain another widget. Based on setting,
 /// windows can be configured so users can do any of the following:
 ///
 /// * Movable by the user. Not configurable.
@@ -263,18 +183,18 @@ pub enum WindowSizeState {
 /// ```
 ///
 /// You will likely want to constrain the initial size of the window to something as shown in the
-/// example by providing a set width and/or height to the base WidgetBuilder. Otherwise it will
-/// expand to fit it's content.
+/// example by providing a set width and/or height to the base WidgetBuilder. Otherwise, it will
+/// expand to fit its content.
 ///
 /// You may also want to set an initial position with the *with_desired_position* function called
-/// on the base WidgetBuilder which sets the position of the window's top-left corner. Otherwise all
-/// your windows will start with it's top-left corner at 0,0 and be stacked on top of each other.
+/// on the base WidgetBuilder which sets the position of the window's top-left corner. Otherwise, all
+/// your windows will start with its top-left corner at 0,0 and be stacked on top of each other.
 ///
 /// Windows can only contain a single direct child widget, set by using the *with_content* function.
-/// Additional calls to *with_content* replaces the widgets given in previous calls, and the old
+/// Additional calls to *with_content* replace the widgets given in previous calls, and the old
 /// widgets exist outside the window, so you should delete old widgets before changing a window's
 /// widget. If you want multiple widgets, you need to use one of the layout container widgets like
-/// the Grid, Stack Panel, etc then add the additional widgets to that widget as needed.
+/// the Grid, Stack Panel, etc. then add the additional widgets to that widget as needed.
 ///
 /// The Window is a user editable object, but can only be affected by UI Messages they trigger if
 /// the message's corresponding variable has been set to true aka what is set by the *can_close*,
@@ -287,7 +207,7 @@ pub enum WindowSizeState {
 ///
 /// ## Styling the Buttons
 ///
-/// The window close and minimise buttons can be configured with the *with_close_button* and
+/// The window close and minimize buttons can be configured with the *with_close_button* and
 /// *with_minimize_button* functions. You will want to pass them a button widget, but can do anything
 /// else you like past that.
 ///
@@ -297,8 +217,11 @@ pub enum WindowSizeState {
 /// to interact with anything else until the modal is dismissed.
 ///
 /// Any window can be set and unset as a modal via the *modal* function.
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "9331bf32-8614-4005-874c-5239e56bb15e"
+)]
 pub struct Window {
     /// Base widget of the window.
     pub widget: Widget,
@@ -325,11 +248,11 @@ pub struct Window {
     /// Handle of a header widget.
     pub header: Handle<UiNode>,
     /// Handle of a minimize button.
-    pub minimize_button: Handle<UiNode>,
+    pub minimize_button: Handle<Button>,
     /// Handle of a maximize button.
-    pub maximize_button: Handle<UiNode>,
+    pub maximize_button: Handle<Button>,
     /// Handle of a close button.
-    pub close_button: Handle<UiNode>,
+    pub close_button: Handle<Button>,
     /// A distance per each axis when the dragging starts.
     pub drag_delta: Vector2<f32>,
     /// Handle of a current content.
@@ -339,7 +262,7 @@ pub struct Window {
     /// Handle of a title widget of the window.
     pub title: Handle<UiNode>,
     /// Handle of a container widget of the title.
-    pub title_grid: Handle<UiNode>,
+    pub title_grid: Handle<Grid>,
     /// Optional size of the border around the screen in which the window will be forced to stay.
     pub safe_border_size: Option<Vector2<f32>>,
     /// Bounds of the window before maximization, it is used to return the window to previous
@@ -347,10 +270,8 @@ pub struct Window {
     pub prev_bounds: Option<Rect<f32>>,
     /// If `true`, then the window can be closed using `Esc` key. Default is `true`. Works only if
     /// `can_close` is also `true`.
-    #[visit(optional)] // Backward compatibility
     pub close_by_esc: bool,
     /// If `true`, then the window will be deleted after closing.
-    #[visit(optional)] // Backward compatibility
     pub remove_on_close: bool,
 }
 
@@ -360,6 +281,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Window {
             .with_variant("Window", |ui| {
                 WindowBuilder::new(WidgetBuilder::new().with_name("Window"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -371,6 +293,7 @@ const CORNER_GRIP_SIZE: f32 = GRIP_SIZE * 2.0;
 
 /// Kind of a resizing grip.
 #[derive(Copy, Clone, Debug, Visit, Reflect, Default)]
+#[reflect(type_uuid = "fea2073e-f44e-45db-a373-c9fcee201c2d")]
 pub enum GripKind {
     /// Left-top corner grip.
     #[default]
@@ -393,6 +316,7 @@ pub enum GripKind {
 
 /// Resizing grip.
 #[derive(Clone, Visit, Default, Debug, Reflect)]
+#[reflect(type_uuid = "373815d8-77d2-4624-80de-2d851f7fd6e5")]
 pub struct Grip {
     /// Kind of the grip.
     pub kind: GripKind,
@@ -416,8 +340,6 @@ impl Grip {
 }
 
 crate::define_widget_deref!(Window);
-
-uuid_provider!(Window = "9331bf32-8614-4005-874c-5239e56bb15e");
 
 impl Control for Window {
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
@@ -476,10 +398,7 @@ impl Control for Window {
             if self.can_resize && !self.is_dragging {
                 match msg {
                     &WidgetMessage::MouseDown { pos, .. } => {
-                        ui.send_message(WidgetMessage::topmost(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                        ));
+                        ui.send(self.handle(), WidgetMessage::Topmost);
 
                         if !self.maximized() {
                             // Check grips.
@@ -516,7 +435,10 @@ impl Control for Window {
                                 }
 
                                 if grip.is_dragging {
-                                    let delta = self.mouse_click_pos - pos;
+                                    let parent = ui.node(self.parent());
+                                    let click_pos = parent.screen_to_local(self.mouse_click_pos);
+                                    let current_pos = parent.screen_to_local(pos);
+                                    let delta = click_pos - current_pos;
                                     let (dx, dy, dw, dh) = match grip.kind {
                                         GripKind::Left => (-1.0, 0.0, 1.0, 0.0),
                                         GripKind::Top => (0.0, -1.0, 0.0, 1.0),
@@ -528,37 +450,50 @@ impl Control for Window {
                                         GripKind::LeftBottomCorner => (-1.0, 0.0, 1.0, -1.0),
                                     };
 
+                                    let initial_position =
+                                        parent.screen_to_local(self.initial_position);
                                     let new_pos = if self.minimized() {
-                                        self.initial_position + Vector2::new(delta.x * dx, 0.0)
+                                        initial_position + Vector2::new(delta.x * dx, 0.0)
                                     } else {
-                                        self.initial_position
-                                            + Vector2::new(delta.x * dx, delta.y * dy)
+                                        initial_position + Vector2::new(delta.x * dx, delta.y * dy)
                                     };
                                     let new_size = self.initial_size
                                         + Vector2::new(delta.x * dw, delta.y * dh);
+                                    let mut clamped_size = self.initial_size;
+                                    let mut clamped_pos = new_pos;
 
-                                    if new_size.x > self.min_width()
-                                        && new_size.x < self.max_width()
-                                        && new_size.y > self.min_height()
-                                        && new_size.y < self.max_height()
-                                    {
-                                        ui.send_message(WidgetMessage::desired_position(
-                                            self.handle(),
-                                            MessageDirection::ToWidget,
-                                            ui.screen_to_root_canvas_space(new_pos),
-                                        ));
-                                        ui.send_message(WidgetMessage::width(
-                                            self.handle(),
-                                            MessageDirection::ToWidget,
-                                            new_size.x,
-                                        ));
-                                        if !self.minimized() {
-                                            ui.send_message(WidgetMessage::height(
-                                                self.handle(),
-                                                MessageDirection::ToWidget,
-                                                new_size.y,
-                                            ));
+                                    if dw != 0.0 {
+                                        clamped_size.x =
+                                            new_size.x.clamp(self.min_width(), self.max_width());
+                                        if dx != 0.0 {
+                                            let right_edge =
+                                                initial_position.x + self.initial_size.x;
+                                            clamped_pos.x = right_edge - clamped_size.x;
                                         }
+                                    }
+
+                                    if dh != 0.0 {
+                                        clamped_size.y =
+                                            new_size.y.clamp(self.min_height(), self.max_height());
+                                        if dy != 0.0 {
+                                            let bottom_edge =
+                                                initial_position.y + self.initial_size.y;
+                                            clamped_pos.y = bottom_edge - clamped_size.y;
+                                        }
+                                    }
+
+                                    ui.send_many(
+                                        self.handle(),
+                                        [
+                                            WidgetMessage::DesiredPosition(clamped_pos),
+                                            WidgetMessage::Width(clamped_size.x),
+                                        ],
+                                    );
+                                    if !self.minimized() {
+                                        ui.send(
+                                            self.handle(),
+                                            WidgetMessage::Height(clamped_size.y),
+                                        );
                                     }
 
                                     break;
@@ -586,28 +521,21 @@ impl Control for Window {
                 match msg {
                     WidgetMessage::MouseDown { pos, .. } => {
                         self.mouse_click_pos = *pos;
-                        ui.send_message(WindowMessage::move_start(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                        ));
+                        ui.send(self.handle, WindowMessage::MoveStart);
                         message.set_handled(true);
                     }
                     WidgetMessage::MouseUp { .. } => {
-                        ui.send_message(WindowMessage::move_end(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                        ));
+                        ui.send(self.handle, WindowMessage::MoveEnd);
                         message.set_handled(true);
                     }
                     WidgetMessage::MouseMove { pos, .. } => {
                         if self.is_dragging {
                             self.drag_delta = *pos - self.mouse_click_pos;
                             let new_pos = self.initial_position + self.drag_delta;
-                            ui.send_message(WindowMessage::move_to(
+                            ui.send(
                                 self.handle(),
-                                MessageDirection::ToWidget,
-                                ui.screen_to_root_canvas_space(new_pos),
-                            ));
+                                WindowMessage::Move(ui.screen_to_root_canvas_space(new_pos)),
+                            );
                         }
                         message.set_handled(true);
                     }
@@ -615,10 +543,8 @@ impl Control for Window {
                 }
             }
             match msg {
-                WidgetMessage::Unlink => {
-                    if message.destination() == self.handle() {
-                        self.initial_position = self.screen_position();
-                    }
+                WidgetMessage::Unlink if message.destination() == self.handle() => {
+                    self.initial_position = self.screen_position();
                 }
                 WidgetMessage::KeyDown(key_code)
                     if self.close_by_esc
@@ -627,374 +553,226 @@ impl Control for Window {
                         && *key_code == KeyCode::Escape
                         && !message.handled() =>
                 {
-                    ui.send_message(WindowMessage::close(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                    ));
+                    ui.send(self.handle, WindowMessage::Close);
                     message.set_handled(true);
                 }
                 _ => {}
             }
         } else if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
             if message.destination() == self.minimize_button {
-                ui.send_message(WindowMessage::minimize(
-                    self.handle(),
-                    MessageDirection::ToWidget,
-                    !self.minimized(),
-                ));
+                ui.send(self.handle(), WindowMessage::Minimize(!self.minimized()));
             } else if message.destination() == self.maximize_button {
-                ui.send_message(WindowMessage::maximize(
-                    self.handle(),
-                    MessageDirection::ToWidget,
-                    !self.maximized(),
-                ));
+                ui.send(self.handle(), WindowMessage::Maximize(!self.maximized()));
             } else if message.destination() == self.close_button {
-                ui.send_message(WindowMessage::close(
-                    self.handle(),
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle(), WindowMessage::Close);
             }
-        } else if let Some(msg) = message.data::<WindowMessage>() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    &WindowMessage::Open {
-                        center,
-                        focus_content,
-                    } => {
-                        // Only manage this window's visibility if it is at the root.
-                        // Otherwise it is part of something like a tile, and that parent should decide
-                        // whether the window is visible.
-                        if !self.visibility() && self.parent() == ui.root() {
-                            ui.send_message(WidgetMessage::visibility(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                true,
-                            ));
-                            // If we are opening the window with non-finite width and height, something
-                            // has gone wrong, so correct it.
-                            if !self.width().is_finite() {
-                                Log::err(format!("Window width was {}", self.width()));
-                                self.set_width(200.0);
-                            }
-                            if !self.height().is_finite() {
-                                Log::err(format!("Window height was {}", self.height()));
-                                self.set_height(200.0);
-                            }
+        } else if let Some(msg) = message.data_for::<WindowMessage>(self.handle()) {
+            match msg {
+                &WindowMessage::Open {
+                    alignment,
+                    modal,
+                    focus_content,
+                } => {
+                    // Only manage this window's visibility if it is at the root.
+                    // Otherwise, it is part of something like a tile, and that parent should decide
+                    // whether the window is visible.
+                    if !self.visibility() && self.parent() == ui.root() {
+                        ui.send(self.handle(), WidgetMessage::Visibility(true));
+                        // If we are opening the window with non-finite width and height, something
+                        // has gone wrong, so correct it.
+                        if !self.width().is_finite() {
+                            Log::err(format!("Window width was {}", self.width()));
+                            self.set_width(200.0);
                         }
-                        ui.send_message(WidgetMessage::topmost(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                        ));
-                        if focus_content {
-                            ui.send_message(WidgetMessage::focus(
-                                self.content_to_focus(),
-                                MessageDirection::ToWidget,
-                            ));
-                        }
-                        if center && self.parent() == ui.root() {
-                            ui.send_message(WidgetMessage::center(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                            ));
+                        if !self.height().is_finite() {
+                            Log::err(format!("Window height was {}", self.height()));
+                            self.set_height(200.0);
                         }
                     }
-                    &WindowMessage::OpenAt {
-                        position,
-                        focus_content,
-                    } => {
-                        if !self.visibility() {
-                            ui.send_message(WidgetMessage::visibility(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                true,
-                            ));
-                            ui.send_message(WidgetMessage::topmost(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                            ));
-                            ui.send_message(WidgetMessage::desired_position(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                position,
-                            ));
-                            if focus_content {
-                                ui.send_message(WidgetMessage::focus(
-                                    self.content_to_focus(),
-                                    MessageDirection::ToWidget,
-                                ));
+                    ui.send(self.handle(), WidgetMessage::Topmost);
+                    if focus_content {
+                        ui.send(self.content_to_focus(), WidgetMessage::Focus);
+                    }
+                    if modal && !ui.restricts_picking(self.handle()) {
+                        ui.push_picking_restriction(RestrictionEntry {
+                            handle: self.handle(),
+                            stop: true,
+                        });
+                    }
+                    match alignment {
+                        WindowAlignment::None => {}
+                        WindowAlignment::Center => {
+                            if self.parent() == ui.root() {
+                                ui.send(self.handle(), WidgetMessage::Center);
                             }
                         }
-                    }
-                    &WindowMessage::OpenAndAlign {
-                        relative_to,
-                        horizontal_alignment,
-                        vertical_alignment,
-                        margin,
-                        modal,
-                        focus_content,
-                    } => {
-                        if !self.visibility() {
-                            ui.send_message(WidgetMessage::visibility(
+                        WindowAlignment::Position(position) => {
+                            ui.send(self.handle(), WidgetMessage::DesiredPosition(position));
+                        }
+                        WindowAlignment::Relative {
+                            relative_to,
+                            horizontal_alignment,
+                            vertical_alignment,
+                            margin,
+                        } => {
+                            ui.send(
                                 self.handle(),
-                                MessageDirection::ToWidget,
-                                true,
-                            ));
-                            ui.send_message(WidgetMessage::topmost(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                            ));
-                            ui.send_message(WidgetMessage::align(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                relative_to,
-                                horizontal_alignment,
-                                vertical_alignment,
-                                margin,
-                            ));
-                            if modal {
-                                ui.push_picking_restriction(RestrictionEntry {
-                                    handle: self.handle(),
-                                    stop: true,
-                                });
-                            }
-                            if focus_content {
-                                ui.send_message(WidgetMessage::focus(
-                                    self.content_to_focus(),
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-                        }
-                    }
-                    &WindowMessage::OpenModal {
-                        center,
-                        focus_content,
-                    } => {
-                        if !self.visibility() {
-                            ui.send_message(WidgetMessage::visibility(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                true,
-                            ));
-                            ui.send_message(WidgetMessage::topmost(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                            ));
-                            if center {
-                                ui.send_message(WidgetMessage::center(
-                                    self.handle(),
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-                            ui.push_picking_restriction(RestrictionEntry {
-                                handle: self.handle(),
-                                stop: true,
-                            });
-                            if focus_content {
-                                ui.send_message(WidgetMessage::focus(
-                                    self.content_to_focus(),
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-                        }
-                    }
-                    WindowMessage::Close => {
-                        if self.visibility() {
-                            ui.send_message(WidgetMessage::visibility(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                false,
-                            ));
-                            ui.remove_picking_restriction(self.handle());
-                            if self.remove_on_close {
-                                ui.send_message(WidgetMessage::remove(
-                                    self.handle,
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-                        }
-                    }
-                    &WindowMessage::Minimize(minimized) => {
-                        if minimized {
-                            self.update_size_state(WindowSizeState::Minimized, ui);
-                        } else {
-                            self.update_size_state(WindowSizeState::Normal, ui);
-                        }
-                    }
-                    &WindowMessage::Maximize(maximized) => {
-                        if maximized {
-                            self.update_size_state(WindowSizeState::Maximized, ui);
-                        } else {
-                            self.update_size_state(WindowSizeState::Normal, ui);
-                        }
-                    }
-                    &WindowMessage::CanMinimize(value) => {
-                        if self.can_minimize != value {
-                            self.can_minimize = value;
-                            if self.minimize_button.is_some() {
-                                ui.send_message(WidgetMessage::visibility(
-                                    self.minimize_button,
-                                    MessageDirection::ToWidget,
-                                    value,
-                                ));
-                            }
-                        }
-                    }
-                    &WindowMessage::CanClose(value) => {
-                        if self.can_close != value {
-                            self.can_close = value;
-                            if self.close_button.is_some() {
-                                ui.send_message(WidgetMessage::visibility(
-                                    self.close_button,
-                                    MessageDirection::ToWidget,
-                                    value,
-                                ));
-                            }
-                        }
-                    }
-                    &WindowMessage::CanResize(value) => {
-                        if self.can_resize != value {
-                            self.can_resize = value;
-                            ui.send_message(message.reverse());
-                        }
-                    }
-                    &WindowMessage::Move(mut new_pos) => {
-                        if let Some(safe_border) = self.safe_border_size {
-                            // Clamp new position in allowed bounds. This will prevent moving the window outside of main
-                            // application window, thus leaving an opportunity to drag window to some other place.
-                            new_pos.x = new_pos.x.clamp(
-                                -(self.actual_local_size().x - safe_border.x).abs(),
-                                (ui.screen_size().x - safe_border.x).abs(),
+                                WidgetMessage::Align {
+                                    relative_to,
+                                    horizontal_alignment,
+                                    vertical_alignment,
+                                    margin,
+                                },
                             );
-                            new_pos.y = new_pos
-                                .y
-                                .clamp(0.0, (ui.screen_size().y - safe_border.y).abs());
-                        }
-
-                        if self.is_dragging && self.desired_local_position() != new_pos {
-                            ui.send_message(WidgetMessage::desired_position(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                new_pos,
-                            ));
-
-                            ui.send_message(message.reverse());
                         }
                     }
-                    WindowMessage::MoveStart => {
-                        if !self.is_dragging {
-                            ui.capture_mouse(self.header);
-                            let initial_position = self.screen_position();
-                            self.initial_position = initial_position;
-                            self.is_dragging = true;
-
-                            if self.size_state == WindowSizeState::Maximized {
-                                self.size_state = WindowSizeState::Normal;
-                                if let Some(prev_bounds) = self.prev_bounds.take() {
-                                    ui.send_message(WidgetMessage::width(
-                                        self.handle,
-                                        MessageDirection::ToWidget,
-                                        prev_bounds.w(),
-                                    ));
-                                    ui.send_message(WidgetMessage::height(
-                                        self.handle,
-                                        MessageDirection::ToWidget,
-                                        prev_bounds.h(),
-                                    ));
-                                }
-                            }
-
-                            ui.send_message(message.reverse());
+                }
+                WindowMessage::Close => {
+                    if self.visibility() {
+                        ui.send(self.handle(), WidgetMessage::Visibility(false));
+                        ui.remove_picking_restriction(self.handle());
+                        if self.remove_on_close {
+                            ui.send(self.handle(), WidgetMessage::Remove);
                         }
                     }
-                    WindowMessage::MoveEnd => {
-                        if self.is_dragging {
-                            ui.release_mouse_capture();
-                            self.is_dragging = false;
-
-                            ui.send_message(message.reverse());
+                }
+                &WindowMessage::Minimize(minimized) => {
+                    if minimized {
+                        self.update_size_state(WindowSizeState::Minimized, ui);
+                    } else {
+                        self.update_size_state(WindowSizeState::Normal, ui);
+                    }
+                }
+                &WindowMessage::Maximize(maximized) => {
+                    if maximized {
+                        self.update_size_state(WindowSizeState::Maximized, ui);
+                    } else {
+                        self.update_size_state(WindowSizeState::Normal, ui);
+                    }
+                }
+                &WindowMessage::CanMinimize(value) => {
+                    if self.can_minimize != value {
+                        self.can_minimize = value;
+                        if self.minimize_button.is_some() {
+                            ui.send(self.minimize_button, WidgetMessage::Visibility(value));
                         }
                     }
-                    WindowMessage::Title(title) => {
-                        match title {
-                            WindowTitle::Text {
-                                text,
-                                font,
-                                font_size,
-                            } => {
-                                if ui.try_get_of_type::<Text>(self.title).is_some() {
-                                    // Just modify existing text, this is much faster than
-                                    // re-create text everytime.
-                                    ui.send_message(TextMessage::text(
-                                        self.title,
-                                        MessageDirection::ToWidget,
-                                        text.clone(),
-                                    ));
-                                    if let Some(font) = font {
-                                        ui.send_message(TextMessage::font(
-                                            self.title,
-                                            MessageDirection::ToWidget,
-                                            font.clone(),
-                                        ))
-                                    }
-                                    if let Some(font_size) = font_size {
-                                        ui.send_message(TextMessage::font_size(
-                                            self.title,
-                                            MessageDirection::ToWidget,
-                                            font_size.clone(),
-                                        ));
-                                    }
-                                } else {
-                                    ui.send_message(WidgetMessage::remove(
-                                        self.title,
-                                        MessageDirection::ToWidget,
-                                    ));
-                                    let font =
-                                        font.clone().unwrap_or_else(|| ui.default_font.clone());
-                                    let ctx = &mut ui.build_ctx();
-                                    self.title = make_text_title(
-                                        ctx,
-                                        text,
-                                        font,
-                                        font_size.clone().unwrap_or_else(|| {
-                                            ctx.style.property(Style::FONT_SIZE)
-                                        }),
-                                    );
-                                    ui.send_message(WidgetMessage::link(
-                                        self.title,
-                                        MessageDirection::ToWidget,
-                                        self.title_grid,
-                                    ));
-                                }
-                            }
-                            WindowTitle::Node(node) => {
-                                if self.title.is_some() {
-                                    // Remove old title.
-                                    ui.send_message(WidgetMessage::remove(
-                                        self.title,
-                                        MessageDirection::ToWidget,
-                                    ));
-                                }
+                }
+                &WindowMessage::CanClose(value) => {
+                    if self.can_close != value {
+                        self.can_close = value;
+                        if self.close_button.is_some() {
+                            ui.send(self.close_button, WidgetMessage::Visibility(value));
+                        }
+                    }
+                }
+                &WindowMessage::CanResize(value) => {
+                    if self.can_resize != value {
+                        self.can_resize = value;
+                        ui.try_send_response(message);
+                    }
+                }
+                &WindowMessage::Move(mut new_pos) => {
+                    if let Some(safe_border) = self.safe_border_size {
+                        // Clamp new position in allowed bounds. This will prevent moving the window outside the main
+                        // application window, thus leaving an opportunity to drag the window to some other place.
+                        new_pos.x = new_pos.x.clamp(
+                            -(self.actual_local_size().x - safe_border.x).abs(),
+                            (ui.screen_size().x - safe_border.x).abs(),
+                        );
+                        new_pos.y = new_pos
+                            .y
+                            .clamp(0.0, (ui.screen_size().y - safe_border.y).abs());
+                    }
 
-                                if node.is_some() {
-                                    self.title = *node;
+                    if self.is_dragging && self.desired_local_position() != new_pos {
+                        ui.send(self.handle(), WidgetMessage::DesiredPosition(new_pos));
+                        ui.try_send_response(message);
+                    }
+                }
+                WindowMessage::MoveStart => {
+                    if !self.is_dragging {
+                        ui.capture_mouse(self.header);
+                        let initial_position = self.screen_position();
+                        self.initial_position = initial_position;
+                        self.is_dragging = true;
 
-                                    // Attach new one.
-                                    ui.send_message(WidgetMessage::link(
-                                        self.title,
-                                        MessageDirection::ToWidget,
-                                        self.title_grid,
-                                    ));
-                                }
+                        if self.size_state == WindowSizeState::Maximized {
+                            self.size_state = WindowSizeState::Normal;
+                            if let Some(prev_bounds) = self.prev_bounds.take() {
+                                ui.send_many(
+                                    self.handle,
+                                    [
+                                        WidgetMessage::Width(prev_bounds.w()),
+                                        WidgetMessage::Height(prev_bounds.h()),
+                                    ],
+                                );
                             }
                         }
+
+                        ui.try_send_response(message);
                     }
-                    WindowMessage::SafeBorderSize(size) => {
-                        if &self.safe_border_size != size {
-                            self.safe_border_size = *size;
-                            ui.send_message(message.reverse());
+                }
+                WindowMessage::MoveEnd => {
+                    if self.is_dragging {
+                        ui.release_mouse_capture();
+                        self.is_dragging = false;
+
+                        ui.try_send_response(message);
+                    }
+                }
+                WindowMessage::Title(title) => {
+                    match title {
+                        WindowTitle::Text {
+                            text,
+                            font,
+                            font_size,
+                        } => {
+                            if ui.try_get_of_type::<Text>(self.title).is_ok() {
+                                // Just modify existing text, this is much faster than
+                                // re-create text everytime.
+                                ui.send(self.title, TextMessage::Text(text.clone()));
+                                if let Some(font) = font {
+                                    ui.send(self.title, TextMessage::Font(font.clone()))
+                                }
+                                if let Some(font_size) = font_size {
+                                    ui.send(self.title, TextMessage::FontSize(font_size.clone()));
+                                }
+                            } else {
+                                ui.send(self.title, WidgetMessage::Remove);
+                                let font = font.clone().unwrap_or_else(|| ui.default_font.clone());
+                                let ctx = &mut ui.build_ctx();
+                                self.title = make_text_title(
+                                    ctx,
+                                    text,
+                                    font,
+                                    font_size
+                                        .clone()
+                                        .unwrap_or_else(|| ctx.style.property(Style::FONT_SIZE)),
+                                )
+                                .to_base();
+                                ui.send(self.title, WidgetMessage::link_with(self.title_grid));
+                            }
                         }
+                        WindowTitle::Node(node) => {
+                            if self.title.is_some() {
+                                // Remove old title.
+                                ui.send(self.title, WidgetMessage::Remove);
+                            }
+
+                            if node.is_some() {
+                                self.title = *node;
+
+                                // Attach new one.
+                                ui.send(self.title, WidgetMessage::link_with(self.title_grid));
+                            }
+                        }
+                    }
+                }
+                WindowMessage::SafeBorderSize(size) => {
+                    if &self.safe_border_size != size {
+                        self.safe_border_size = *size;
+                        ui.try_send_response(message);
                     }
                 }
             }
@@ -1058,11 +836,10 @@ impl Window {
         };
 
         if self.content.is_some() {
-            ui.send_message(WidgetMessage::visibility(
+            ui.send(
                 self.content,
-                MessageDirection::ToWidget,
-                new_state != WindowSizeState::Minimized,
-            ));
+                WidgetMessage::Visibility(new_state != WindowSizeState::Minimized),
+            );
         }
 
         if new_state == WindowSizeState::Minimized {
@@ -1073,22 +850,18 @@ impl Window {
             self.set_height(f32::NAN);
             self.invalidate_layout();
         } else {
-            ui.send_message(WidgetMessage::desired_position(
+            ui.send(
                 self.handle,
-                MessageDirection::ToWidget,
-                new_bounds.position,
-            ));
+                WidgetMessage::DesiredPosition(new_bounds.position),
+            );
             if self.can_resize {
-                ui.send_message(WidgetMessage::width(
+                ui.send_many(
                     self.handle,
-                    MessageDirection::ToWidget,
-                    new_bounds.w(),
-                ));
-                ui.send_message(WidgetMessage::height(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    new_bounds.h(),
-                ));
+                    [
+                        WidgetMessage::Width(new_bounds.w()),
+                        WidgetMessage::Height(new_bounds.h()),
+                    ],
+                );
             }
         }
         self.size_state = new_state;
@@ -1135,12 +908,12 @@ pub struct WindowBuilder {
     /// Whether the window should be created open or not.
     pub open: bool,
     /// Optional custom closing button, if not specified, then a default button will be created.
-    pub close_button: Option<Handle<UiNode>>,
+    pub close_button: Option<Handle<Button>>,
     /// Optional custom minimization button, if not specified, then a default button will be created.
-    pub minimize_button: Option<Handle<UiNode>>,
+    pub minimize_button: Option<Handle<Button>>,
     /// Optional custom maximization button, if not specified, then a default button will be created.
-    pub maximize_button: Option<Handle<UiNode>>,
-    /// Whether the window should be created as modal or not. Warning: Any dependant builders must
+    pub maximize_button: Option<Handle<Button>>,
+    /// Whether the window should be created as modal or not. Warning: Any independent builders must
     /// take this into account!
     pub modal: bool,
     /// Whether the window should be resizable or not.
@@ -1218,7 +991,7 @@ fn make_text_title(
     text: &str,
     font: FontResource,
     size: StyledProperty<f32>,
-) -> Handle<UiNode> {
+) -> Handle<Text> {
     TextBuilder::new(
         WidgetBuilder::new()
             .with_margin(Thickness::left(5.0))
@@ -1239,7 +1012,7 @@ enum HeaderButton {
     Maximize,
 }
 
-fn make_mark(ctx: &mut BuildContext, button: HeaderButton) -> Handle<UiNode> {
+fn make_mark(ctx: &mut BuildContext, button: HeaderButton) -> Handle<VectorImage> {
     let size = 12.0;
 
     VectorImageBuilder::new(
@@ -1309,7 +1082,7 @@ fn make_mark(ctx: &mut BuildContext, button: HeaderButton) -> Handle<UiNode> {
     .build(ctx)
 }
 
-fn make_header_button(ctx: &mut BuildContext, button: HeaderButton) -> Handle<UiNode> {
+fn make_header_button(ctx: &mut BuildContext, button: HeaderButton) -> Handle<Button> {
     ButtonBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(2.0)))
         .with_back(
             DecoratorBuilder::new(
@@ -1351,8 +1124,8 @@ impl WindowBuilder {
     }
 
     /// Sets a desired window content.
-    pub fn with_content(mut self, content: Handle<UiNode>) -> Self {
-        self.content = content;
+    pub fn with_content(mut self, content: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = content.to_base();
         self
     }
 
@@ -1368,19 +1141,19 @@ impl WindowBuilder {
     }
 
     /// Sets a desired minimization button.
-    pub fn with_minimize_button(mut self, button: Handle<UiNode>) -> Self {
+    pub fn with_minimize_button(mut self, button: Handle<Button>) -> Self {
         self.minimize_button = Some(button);
         self
     }
 
     /// Sets a desired maximization button.
-    pub fn with_maximize_button(mut self, button: Handle<UiNode>) -> Self {
+    pub fn with_maximize_button(mut self, button: Handle<Button>) -> Self {
         self.minimize_button = Some(button);
         self
     }
 
     /// Sets a desired closing button.
-    pub fn with_close_button(mut self, button: Handle<UiNode>) -> Self {
+    pub fn with_close_button(mut self, button: Handle<Button>) -> Self {
         self.close_button = Some(button);
         self
     }
@@ -1471,7 +1244,8 @@ impl WindowBuilder {
                                             font_size.unwrap_or_else(|| {
                                                 ctx.style.property(Style::FONT_SIZE)
                                             }),
-                                        ),
+                                        )
+                                        .to_base(),
                                     },
                                 };
                                 title
@@ -1523,7 +1297,8 @@ impl WindowBuilder {
         .with_pad_by_corner_radius(false)
         .with_corner_radius(4.0f32.into())
         .with_stroke_thickness(Thickness::uniform(0.0).into())
-        .build(ctx);
+        .build(ctx)
+        .to_base();
 
         let border = BorderBuilder::new(
             WidgetBuilder::new()
@@ -1593,18 +1368,21 @@ impl WindowBuilder {
     }
 
     /// Finishes window building and returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Window> {
         let modal = self.modal;
         let open = self.open;
 
         let node = self.build_window(ctx);
-        let handle = ctx.add_node(UiNode::new(node));
+        let handle = ctx.add(node);
 
         if modal && open {
-            ctx.push_picking_restriction(RestrictionEntry { handle, stop: true });
+            ctx.push_picking_restriction(RestrictionEntry {
+                handle: handle.to_base(),
+                stop: true,
+            });
         }
 
-        handle
+        handle.to_variant()
     }
 }
 

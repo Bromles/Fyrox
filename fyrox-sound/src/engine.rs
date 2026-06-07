@@ -24,8 +24,9 @@
 //!
 //! Sound engine manages contexts, feeds output device with data.
 
-use crate::context::{SoundContext, SAMPLE_RATE};
+use crate::context::SoundContext;
 use fyrox_core::visitor::{Visit, VisitResult, Visitor};
+use fyrox_core::SafeLock;
 use std::error::Error;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -36,22 +37,27 @@ pub struct SoundEngine(Arc<Mutex<State>>);
 
 impl Default for SoundEngine {
     fn default() -> Self {
-        Self::without_device()
+        Self::without_device(Self::DEFAULT_SAMPLE_RATE)
     }
 }
 
 /// Internal state of the sound engine.
 pub struct State {
+    sample_rate: u32,
     contexts: Vec<SoundContext>,
+    #[cfg(feature = "output")]
     output_device: Option<tinyaudio::OutputDevice>,
 }
 
 impl SoundEngine {
+    /// Default sample rate of the sound engine.
+    pub const DEFAULT_SAMPLE_RATE: u32 = 44100;
+
     /// Creates new instance of the sound engine. It is possible to have multiple engines running at
     /// the same time, but you shouldn't do this because you can create multiple contexts which
     /// should cover 99% of use cases.
-    pub fn new() -> Result<Self, Box<dyn Error>> {
-        let engine = Self::without_device();
+    pub fn new(sample_rate: u32) -> Result<Self, Box<dyn Error>> {
+        let engine = Self::without_device(sample_rate);
         engine.initialize_audio_output_device()?;
         Ok(engine)
     }
@@ -59,51 +65,77 @@ impl SoundEngine {
     /// Creates new instance of a sound engine without OS audio output device (so called headless mode).
     /// The user should periodically run [`State::render`] if they want to implement their own sample sending
     /// method to an output device (or a file, etc.).
-    pub fn without_device() -> Self {
+    pub fn without_device(sample_rate: u32) -> Self {
         Self(Arc::new(Mutex::new(State {
+            sample_rate,
             contexts: Default::default(),
+            #[cfg(feature = "output")]
             output_device: None,
         })))
     }
 
+    /// Sets the sample rate for the sound engine and recreates the output device.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Box<dyn Error>> {
+        self.state().sample_rate = sample_rate;
+        self.initialize_audio_output_device()
+    }
+
+    /// Returns current sample rate of the sound engine.
+    pub fn sample_rate(&self) -> u32 {
+        self.state().sample_rate
+    }
+
+    /// Normalizes given frequency using context's sampling rate. Normalized frequency then can be used
+    /// to create filters.
+    pub fn normalize_frequency(&self, f: f32) -> f32 {
+        f / self.sample_rate() as f32
+    }
+
     /// Tries to initialize default audio output device.
     pub fn initialize_audio_output_device(&self) -> Result<(), Box<dyn Error>> {
-        let state = self.clone();
+        #[cfg(feature = "output")]
+        {
+            let sample_rate = self.sample_rate() as usize;
+            let this = self.clone();
 
-        let device = tinyaudio::run_output_device(
-            tinyaudio::OutputDeviceParameters {
-                sample_rate: SAMPLE_RATE as usize,
-                channels_count: 2,
-                channel_sample_count: SoundContext::SAMPLES_PER_CHANNEL,
-            },
-            {
-                move |buf| {
-                    // SAFETY: This is safe as long as channels count above is 2.
-                    let data = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            buf.as_mut_ptr() as *mut (f32, f32),
-                            buf.len() / 2,
-                        )
-                    };
+            let device = tinyaudio::run_output_device(
+                tinyaudio::OutputDeviceParameters {
+                    sample_rate,
+                    channels_count: 2,
+                    channel_sample_count: SoundContext::SAMPLES_PER_CHANNEL,
+                },
+                {
+                    move |buf| {
+                        // SAFETY: This is safe as long as channels count above is 2.
+                        let data = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                buf.as_mut_ptr() as *mut (f32, f32),
+                                buf.len() / 2,
+                            )
+                        };
 
-                    state.state().render(data);
-                }
-            },
-        )?;
+                        this.state().render(data);
+                    }
+                },
+            )?;
 
-        self.state().output_device = Some(device);
+            self.state().output_device = Some(device);
+        }
 
         Ok(())
     }
 
     /// Destroys current audio output device (if any).
     pub fn destroy_audio_output_device(&self) {
-        self.state().output_device = None;
+        #[cfg(feature = "output")]
+        {
+            self.state().output_device = None;
+        }
     }
 
     /// Provides direct access to actual engine data.
     pub fn state(&self) -> MutexGuard<State> {
-        self.0.lock().unwrap()
+        self.0.safe_lock().unwrap()
     }
 }
 
@@ -158,7 +190,7 @@ impl State {
 
     fn render_inner(&mut self, buf: &mut [(f32, f32)]) {
         for context in self.contexts.iter_mut() {
-            context.state().render(buf);
+            context.state().render(self.sample_rate, buf);
         }
     }
 }

@@ -27,7 +27,7 @@ use crate::{
     },
     effects::reverb::Reverb,
 };
-use fyrox_core::{reflect::prelude::*, uuid_provider, visitor::prelude::*};
+use fyrox_core::{reflect::prelude::*, visitor::prelude::*};
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 pub mod filter;
@@ -35,6 +35,7 @@ pub mod reverb;
 
 /// Attenuation effect.
 #[derive(Debug, Clone, PartialEq, Visit, Reflect)]
+#[reflect(type_uuid = "91c3bef1-4754-4df9-8e02-6f5ebd8e7450")]
 pub struct Attenuate {
     gain: f32,
 }
@@ -55,7 +56,7 @@ impl Attenuate {
 }
 
 impl EffectRenderTrait for Attenuate {
-    fn render(&mut self, input: &[(f32, f32)], output: &mut [(f32, f32)]) {
+    fn render(&mut self, _sample_rate: u32, input: &[(f32, f32)], output: &mut [(f32, f32)]) {
         for ((input_left, input_right), (output_left, output_right)) in
             input.iter().zip(output.iter_mut())
         {
@@ -69,6 +70,7 @@ impl EffectRenderTrait for Attenuate {
 /// For example, [`LowPassFilterEffect`] could be used to muffle audio sources; to create "underwater"
 /// effect.
 #[derive(Debug, Clone, PartialEq, Visit, Reflect, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "fc52e441-d1ec-4881-937c-9e2e53a6d621")]
 pub enum Effect {
     /// See [`Attenuate`] docs for more info.
     Attenuate(Attenuate),
@@ -88,8 +90,6 @@ pub enum Effect {
     HighShelfFilter(HighShelfFilterEffect),
 }
 
-uuid_provider!(Effect = "fc52e441-d1ec-4881-937c-9e2e53a6d621");
-
 impl Default for Effect {
     fn default() -> Self {
         Effect::Attenuate(Default::default())
@@ -97,7 +97,7 @@ impl Default for Effect {
 }
 
 pub(crate) trait EffectRenderTrait {
-    fn render(&mut self, input: &[(f32, f32)], output: &mut [(f32, f32)]);
+    fn render(&mut self, sample_rate: u32, input: &[(f32, f32)], output: &mut [(f32, f32)]);
 }
 
 macro_rules! static_dispatch {
@@ -116,7 +116,7 @@ macro_rules! static_dispatch {
 }
 
 impl EffectRenderTrait for Effect {
-    fn render(&mut self, input: &[(f32, f32)], output: &mut [(f32, f32)]) {
-        static_dispatch!(self, render, input, output)
+    fn render(&mut self, sample_rate: u32, input: &[(f32, f32)], output: &mut [(f32, f32)]) {
+        static_dispatch!(self, render, sample_rate, input, output)
     }
 }

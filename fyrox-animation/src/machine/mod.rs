@@ -35,6 +35,7 @@ use crate::{
 use fxhash::FxHashSet;
 
 pub use event::Event;
+use fyrox_core::algebra::Vector2;
 use fyrox_core::pool::Handle;
 use fyrox_core::{find_by_name_mut, find_by_name_ref};
 pub use layer::MachineLayer;
@@ -190,6 +191,7 @@ pub mod transition;
 ///
 /// Complex state machines quite hard to create from code, you should use ABSM editor instead whenever possible.
 #[derive(Default, Debug, Visit, Reflect, Clone, PartialEq)]
+#[reflect(type_uuid = "ce9290d2-022f-4d4a-960f-23c11b3c3eba")]
 pub struct Machine<T: EntityId> {
     parameters: ParameterContainer,
 
@@ -242,6 +244,26 @@ impl<T: EntityId> Machine<T> {
         }
 
         self
+    }
+
+    /// Shortcut for `set_parameter(id, Parameter::Rule(rule))`.
+    pub fn set_rule(&mut self, id: &str, rule: bool) -> &mut Self {
+        self.set_parameter(id, Parameter::Rule(rule))
+    }
+
+    /// Shortcut for `set_parameter(id, Parameter::Weight(weight))`.
+    pub fn set_weight(&mut self, id: &str, weight: f32) -> &mut Self {
+        self.set_parameter(id, Parameter::Weight(weight))
+    }
+
+    /// Shortcut for `set_parameter(id, Parameter::Index(index))`.
+    pub fn set_index(&mut self, id: &str, index: u32) -> &mut Self {
+        self.set_parameter(id, Parameter::Index(index))
+    }
+
+    /// Shortcut for `set_parameter(id, Parameter::SamplingPoint(sampling_point))`.
+    pub fn set_sampling_point(&mut self, id: &str, sampling_point: Vector2<f32>) -> &mut Self {
+        self.set_parameter(id, Parameter::SamplingPoint(sampling_point))
     }
 
     /// Returns a shared reference to the container with all parameters used by the animation blending state machine.
@@ -332,21 +354,20 @@ impl<T: EntityId> Machine<T> {
         self.animations_cache.clear();
         for layer in self.layers.iter_mut() {
             let mut states_to_check = [Some(layer.active_state()), None, None];
-            if let Some(active_transition) =
-                layer.transitions().try_borrow(layer.active_transition())
+            if let Ok(active_transition) = layer.transitions().try_borrow(layer.active_transition())
             {
                 states_to_check[1] = Some(active_transition.source);
                 states_to_check[2] = Some(active_transition.dest);
             }
             for state_to_check in states_to_check.iter().flatten() {
-                if let Some(state) = layer.states().try_borrow(*state_to_check) {
+                if let Ok(state) = layer.states().try_borrow(*state_to_check) {
                     state.collect_animations(layer.nodes(), &mut self.animations_cache);
                 }
             }
         }
 
         for animation_handle in self.animations_cache.iter() {
-            if let Some(animation) = animations.try_get_mut(*animation_handle) {
+            if let Ok(animation) = animations.try_get_mut(*animation_handle) {
                 if animation.is_enabled() {
                     animation.tick(dt);
                 }

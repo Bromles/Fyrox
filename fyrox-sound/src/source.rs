@@ -59,13 +59,13 @@ use fyrox_core::{
     algebra::Vector3,
     log::Log,
     reflect::prelude::*,
-    uuid_provider,
     visitor::{Visit, VisitResult, Visitor},
 };
 use std::time::Duration;
 
 /// Status (state) of sound source.
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Reflect, Visit)]
+#[reflect(type_uuid = "1980bded-86cd-4eff-a5db-bab729bdb3ad")]
 #[repr(u32)]
 pub enum Status {
     /// Sound is stopped - it won't produces any sample and won't load mixer. This is default
@@ -80,10 +80,9 @@ pub enum Status {
     Paused = 2,
 }
 
-uuid_provider!(Status = "1980bded-86cd-4eff-a5db-bab729bdb3ad");
-
 /// See module info.
 #[derive(Debug, Clone, Reflect, Visit)]
+#[reflect(type_uuid = "1beb0bbc-72fb-42a1-9e78-5d246c84fdfe")]
 pub struct SoundSource {
     name: String,
     #[reflect(hidden)]
@@ -106,16 +105,6 @@ pub struct SoundSource {
     looping: bool,
     #[reflect(min_value = 0.0, max_value = 1.0, step = 0.05)]
     spatial_blend: f32,
-    // Important coefficient for runtime resampling. It is used to modify playback speed
-    // of a source in order to match output device sampling rate. PCM data can be stored
-    // in various sampling rates (22050 Hz, 44100 Hz, 88200 Hz, etc.) but output device
-    // is running at fixed sampling rate (usually 44100 Hz). For example if we we'll feed
-    // data to device with rate of 22050 Hz but device is running at 44100 Hz then we'll
-    // hear that sound will have high pitch (2.0), to fix that we'll just pre-multiply
-    // playback speed by 0.5.
-    // However such auto-resampling has poor quality, but it is fast.
-    #[reflect(read_only)]
-    resampling_multiplier: f64,
     status: Status,
     #[visit(optional)]
     pub(crate) bus: String,
@@ -173,7 +162,6 @@ impl Default for SoundSource {
             gain: 1.0,
             spatial_blend: 1.0,
             looping: false,
-            resampling_multiplier: 1.0,
             status: Status::Stopped,
             bus: "Master".to_string(),
             play_once: false,
@@ -242,6 +230,9 @@ impl SoundSource {
             match buffer.state().data() {
                 None => return Err(SoundError::BufferFailedToLoad),
                 Some(locked_buffer) => {
+                    if locked_buffer.duration() == Duration::ZERO {
+                        panic!("Zero duration buffer: {:?}", locked_buffer);
+                    }
                     // Check new buffer if streaming - it must not be used by anyone else.
                     if let SoundBuffer::Streaming(ref mut streaming) = *locked_buffer {
                         if streaming.use_count != 0 {
@@ -249,11 +240,6 @@ impl SoundSource {
                         }
                         streaming.use_count += 1;
                     }
-
-                    // Make sure to recalculate resampling multiplier, otherwise sound will play incorrectly.
-                    let device_sample_rate = f64::from(crate::context::SAMPLE_RATE);
-                    let sample_rate = locked_buffer.sample_rate() as f64;
-                    self.resampling_multiplier = sample_rate / device_sample_rate;
                 }
             }
         }
@@ -515,7 +501,7 @@ impl SoundSource {
         }
     }
 
-    pub(crate) fn render(&mut self, amount: usize) {
+    pub(crate) fn render(&mut self, sample_rate: u32, amount: usize) {
         if self.frame_samples.capacity() < amount {
             self.frame_samples = Vec::with_capacity(amount);
         }
@@ -526,7 +512,7 @@ impl SoundSource {
             let mut state = buffer.state();
             if let Some(buffer) = state.data() {
                 if self.status == Status::Playing && !buffer.is_empty() {
-                    self.render_playing(buffer, amount);
+                    self.render_playing(sample_rate, buffer, amount);
                 }
             }
         }
@@ -534,10 +520,10 @@ impl SoundSource {
         self.frame_samples.resize(amount, (0.0, 0.0));
     }
 
-    fn render_playing(&mut self, buffer: &mut SoundBuffer, amount: usize) {
+    fn render_playing(&mut self, sample_rate: u32, buffer: &mut SoundBuffer, amount: usize) {
         let mut count = 0;
         loop {
-            count += self.render_until_block_end(buffer, amount - count);
+            count += self.render_until_block_end(sample_rate, buffer, amount - count);
             if count == amount {
                 break;
             }
@@ -570,8 +556,23 @@ impl SoundSource {
 
     // Renders until the end of the block or until amount samples is written and returns
     // the number of written samples.
-    fn render_until_block_end(&mut self, buffer: &mut SoundBuffer, mut amount: usize) -> usize {
-        let step = self.pitch * self.resampling_multiplier;
+    fn render_until_block_end(
+        &mut self,
+        sample_rate: u32,
+        buffer: &mut SoundBuffer,
+        mut amount: usize,
+    ) -> usize {
+        // Important coefficient for runtime resampling. It is used to modify playback speed
+        // of a source in order to match output device sampling rate. PCM data can be stored
+        // in various sampling rates (22050 Hz, 44100 Hz, 88200 Hz, etc.) but output device
+        // is running at fixed sampling rate (usually 44100 Hz). For example if we we'll feed
+        // data to device with rate of 22050 Hz but device is running at 44100 Hz then we'll
+        // hear that sound will have high pitch (2.0), to fix that we'll just pre-multiply
+        // playback speed by 0.5.
+        // However such auto-resampling has poor quality, but it is fast.
+        let resampling_multiplier = buffer.sample_rate as f64 / f64::from(sample_rate);
+
+        let step = self.pitch * resampling_multiplier;
         if step == 1.0 {
             if self.buf_read_pos < 0.0 {
                 // This can theoretically happen if we change pitch on the fly.

@@ -81,6 +81,19 @@ pub type SharedGraphicsServer = Rc<dyn GraphicsServer>;
 
 define_as_any_trait!(GraphicsServerAsAny => GraphicsServer);
 
+/// A named debug scope RAII object that automatically exits the scope on drop.
+pub struct RenderingScope {
+    server: Weak<dyn GraphicsServer>,
+}
+
+impl Drop for RenderingScope {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.upgrade() {
+            server.pop_debug_group();
+        }
+    }
+}
+
 /// Graphics server is an abstraction layer over various graphics APIs used on different platforms
 /// supported by the engine. Such abstraction layer tries to provide more or less high-level and
 /// unified interface, that can be used to build graphics pipelines quickly and more or less efficiently.
@@ -126,9 +139,9 @@ pub trait GraphicsServer: GraphicsServerAsAny {
         line_offset: isize,
     ) -> Result<GpuShader, FrameworkError>;
 
-    /// Creates a new named GPU program using a pair of vertex and fragment shaders. The name could
-    /// be used for debugging purposes. The implementation of graphics server will generate proper
-    /// resource bindings in the shader code for you.
+    /// Creates a new named GPU program using source code of both vertex and fragment shaders. The
+    /// name could be used for debugging purposes. The implementation of graphics server will generate
+    /// proper resource bindings in the shader code for you.
     fn create_program(
         &self,
         name: &str,
@@ -136,6 +149,17 @@ pub trait GraphicsServer: GraphicsServerAsAny {
         vertex_source_line_offset: isize,
         fragment_source: String,
         fragment_source_line_offset: isize,
+        resources: &[ShaderResourceDefinition],
+    ) -> Result<GpuProgram, FrameworkError>;
+
+    /// Creates a new named GPU program using a pair of vertex and fragment shaders. The name could
+    /// be used for debugging purposes. The implementation of graphics server will generate proper
+    /// resource bindings in the shader code for you.
+    fn create_program_from_shaders(
+        &self,
+        name: &str,
+        vertex_shader: &GpuShader,
+        fragment_shader: &GpuShader,
         resources: &[ShaderResourceDefinition],
     ) -> Result<GpuProgram, FrameworkError>;
 
@@ -157,7 +181,7 @@ pub trait GraphicsServer: GraphicsServerAsAny {
     ) -> Result<GpuGeometryBuffer, FrameworkError>;
 
     /// Creates a weak reference to the shared graphics server.
-    fn weak(self: Rc<Self>) -> Weak<dyn GraphicsServer>;
+    fn weak(&self) -> Weak<dyn GraphicsServer>;
 
     /// Sends all scheduled GPU command buffers for execution on GPU without waiting for a certain
     /// threshold.
@@ -186,7 +210,10 @@ pub trait GraphicsServer: GraphicsServerAsAny {
     /// Returns current capabilities of the graphics server. See [`ServerCapabilities`] for more info.
     fn capabilities(&self) -> ServerCapabilities;
 
-    /// Sets current polygon fill mode. See [`PolygonFace`] and [`PolygonFillMode`] docs for more info.
+    /// Sets current polygon fill mode for front faces, back faces, or both.
+    /// The mode of front faces is controlled separately from the mode of back faces,
+    /// and `polygon_face` determines which mode is set by this method.
+    /// See [`PolygonFace`] and [`PolygonFillMode`] docs for more info.
     fn set_polygon_fill_mode(&self, polygon_face: PolygonFace, polygon_fill_mode: PolygonFillMode);
 
     /// Generates mipmaps for the given texture. Graphics server implementation can pick any desired
@@ -195,6 +222,27 @@ pub trait GraphicsServer: GraphicsServerAsAny {
 
     /// Fetches the total amount of memory used by the graphics server.
     fn memory_usage(&self) -> ServerMemoryUsage;
+
+    /// Begins a new named debug group. It is recommended to use [`Self::begin_scope`] instead,
+    /// so that the compiler will manage the scope lifetime for your correctly. Otherwise, a forgotten
+    /// call to [`Self::pop_debug_group`] may cause stack overflow or underflow errors.
+    fn push_debug_group(&self, name: &str);
+
+    /// Ends the current debug group.
+    fn pop_debug_group(&self);
+
+    /// Begins a new debug scope by creating a temporary object that automatically exits the
+    /// scope on drop. The scope could be created like so: `let _debug_scope = server.begin_scope("ScopeName");`
+    /// Note the `let _debug_scope = ...` part - it is important to keep the produced object alive
+    /// until the end of the current semantic scope. Do not call this method like so:
+    /// `server.begin_scope("VisibilityTest");` because it will enter and leave the scope instantly.
+    fn begin_scope(&self, name: &str) -> RenderingScope {
+        self.push_debug_group(name);
+
+        RenderingScope {
+            server: self.weak(),
+        }
+    }
 
     /// A shortcut for [`Self::create_texture`], that creates a rectangular texture with the given
     /// size and pixel kind.

@@ -20,51 +20,47 @@
 
 //! See [`UiRenderer`] docs.
 
-use crate::renderer::cache::uniform::{UniformBlockLocation, UniformMemoryAllocator};
-use crate::renderer::resources::RendererResources;
 use crate::{
-    asset::untyped::ResourceKind,
+    asset::{manager::ResourceManager, untyped::ResourceKind},
     core::{
         algebra::{Matrix4, Vector2, Vector4},
+        arrayvec::ArrayVec,
         color::Color,
         math::Rect,
+        some_or_continue,
         sstorage::ImmutableString,
+    },
+    graphics::{
+        buffer::BufferUsage,
+        error::FrameworkError,
+        framebuffer::{GpuFrameBuffer, ResourceBindGroup, ResourceBinding},
+        geometry_buffer::{
+            AttributeDefinition, AttributeKind, ElementsDescriptor, GpuGeometryBuffer,
+            GpuGeometryBufferDescriptor, VertexBufferData, VertexBufferDescriptor,
+        },
+        gpu_program::ShaderResourceKind,
+        server::GraphicsServer,
+        uniform::StaticUniformBuffer,
+        BlendFactor, BlendFunc, BlendParameters, ColorMask, CompareFunc, DrawParameters,
+        ElementRange, ScissorBox, StencilFunc,
     },
     gui::{
         brush::Brush,
+        draw::Command,
         draw::{CommandTexture, DrawingContext},
     },
     renderer::{
         bundle::{self, make_texture_binding},
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial, ShaderCache},
-            uniform::UniformBufferCache,
+            uniform::{UniformBlockLocation, UniformBufferCache, UniformMemoryAllocator},
         },
-        framework::{
-            buffer::BufferUsage,
-            error::FrameworkError,
-            framebuffer::GpuFrameBuffer,
-            geometry_buffer::{
-                AttributeDefinition, AttributeKind, ElementsDescriptor, GpuGeometryBuffer,
-                GpuGeometryBufferDescriptor, VertexBufferData, VertexBufferDescriptor,
-            },
-            server::GraphicsServer,
-            BlendFactor, BlendFunc, BlendParameters, ColorMask, CompareFunc, DrawParameters,
-            ElementRange, ScissorBox, StencilFunc,
-        },
+        resources::RendererResources,
         RenderPassStatistics, TextureCache,
     },
     resource::texture::{Texture, TextureKind, TexturePixelKind, TextureResource},
 };
-use fyrox_core::arrayvec::ArrayVec;
-use fyrox_core::some_or_continue;
-use fyrox_graphics::{
-    framebuffer::{ResourceBindGroup, ResourceBinding},
-    gpu_program::ShaderResourceKind,
-    uniform::StaticUniformBuffer,
-};
-use fyrox_resource::manager::ResourceManager;
-use fyrox_ui::draw::Command;
+use fyrox_ui::UserInterface;
 use uuid::Uuid;
 
 /// User interface renderer allows you to render drawing context in specified render target.
@@ -97,6 +93,20 @@ pub struct UiRenderContext<'a, 'b, 'c> {
     pub render_pass_cache: &'a mut ShaderCache,
     /// A reference to the uniform memory allocator.
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
+    /// A reference to the resource manager.
+    pub resource_manager: &'a ResourceManager,
+}
+
+/// Contains all the info required to render a user interface.
+pub struct UiRenderInfo<'a> {
+    /// A reference to a user interface that needs to be rendered.
+    pub ui: &'a UserInterface,
+    /// A render target to render a user interface (UI) to. If [`None`], then the UI will be rendered
+    /// to the screen directly.
+    pub render_target: Option<TextureResource>,
+    /// A color that will be used to fill a render target before rendering of the UI. Ignored if the
+    /// render target is [`None`] and nothing will be cleared.
+    pub clear_color: Color,
     /// A reference to the resource manager.
     pub resource_manager: &'a ResourceManager,
 }
@@ -168,6 +178,7 @@ fn write_uniform_blocks(
 
                 let buffer = StaticUniformBuffer::<2048>::new()
                     .with(ortho)
+                    .with(&cmd.transform)
                     .with(&solid_color)
                     .with(gradient_colors.as_slice())
                     .with(gradient_stops.as_slice())
@@ -343,7 +354,10 @@ impl UiRenderer {
                     .set_triangles(&clipping_geometry.triangle_buffer);
 
                 // Draw
-                let properties = PropertyGroup::from([property("worldViewProjection", &ortho)]);
+                let properties = PropertyGroup::from([
+                    property("projectionMatrix", &ortho),
+                    property("worldMatrix", &cmd.transform),
+                ]);
                 let material = RenderMaterial::from([binding("properties", &properties)]);
                 statistics += renderer_resources.shaders.ui.run_pass(
                     1,
@@ -474,7 +488,7 @@ impl UiRenderer {
                             } else {
                                 resource_bindings.push(make_texture_binding(
                                     server,
-                                    &material,
+                                    material,
                                     resource,
                                     renderer_resources,
                                     fallback,

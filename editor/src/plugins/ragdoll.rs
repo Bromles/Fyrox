@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::plugins::inspector::editors::make_property_editors_container;
 use crate::{
     command::{Command, CommandGroup},
     fyrox::{
@@ -30,19 +29,22 @@ use crate::{
             reflect::prelude::*,
             some_or_return,
         },
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
         gui::{
             button::{ButtonBuilder, ButtonMessage},
             grid::{Column, GridBuilder, Row},
-            inspector::{InspectorBuilder, InspectorContext, InspectorMessage, PropertyAction},
+            inspector::{
+                editors::PropertyEditorDefinitionContainer, Inspector, InspectorBuilder,
+                InspectorContext, InspectorContextArgs, InspectorMessage, PropertyAction,
+            },
             menu::MenuItemMessage,
-            message::{MessageDirection, UiMessage},
+            message::UiMessage,
             scroll_viewer::ScrollViewerBuilder,
             stack_panel::StackPanelBuilder,
             utils::make_simple_tooltip,
             widget::WidgetBuilder,
-            window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+            window::{WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
         },
         scene::{
             base::BaseBuilder,
@@ -51,7 +53,7 @@ use crate::{
             joint::{BallJoint, JointBuilder, JointParams, RevoluteJoint},
             node::Node,
             ragdoll::{Limb, RagdollBuilder},
-            rigidbody::{RigidBodyBuilder, RigidBodyType},
+            rigidbody::{RigidBody, RigidBodyBuilder, RigidBodyType},
             transform::TransformBuilder,
         },
     },
@@ -63,85 +65,77 @@ use crate::{
         GameScene, Selection,
     },
     world::selection::GraphSelection,
-    Editor, MSG_SYNC_FLAG,
+    Editor,
 };
-use fyrox::asset::manager::ResourceManager;
-use fyrox::gui::inspector::{Inspector, InspectorContextArgs};
+use fyrox::gui::button::Button;
+use fyrox::gui::menu::MenuItem;
+use fyrox::gui::window::Window;
+use fyrox::scene::joint::Joint;
+use fyrox::scene::ragdoll::Ragdoll;
 use std::{ops::Range, sync::Arc};
 
 #[derive(Reflect, Clone, Debug)]
+#[reflect(type_uuid = "07d73807-1716-4ea6-bef4-91903c214f7e")]
 pub struct RagdollPreset {
-    #[reflect(description = "A handle of a hips (pelvis) bone.")]
+    /// A handle of a hips (pelvis) bone.
     hips: Handle<Node>,
-    #[reflect(description = "A handle of a left upper leg (thigh) bone.")]
+    /// A handle of a left upper leg (thigh) bone.
     left_up_leg: Handle<Node>,
-    #[reflect(description = "A handle of a left leg bone.")]
+    /// A handle of a left leg bone.
     left_leg: Handle<Node>,
-    #[reflect(description = "A handle of a left foot bone.")]
+    /// A handle of a left foot bone.
     left_foot: Handle<Node>,
-    #[reflect(description = "A handle of a right upper leg (thigh) bone.")]
+    /// A handle of a right upper leg (thigh) bone.
     right_up_leg: Handle<Node>,
-    #[reflect(description = "A handle of a right leg bone.")]
+    /// A handle of a right leg bone.
     right_leg: Handle<Node>,
-    #[reflect(description = "A handle of a right foot bone.")]
+    /// A handle of a right foot bone.
     right_foot: Handle<Node>,
-    #[reflect(description = "A handle of a lower spine bone.")]
+    /// A handle of a lower spine bone.
     spine: Handle<Node>,
-    #[reflect(description = "A handle of a middle spine bone.")]
+    /// A handle of a middle spine bone.
     spine1: Handle<Node>,
-    #[reflect(description = "A handle of a upper spine bone.")]
+    /// A handle of a upper spine bone.
     spine2: Handle<Node>,
-    #[reflect(description = "A handle of a left shoulder bone.")]
+    /// A handle of a left shoulder bone.
     left_shoulder: Handle<Node>,
-    #[reflect(description = "A handle of a left arm bone.")]
+    /// A handle of a left arm bone.
     left_arm: Handle<Node>,
-    #[reflect(description = "A handle of a left fore arm bone.")]
+    /// A handle of a left fore arm bone.
     left_fore_arm: Handle<Node>,
-    #[reflect(description = "A handle of a left hand bone.")]
+    /// A handle of a left hand bone.
     left_hand: Handle<Node>,
-    #[reflect(description = "A handle of a right shoulder bone.")]
+    /// A handle of a right shoulder bone.
     right_shoulder: Handle<Node>,
-    #[reflect(description = "A handle of a right arm bone.")]
+    /// A handle of a right arm bone.
     right_arm: Handle<Node>,
-    #[reflect(description = "A handle of a right fore arm bone.")]
+    /// A handle of a right fore arm bone.
     right_fore_arm: Handle<Node>,
-    #[reflect(description = "A handle of a right hand bone.")]
+    /// A handle of a right hand bone.
     right_hand: Handle<Node>,
-    #[reflect(description = "A handle of a neck bone.")]
+    /// A handle of a neck bone.
     neck: Handle<Node>,
-    #[reflect(description = "A handle of a head bone.")]
+    /// A handle of a head bone.
     head: Handle<Node>,
-    #[reflect(
-        description = "Total mass of the rag doll. Masses of each body part will be calculated using average \
-    human body weight proportions."
-    )]
+    /// Total mass of the rag doll. Masses of each body part will be calculated using average human
+    /// body weight proportions.
     total_mass: f32,
-    #[reflect(
-        description = "Friction coefficient of every collider of every body part of the rag doll.",
-        min_value = 0.0,
-        max_value = 1.0
-    )]
+    /// Friction coefficient of every collider of every body part of the rag doll.
+    #[reflect(min_value = 0.0, max_value = 1.0)]
     friction: f32,
-    #[reflect(
-        description = "A flag, that defines whether the rigid bodies of the ragdoll will use continuous \
-    collision detection or not. This should be turned on, if your rag doll relatively small bones since they'll \
-    most likely fall through floor without CCD."
-    )]
+    /// A flag, that defines whether the rigid bodies of the ragdoll will use continuous collision
+    /// detection or not. This should be turned on, if your rag doll relatively small bones since
+    /// they'll most likely fall through floor without CCD.
     use_ccd: bool,
-    #[reflect(
-        description = "A flag, that defines whether the rigid bodies of the rag doll can sleep or not. \
-    Sleeping rigid bodies won't consume any CPU resources while remain static."
-    )]
+    /// A flag, that defines whether the rigid bodies of the rag doll can sleep or not. Sleeping
+    /// rigid bodies won't consume any CPU resources while remain static.
     can_sleep: bool,
-    #[reflect(
-        description = "A pair of bit masks, that defines collision group and filter for every collider in the \
-    rag doll. It could be used to filter out collisions between character capsule and any part of the rag doll."
-    )]
+    /// A pair of bit masks, that defines collision group and filter for every collider in the rag
+    /// doll. It could be used to filter out collisions between character capsule and any part of the
+    /// rag doll.
     collision_groups: InteractionGroups,
-    #[reflect(
-        description = "A pair of bit masks, that defines solver group and filter for every collider in the \
-    rag doll. It could be used to filter out interactions between character capsule and any part of the rag doll."
-    )]
+    /// A pair of bit masks, that defines solver group and filter for every collider in the rag doll.
+    /// It could be used to filter out interactions between character capsule and any part of the rag doll.
     solver_groups: InteractionGroups,
 }
 
@@ -193,14 +187,14 @@ struct BallJointLimits {
 }
 
 fn try_make_ball_joint(
-    body1: Handle<Node>,
-    body2: Handle<Node>,
+    body1: Handle<RigidBody>,
+    body2: Handle<RigidBody>,
     name: &str,
     limits: Option<BallJointLimits>,
     offset_radius: AxisOffset,
-    ragdoll: Handle<Node>,
+    ragdoll: Handle<Ragdoll>,
     graph: &mut Graph,
-) -> Handle<Node> {
+) -> Handle<Joint> {
     if body1.is_some() && body2.is_some() {
         let mut joint = BallJoint::default();
 
@@ -249,8 +243,8 @@ fn try_make_ball_joint(
             ),
         )
         .with_params(JointParams::BallJoint(joint))
-        .with_body1(body1.transmute())
-        .with_body2(body2.transmute())
+        .with_body1(body1)
+        .with_body2(body2)
         .with_auto_rebinding_enabled(false)
         .with_contacts_enabled(false)
         .build(graph);
@@ -264,13 +258,13 @@ fn try_make_ball_joint(
 }
 
 fn try_make_hinge_joint(
-    body1: Handle<Node>,
-    body2: Handle<Node>,
+    body1: Handle<RigidBody>,
+    body2: Handle<RigidBody>,
     name: &str,
     limits: Option<Range<f32>>,
-    ragdoll: Handle<Node>,
+    ragdoll: Handle<Ragdoll>,
     graph: &mut Graph,
-) -> Handle<Node> {
+) -> Handle<Joint> {
     if body1.is_some() && body2.is_some() {
         let mut joint = RevoluteJoint::default();
 
@@ -293,8 +287,8 @@ fn try_make_hinge_joint(
             ),
         )
         .with_params(JointParams::RevoluteJoint(joint))
-        .with_body1(body1.transmute())
-        .with_body2(body2.transmute())
+        .with_body1(body1)
+        .with_body2(body2)
         .with_auto_rebinding_enabled(false)
         .with_contacts_enabled(false)
         .build(graph);
@@ -314,11 +308,11 @@ impl RagdollPreset {
         radius: f32,
         mass: f32,
         name: &str,
-        ragdoll: Handle<Node>,
+        ragdoll: Handle<Ragdoll>,
         apply_offset: bool,
         graph: &mut Graph,
-    ) -> Handle<Node> {
-        if let Some(from_ref) = graph.try_get(from) {
+    ) -> Handle<RigidBody> {
+        if let Ok(from_ref) = graph.try_get_node(from) {
             let offset = if apply_offset {
                 from_ref
                     .up_vector()
@@ -343,14 +337,14 @@ impl RagdollPreset {
                             ))
                             .build(),
                     )
-                    .with_children(&[ColliderBuilder::new(
-                        BaseBuilder::new().with_name("SphereCollider"),
-                    )
-                    .with_collision_groups(self.collision_groups)
-                    .with_solver_groups(self.solver_groups)
-                    .with_friction(self.friction)
-                    .with_shape(ColliderShape::ball(radius))
-                    .build(graph)]),
+                    .with_child(
+                        ColliderBuilder::new(BaseBuilder::new().with_name("SphereCollider"))
+                            .with_collision_groups(self.collision_groups)
+                            .with_solver_groups(self.solver_groups)
+                            .with_friction(self.friction)
+                            .with_shape(ColliderShape::ball(radius))
+                            .build(graph),
+                    ),
             )
             .with_mass(mass)
             .with_can_sleep(self.can_sleep)
@@ -360,7 +354,7 @@ impl RagdollPreset {
 
             graph.link_nodes(sphere, ragdoll);
 
-            sphere
+            sphere.to_variant()
         } else {
             Default::default()
         }
@@ -373,10 +367,10 @@ impl RagdollPreset {
         radius: f32,
         mass: f32,
         name: &str,
-        ragdoll: Handle<Node>,
+        ragdoll: Handle<Ragdoll>,
         graph: &mut Graph,
-    ) -> Handle<Node> {
-        if let (Some(from_ref), Some(to_ref)) = (graph.try_get(from), graph.try_get(to)) {
+    ) -> Handle<RigidBody> {
+        if let (Ok(from_ref), Ok(to_ref)) = (graph.try_get_node(from), graph.try_get_node(to)) {
             let pos_from = from_ref.global_position();
             let pos_to = to_ref.global_position();
 
@@ -394,18 +388,18 @@ impl RagdollPreset {
                             ))
                             .build(),
                     )
-                    .with_children(&[ColliderBuilder::new(
-                        BaseBuilder::new().with_name("CapsuleCollider"),
-                    )
-                    .with_shape(ColliderShape::capsule(
-                        Vector3::default(),
-                        Vector3::new(0.0, (pos_to - pos_from).norm() - 2.0 * radius, 0.0),
-                        radius,
-                    ))
-                    .with_collision_groups(self.collision_groups)
-                    .with_solver_groups(self.solver_groups)
-                    .with_friction(self.friction)
-                    .build(graph)]),
+                    .with_child(
+                        ColliderBuilder::new(BaseBuilder::new().with_name("CapsuleCollider"))
+                            .with_shape(ColliderShape::capsule(
+                                Vector3::default(),
+                                Vector3::new(0.0, (pos_to - pos_from).norm() - 2.0 * radius, 0.0),
+                                radius,
+                            ))
+                            .with_collision_groups(self.collision_groups)
+                            .with_solver_groups(self.solver_groups)
+                            .with_friction(self.friction)
+                            .build(graph),
+                    ),
             )
             .with_mass(mass)
             .with_can_sleep(self.can_sleep)
@@ -415,7 +409,7 @@ impl RagdollPreset {
 
             graph.link_nodes(capsule, ragdoll);
 
-            capsule
+            capsule.to_variant()
         } else {
             Default::default()
         }
@@ -427,10 +421,10 @@ impl RagdollPreset {
         half_size: Vector3<f32>,
         mass: f32,
         name: &str,
-        ragdoll: Handle<Node>,
+        ragdoll: Handle<Ragdoll>,
         graph: &mut Graph,
-    ) -> Handle<Node> {
-        if let Some(from_ref) = graph.try_get(from) {
+    ) -> Handle<RigidBody> {
+        if let Ok(from_ref) = graph.try_get_node(from) {
             let cuboid = RigidBodyBuilder::new(
                 BaseBuilder::new()
                     .with_name(name)
@@ -439,14 +433,18 @@ impl RagdollPreset {
                             .with_local_position(from_ref.global_position())
                             .build(),
                     )
-                    .with_children(&[ColliderBuilder::new(
-                        BaseBuilder::new().with_name("CuboidCollider"),
-                    )
-                    .with_collision_groups(self.collision_groups)
-                    .with_solver_groups(self.solver_groups)
-                    .with_shape(ColliderShape::cuboid(half_size.x, half_size.y, half_size.z))
-                    .with_friction(self.friction)
-                    .build(graph)]),
+                    .with_child(
+                        ColliderBuilder::new(BaseBuilder::new().with_name("CuboidCollider"))
+                            .with_collision_groups(self.collision_groups)
+                            .with_solver_groups(self.solver_groups)
+                            .with_shape(ColliderShape::cuboid(
+                                half_size.x,
+                                half_size.y,
+                                half_size.z,
+                            ))
+                            .with_friction(self.friction)
+                            .build(graph),
+                    ),
             )
             .with_mass(mass)
             .with_can_sleep(self.can_sleep)
@@ -456,7 +454,7 @@ impl RagdollPreset {
 
             graph.link_nodes(cuboid, ragdoll);
 
-            cuboid
+            cuboid.to_variant()
         } else {
             Default::default()
         }
@@ -470,7 +468,8 @@ impl RagdollPreset {
             (self.left_fore_arm, self.left_hand),
             (self.left_fore_arm, self.right_hand),
         ] {
-            if let (Some(upper_ref), Some(lower_ref)) = (graph.try_get(upper), graph.try_get(lower))
+            if let (Ok(upper_ref), Ok(lower_ref)) =
+                (graph.try_get_node(upper), graph.try_get_node(lower))
             {
                 base_size = (upper_ref.global_position() - lower_ref.global_position()).norm();
                 break;
@@ -904,101 +903,99 @@ impl RagdollPreset {
             graph,
         );
 
-        graph[ragdoll]
-            .as_ragdoll_mut()
-            .root_limb
-            .set_value_and_mark_modified(Limb {
-                bone: self.hips,
-                physical_bone: hips,
-                children: vec![
-                    Limb {
-                        bone: self.spine,
-                        physical_bone: spine,
+        graph[ragdoll].root_limb.set_value_and_mark_modified(Limb {
+            bone: self.hips,
+            physical_bone: hips,
+            children: vec![
+                Limb {
+                    bone: self.spine,
+                    physical_bone: spine,
+                    children: vec![Limb {
+                        bone: self.spine1,
+                        physical_bone: spine1,
                         children: vec![Limb {
-                            bone: self.spine1,
-                            physical_bone: spine1,
-                            children: vec![Limb {
-                                bone: self.spine2,
-                                physical_bone: spine2,
-                                children: vec![
-                                    Limb {
-                                        bone: self.left_shoulder,
-                                        physical_bone: left_shoulder,
+                            bone: self.spine2,
+                            physical_bone: spine2,
+                            children: vec![
+                                Limb {
+                                    bone: self.left_shoulder,
+                                    physical_bone: left_shoulder,
+                                    children: vec![Limb {
+                                        bone: self.left_arm,
+                                        physical_bone: left_arm,
                                         children: vec![Limb {
-                                            bone: self.left_arm,
-                                            physical_bone: left_arm,
+                                            bone: self.left_fore_arm,
+                                            physical_bone: left_fore_arm,
                                             children: vec![Limb {
-                                                bone: self.left_fore_arm,
-                                                physical_bone: left_fore_arm,
-                                                children: vec![Limb {
-                                                    bone: self.left_hand,
-                                                    physical_bone: left_hand,
-                                                    children: vec![],
-                                                }],
+                                                bone: self.left_hand,
+                                                physical_bone: left_hand,
+                                                children: vec![],
                                             }],
                                         }],
-                                    },
-                                    Limb {
-                                        bone: self.right_shoulder,
-                                        physical_bone: right_shoulder,
+                                    }],
+                                },
+                                Limb {
+                                    bone: self.right_shoulder,
+                                    physical_bone: right_shoulder,
+                                    children: vec![Limb {
+                                        bone: self.right_arm,
+                                        physical_bone: right_arm,
                                         children: vec![Limb {
-                                            bone: self.right_arm,
-                                            physical_bone: right_arm,
+                                            bone: self.right_fore_arm,
+                                            physical_bone: right_fore_arm,
                                             children: vec![Limb {
-                                                bone: self.right_fore_arm,
-                                                physical_bone: right_fore_arm,
-                                                children: vec![Limb {
-                                                    bone: self.right_hand,
-                                                    physical_bone: right_hand,
-                                                    children: vec![],
-                                                }],
+                                                bone: self.right_hand,
+                                                physical_bone: right_hand,
+                                                children: vec![],
                                             }],
                                         }],
-                                    },
-                                    Limb {
-                                        bone: self.neck,
-                                        physical_bone: neck,
-                                        children: vec![Limb {
-                                            bone: self.head,
-                                            physical_bone: head,
-                                            children: vec![],
-                                        }],
-                                    },
-                                ],
-                            }],
+                                    }],
+                                },
+                                Limb {
+                                    bone: self.neck,
+                                    physical_bone: neck,
+                                    children: vec![Limb {
+                                        bone: self.head,
+                                        physical_bone: head,
+                                        children: vec![],
+                                    }],
+                                },
+                            ],
                         }],
-                    },
-                    Limb {
-                        bone: self.left_up_leg,
-                        physical_bone: left_up_leg,
+                    }],
+                },
+                Limb {
+                    bone: self.left_up_leg,
+                    physical_bone: left_up_leg,
+                    children: vec![Limb {
+                        bone: self.left_leg,
+                        physical_bone: left_leg,
                         children: vec![Limb {
-                            bone: self.left_leg,
-                            physical_bone: left_leg,
-                            children: vec![Limb {
-                                bone: self.left_foot,
-                                physical_bone: left_foot,
-                                children: vec![],
-                            }],
+                            bone: self.left_foot,
+                            physical_bone: left_foot,
+                            children: vec![],
                         }],
-                    },
-                    Limb {
-                        bone: self.right_up_leg,
-                        physical_bone: right_up_leg,
+                    }],
+                },
+                Limb {
+                    bone: self.right_up_leg,
+                    physical_bone: right_up_leg,
+                    children: vec![Limb {
+                        bone: self.right_leg,
+                        physical_bone: right_leg,
                         children: vec![Limb {
-                            bone: self.right_leg,
-                            physical_bone: right_leg,
-                            children: vec![Limb {
-                                bone: self.right_foot,
-                                physical_bone: right_foot,
-                                children: vec![],
-                            }],
+                            bone: self.right_foot,
+                            physical_bone: right_foot,
+                            children: vec![],
                         }],
-                    },
-                ],
-            });
+                    }],
+                },
+            ],
+        });
 
         // Immediately after extract if from the scene to subgraph. This is required to not violate
         // the rule of one place of execution, only commands allowed to modify the scene.
+        let ragdoll = ragdoll.to_base();
         let sub_graph = graph.take_reserve_sub_graph(ragdoll);
 
         let group = vec![
@@ -1014,23 +1011,21 @@ impl RagdollPreset {
 }
 
 pub struct RagdollWizard {
-    pub window: Handle<UiNode>,
+    pub window: Handle<Window>,
     pub preset: RagdollPreset,
-    inspector: Handle<UiNode>,
-    ok: Handle<UiNode>,
-    cancel: Handle<UiNode>,
-    autofill: Handle<UiNode>,
+    inspector: Handle<Inspector>,
+    ok: Handle<Button>,
+    cancel: Handle<Button>,
+    autofill: Handle<Button>,
     clipboard: Option<Box<dyn Reflect>>,
 }
 
 impl RagdollWizard {
     pub fn new(
         ctx: &mut BuildContext,
-        sender: MessageSender,
-        resource_manager: ResourceManager,
+        property_editors: Arc<PropertyEditorDefinitionContainer>,
     ) -> Self {
         let preset = RagdollPreset::default();
-        let container = Arc::new(make_property_editors_container(sender, resource_manager));
 
         let inspector;
         let ok;
@@ -1058,14 +1053,15 @@ impl RagdollWizard {
                             .with_context(InspectorContext::from_object(InspectorContextArgs {
                                 object: &preset,
                                 ctx,
-                                definition_container: container,
+                                definition_container: property_editors,
                                 environment: None,
-                                sync_flag: MSG_SYNC_FLAG,
                                 layer_index: 0,
                                 generate_property_string_values: true,
                                 filter: Default::default(),
                                 name_column_width: 150.0,
+                                hide_name_column: false,
                                 base_path: Default::default(),
+                                has_parent_object: false,
                             }))
                             .build(ctx);
                             inspector
@@ -1138,12 +1134,14 @@ impl RagdollWizard {
     }
 
     pub fn open(&self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::open(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
     }
 
     pub fn handle_ui_message(
@@ -1162,32 +1160,22 @@ impl RagdollWizard {
             &mut self.clipboard,
         );
 
-        if let Some(InspectorMessage::PropertyChanged(args)) = message.data() {
-            if message.destination() == self.inspector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                PropertyAction::from_field_kind(&args.value).apply(
-                    &args.path(),
-                    &mut self.preset,
-                    &mut |result| {
-                        Log::verify(result);
-                    },
-                );
-            }
+        if let Some(InspectorMessage::PropertyChanged(args)) = message.data_from(self.inspector) {
+            PropertyAction::from_field_action(&args.action).apply(
+                &args.path(),
+                &mut self.preset,
+                &mut |result| {
+                    Log::verify(result);
+                },
+            );
         } else if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.ok {
                 self.preset
                     .create_and_send_command(graph, game_scene, sender);
 
-                ui.send_message(WindowMessage::close(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.window, WindowMessage::Close);
             } else if message.destination() == self.cancel {
-                ui.send_message(WindowMessage::close(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.window, WindowMessage::Close);
             } else if message.destination() == self.autofill {
                 fn find_by_pattern(graph: &Graph, pattern: &str) -> Handle<Node> {
                     graph
@@ -1223,13 +1211,7 @@ impl RagdollWizard {
                 self.preset.neck = find_by_pattern(graph, "Neck");
                 self.preset.head = find_by_pattern(graph, "Head");
 
-                let ctx = ui
-                    .node(self.inspector)
-                    .cast::<fyrox::gui::inspector::Inspector>()
-                    .unwrap()
-                    .context()
-                    .clone();
-
+                let ctx = ui[self.inspector].context().clone();
                 if let Err(sync_errors) = ctx.sync(
                     &self.preset,
                     ui,
@@ -1250,20 +1232,18 @@ impl RagdollWizard {
 #[derive(Default)]
 pub struct RagdollPlugin {
     ragdoll_wizard: Option<RagdollWizard>,
-    open_ragdoll_wizard: Handle<UiNode>,
+    open_ragdoll_wizard: Handle<MenuItem>,
 }
 
 impl RagdollPlugin {
+    pub const RAGDOLL_WIZARD: Uuid = uuid!("314ac0b6-da33-4808-b508-e362043cbdbf");
+
     fn on_open_ragdoll_wizard_clicked(&mut self, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
         let ctx = &mut ui.build_ctx();
-        let wizard = self.ragdoll_wizard.get_or_insert_with(|| {
-            RagdollWizard::new(
-                ctx,
-                editor.message_sender.clone(),
-                editor.engine.resource_manager.clone(),
-            )
-        });
+        let wizard = self
+            .ragdoll_wizard
+            .get_or_insert_with(|| RagdollWizard::new(ctx, editor.property_editors.clone()));
         wizard.open(ui);
     }
 }
@@ -1272,12 +1252,12 @@ impl EditorPlugin for RagdollPlugin {
     fn on_start(&mut self, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
         let ctx = &mut ui.build_ctx();
-        self.open_ragdoll_wizard = create_menu_item("Ragdoll Wizard", vec![], ctx);
-        ui.send_message(MenuItemMessage::add_item(
+        self.open_ragdoll_wizard =
+            create_menu_item("Ragdoll Wizard", Self::RAGDOLL_WIZARD, vec![], ctx);
+        ui.send(
             editor.menu.utils_menu.menu,
-            MessageDirection::ToWidget,
-            self.open_ragdoll_wizard,
-        ));
+            MenuItemMessage::AddItem(self.open_ragdoll_wizard),
+        );
     }
 
     fn on_ui_message(&mut self, message: &mut UiMessage, editor: &mut Editor) {
@@ -1289,7 +1269,7 @@ impl EditorPlugin for RagdollPlugin {
 
         let ui = editor.engine.user_interfaces.first_mut();
         let wizard = some_or_return!(self.ragdoll_wizard.as_mut());
-        let current_scene = some_or_return!(editor.scenes.current_scene_entry_mut());
+        let current_scene = editor.scenes.current_scene_entry_mut();
         let game_scene = some_or_return!(current_scene.controller.downcast_mut::<GameScene>());
         let graph = &mut editor.engine.scenes[game_scene.scene].graph;
         wizard.handle_ui_message(message, ui, graph, game_scene, &editor.message_sender);

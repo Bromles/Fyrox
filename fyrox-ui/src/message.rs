@@ -27,142 +27,27 @@ use crate::{
     core::{algebra::Vector2, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     UiNode, UserInterface,
 };
-use fyrox_core::uuid_provider;
+use fyrox_core::pool::ObjectOrVariant;
 use serde::{Deserialize, Serialize};
 use std::{any::Any, cell::Cell, fmt::Debug};
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
-/// Defines a new message constructor for a enum variant. It is widely used in this crate to create shortcuts to create
-/// messages. Why is it needed anyway? Just to reduce boilerplate code as much as possible.
-///
-/// ## Examples
-///
-/// The following example shows how to create message constructors for various kinds of enum variants:
-///
-/// ```rust
-/// # use fyrox_ui::{
-/// #     core::pool::Handle, define_constructor, message::MessageDirection, message::UiMessage, UiNode,
-/// #     UserInterface,
-/// # };
-/// #
-/// // Message must be debuggable, comparable, cloneable.
-/// #[derive(Debug, PartialEq, Clone)]
-/// enum MyWidgetMessage {
-///     DoSomething,
-///     Foo(u32),
-///     Bar { foo: u32, baz: u8 },
-/// }
-///
-/// impl MyWidgetMessage {
-///     // The first option is used to create constructors plain enum variants:
-///     //
-///     //                  enum name       variant            name          perform layout?
-///     //                      v              v                 v                  v
-///     define_constructor!(MyWidgetMessage:DoSomething => fn do_something(), layout: false);
-///
-///     // The second option is used to create constructors for single-arg tuple enum variants:
-///     //
-///     //                  enum name     variant    name arg    perform layout?
-///     //                      v            v         v   v           v
-///     define_constructor!(MyWidgetMessage:Foo => fn foo(u32), layout: false);
-///
-///     // The third option is used to create constructors for enum variants with fields:
-///     //
-///     //                  enum name     variant    name arg  type arg type  perform layout?
-///     //                      v            v         v   v     v   v    v          v
-///     define_constructor!(MyWidgetMessage:Bar => fn bar(foo: u32, baz: u8), layout: false);
-/// }
-///
-/// fn using_messages(my_widget: Handle<UiNode>, ui: &UserInterface) {
-///     // Send MyWidgetMessage::DoSomething
-///     ui.send_message(MyWidgetMessage::do_something(
-///         my_widget,
-///         MessageDirection::ToWidget,
-///     ));
-///
-///     // Send MyWidgetMessage::Foo
-///     ui.send_message(MyWidgetMessage::foo(
-///         my_widget,
-///         MessageDirection::ToWidget,
-///         5,
-///     ));
-///
-///     // Send MyWidgetMessage::Bar
-///     ui.send_message(MyWidgetMessage::bar(
-///         my_widget,
-///         MessageDirection::ToWidget,
-///         1,
-///         2,
-///     ));
-/// }
-/// ```
-#[macro_export]
-macro_rules! define_constructor {
-    ($(#[$meta:meta])* $inner:ident : $inner_var:tt => fn $name:ident(), layout: $perform_layout:expr) => {
-        $(#[$meta])*
-        #[must_use = "message does nothing until sent to ui"]
-        pub fn $name(destination: Handle<UiNode>, direction: MessageDirection) -> UiMessage {
-            UiMessage {
-                handled: std::cell::Cell::new(false),
-                data: Box::new($inner::$inner_var),
-                destination,
-                direction,
-                routing_strategy: Default::default(),
-                perform_layout: std::cell::Cell::new($perform_layout),
-                flags: 0
-            }
-        }
-    };
-
-    ($(#[$meta:meta])* $inner:ident : $inner_var:tt => fn $name:ident($typ:ty), layout: $perform_layout:expr) => {
-        $(#[$meta])*
-        #[must_use = "message does nothing until sent to ui"]
-        pub fn $name(destination: Handle<UiNode>, direction: MessageDirection, value:$typ) -> UiMessage {
-            UiMessage {
-                handled: std::cell::Cell::new(false),
-                data: Box::new($inner::$inner_var(value)),
-                destination,
-                direction,
-                routing_strategy: Default::default(),
-                perform_layout: std::cell::Cell::new($perform_layout),
-                flags: 0
-            }
-        }
-    };
-
-    ($(#[$meta:meta])* $inner:ident : $inner_var:tt => fn $name:ident( $($params:ident : $types:ty),+ ), layout: $perform_layout:expr) => {
-        $(#[$meta])*
-        #[must_use = "message does nothing until sent to ui"]
-        pub fn $name(destination: Handle<UiNode>, direction: MessageDirection, $($params : $types),+) -> UiMessage {
-            UiMessage {
-                handled: std::cell::Cell::new(false),
-                data: Box::new($inner::$inner_var { $($params),+ }),
-                destination,
-                direction,
-                routing_strategy: Default::default(),
-                perform_layout: std::cell::Cell::new($perform_layout),
-                flags: 0
-            }
-        }
-    }
-}
-
-/// Message direction allows you to distinguish from where message has came from. Often there is a need to find out who
-/// created a message to respond properly. Imagine that we have a NumericUpDown input field for a property and we using
-/// some data source to feed data into input field. When we change something in the input field by typing, it creates a
-/// message with new value. On other hand we often need to put new value in the input field from some code, in this case
-/// we again creating a message. But how to understand from which "side" message has came from? Was it filled in by user
+/// Message direction allows you to distinguish from where the message has come from. Often there is a need to find out who
+/// created a message to respond properly. Imagine that we have a NumericUpDown input field for a property, and we're using
+/// some data source to feed data into the input field. When we change something in the input field by typing, it creates a
+/// message with new value. On the other hand, we often need to put new value in the input field from some code, in this case
+/// we're again creating a message. But how to understand from which "side" message has come from? Was it filled in by user,
 /// and we should create a command  to change value in the data source, or it was created from syncing code just to pass
-/// new value to UI? This problem solved by setting a direction to a message. Also it solves another problem: often we
-/// need to respond to a message only if it did some changes. In this case at first we fire a message with ToWidget direction,
-/// widget catches it and checks if changes are needed and if so, it "rethrows" message with direction FromWidget. Listeners
+/// new value to UI? This problem is solved by setting a direction to a message. Also, it solves another problem: often we
+/// need to respond to a message only if it did some changes. In this case, at first we fire a message with ToWidget direction,
+/// widget catches it and checks if changes are needed, and if so, it "rethrows" message with direction FromWidget. Listeners
 /// are "subscribed" to FromWidget messages only and won't respond to ToWidget messages.
 #[derive(Debug, Copy, Clone, PartialOrd, PartialEq, Hash, Eq)]
 pub enum MessageDirection {
     /// Used to indicate a request for changes in a widget.
     ToWidget,
 
-    /// Used to indicate response from widget if anything has actually changed.
+    /// Used to indicate response from the widget if anything has actually changed.
     FromWidget,
 }
 
@@ -176,28 +61,28 @@ impl MessageDirection {
     }
 }
 
-/// A trait, that is used by every messages used in the user interface. It contains utility methods, that are used
+/// A trait, that is used by every messages used in the user interface. It contains utility methods that are used
 /// for downcasting and equality comparison.
-pub trait MessageData: 'static + Debug + Any + Send {
+pub trait BaseMessageData: 'static + Debug + Any + Send {
     /// Casts `self` as [`Any`] reference.
     fn as_any(&self) -> &dyn Any;
 
     /// Compares this message data with some other.
-    fn compare(&self, other: &dyn MessageData) -> bool;
+    fn compare(&self, other: &dyn BaseMessageData) -> bool;
 
     /// Clones self as boxed value.
     fn clone_box(&self) -> Box<dyn MessageData>;
 }
 
-impl<T> MessageData for T
+impl<T> BaseMessageData for T
 where
-    T: 'static + Debug + PartialEq + Any + Send + Clone,
+    T: 'static + Debug + PartialEq + Any + Send + Clone + MessageData,
 {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn compare(&self, other: &dyn MessageData) -> bool {
+    fn compare(&self, other: &dyn BaseMessageData) -> bool {
         other
             .as_any()
             .downcast_ref::<T>()
@@ -207,6 +92,15 @@ where
 
     fn clone_box(&self) -> Box<dyn MessageData> {
         Box::new(self.clone())
+    }
+}
+
+/// A trait for any message that can be put to the UI message queue.
+pub trait MessageData: BaseMessageData {
+    /// Returns `true` when the message starts a new layout pass before being passed to its
+    /// destination.
+    fn need_perform_layout(&self) -> bool {
+        false
     }
 }
 
@@ -222,31 +116,49 @@ pub enum RoutingStrategy {
     Direct,
 }
 
-/// Message is basic communication element that is used to deliver information to widget or to user code.
+/// Delivery mode
+#[derive(Default, Copy, Clone, Debug, PartialEq)]
+pub enum DeliveryMode {
+    /// The message will be at first processed by the widgets (via [`crate::control::Control::handle_routed_message`] and [`crate::control::Control::preview_message`]
+    /// methods) and then will be returned to the caller of [`UserInterface::poll_message_queue`] for further
+    /// processing. This is the default mode.
+    #[default]
+    FullCycle,
+
+    /// The message will never escape the internal message queue. The [`UserInterface::poll_message_queue`]
+    /// will never return such message, and the message will only be processed by the widgets (via
+    /// [`crate::control::Control::handle_routed_message`] and [`crate::control::Control::preview_message`] methods).
+    /// This mode is used to break message loops at the synchronization stage when the UI state is
+    /// synchronized with a data.
+    SyncOnly,
+}
+
+/// Message is a basic communication element that is used to deliver information to widget or to user code.
 ///
 /// ## Motivation
 ///
-/// This UI library uses message passing mechanism to communicate with widgets. This is very simple and reliable mechanism that
-/// effectively decouples widgets from each other. There is no direct way of modify something during runtime, you have to use
-/// messages to change state of ui elements.
+/// This UI library uses message passing mechanism to communicate with widgets. This is a very simple
+/// and reliable mechanism that effectively decouples widgets from each other. There is no direct
+/// way of modifying something during runtime, you have to use messages to change the state of ui elements.
 ///
 /// ## Direction
 ///
-/// Each message marked with "Direction" field, which means supported routes for message. For example [`crate::button::ButtonMessage::Click`]
-/// has "Direction: To/From UI" which means that it can be sent either from internals of library or from user code. However
-/// [`crate::widget::WidgetMessage::Focus`] has "Direction: From UI" which means that only internal library code can send such messages without
+/// Each message marked with "Direction" field, which means supported routes for message. For example
+/// [`crate::button::ButtonMessage::Click`] has "Direction: To/From UI" which means that it can be
+/// sent either from internals of library or from user code. However [`crate::widget::WidgetMessage::Focus`]
+/// has "Direction: From UI" which means that only internal library code can send such messages without
 /// a risk of breaking anything.
 ///
 /// ## Threading
 ///
-/// UiMessage is nor Send or Sync. User interface is a single-thread thing, as well as its messages.
+/// UiMessage is [`Send`], it can be sent from another thread to a user interface.
 ///
 /// ## Examples
 ///
 /// ```rust
 /// use fyrox_ui::{
-///     core::pool::Handle, define_constructor, message::MessageDirection, message::UiMessage, UiNode,
-///     UserInterface,
+///     core::pool::Handle, message::MessageDirection, message::UiMessage, UiNode,
+///     UserInterface, message::MessageData,
 /// };
 ///
 /// // Message must be debuggable and comparable.
@@ -256,35 +168,17 @@ pub enum RoutingStrategy {
 ///     Foo(u32),
 ///     Bar { foo: u32, baz: u8 },
 /// }
-///
-/// impl MyWidgetMessage {
-///     define_constructor!(MyWidgetMessage:DoSomething => fn do_something(), layout: false);
-///     define_constructor!(MyWidgetMessage:Foo => fn foo(u32), layout: false);
-///     define_constructor!(MyWidgetMessage:Bar => fn bar(foo: u32, baz: u8), layout: false);
-/// }
+/// impl MessageData for MyWidgetMessage{}
 ///
 /// fn using_messages(my_widget: Handle<UiNode>, ui: &UserInterface) {
 ///     // Send MyWidgetMessage::DoSomething
-///     ui.send_message(MyWidgetMessage::do_something(
-///         my_widget,
-///         MessageDirection::ToWidget,
-///     ));
+///     ui.send(my_widget, MyWidgetMessage::DoSomething);
 ///     // Send MyWidgetMessage::Foo
-///     ui.send_message(MyWidgetMessage::foo(
-///         my_widget,
-///         MessageDirection::ToWidget,
-///         5,
-///     ));
+///     ui.send(my_widget, MyWidgetMessage::Foo(5));
 ///     // Send MyWidgetMessage::Bar
-///     ui.send_message(MyWidgetMessage::bar(
-///         my_widget,
-///         MessageDirection::ToWidget,
-///         1,
-///         2,
-///     ));
+///     ui.send(my_widget, MyWidgetMessage::Bar {foo: 1, baz: 2});
 /// }
 /// ```
-///
 ///
 pub struct UiMessage {
     /// Useful flag to check if a message was already handled. It could be used to mark messages as "handled" to prevent
@@ -298,7 +192,7 @@ pub struct UiMessage {
     pub data: Box<dyn MessageData>,
 
     /// Handle of node that will receive message. Please note that **all** nodes in hierarchy will also receive this message,
-    /// order is "up-on-tree" (so called "bubble" message routing). T
+    /// order is "up-on-tree" (so-called "bubble" message routing).
     pub destination: Handle<UiNode>,
 
     /// Indicates the direction of the message. See [`MessageDirection`] docs for more info.
@@ -308,14 +202,8 @@ pub struct UiMessage {
     /// the destination node. Default is bubble routing. See [`RoutingStrategy`] for more info.
     pub routing_strategy: RoutingStrategy,
 
-    /// Whether or not message requires layout to be calculated first.
-    ///
-    /// ## Motivation
-    ///
-    /// Some of message handling routines uses layout info, but message loop performed right after layout pass, but some of messages
-    /// may change layout and this flag tells UI to perform layout before passing message further. In ideal case we'd perform layout
-    /// after **each** message, but since layout pass is super heavy we should do it **only** when it is actually needed.
-    pub perform_layout: Cell<bool>,
+    /// Message delivery mode. See [`DeliveryMode`] docs for more info.
+    pub delivery_mode: DeliveryMode,
 
     /// A custom user flags. Use it if `handled` flag is not enough.
     pub flags: u64,
@@ -335,7 +223,7 @@ where
 {
     if value != new_value {
         *value = new_value.clone();
-        ui.send_message(message.reverse());
+        ui.try_send_response(message);
         true
     } else {
         false
@@ -356,11 +244,16 @@ impl Debug for UiMessage {
         if self.handled.get() {
             write!(f, ",handled")?;
         }
-        if self.perform_layout.get() {
-            write!(f, ",layout")?;
-        }
         if self.flags != 0 {
             write!(f, ",flags:{}", self.flags)?;
+        }
+        match self.delivery_mode {
+            DeliveryMode::FullCycle => {
+                write!(f, ",full cycle")?;
+            }
+            DeliveryMode::SyncOnly => {
+                write!(f, ",sync only")?;
+            }
         }
         write!(f, "):{:?}", self.data)
     }
@@ -374,7 +267,7 @@ impl Clone for UiMessage {
             destination: self.destination,
             direction: self.direction,
             routing_strategy: self.routing_strategy,
-            perform_layout: self.perform_layout.clone(),
+            delivery_mode: Default::default(),
             flags: self.flags,
         }
     }
@@ -387,7 +280,6 @@ impl PartialEq for UiMessage {
             && self.destination == other.destination
             && self.routing_strategy == other.routing_strategy
             && self.direction == other.direction
-            && self.perform_layout == other.perform_layout
             && self.flags == other.flags
     }
 }
@@ -401,9 +293,30 @@ impl UiMessage {
             destination: Default::default(),
             direction: MessageDirection::ToWidget,
             routing_strategy: Default::default(),
-            perform_layout: Cell::new(false),
+            delivery_mode: Default::default(),
             flags: 0,
         }
+    }
+
+    /// Creates a new UI message with the given data for the specified widget.
+    pub fn for_widget(
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        data: impl MessageData,
+    ) -> Self {
+        Self::with_data(data)
+            .with_destination(handle.transmute())
+            .with_direction(MessageDirection::ToWidget)
+    }
+
+    /// Creates a new UI message with the given data to be posted from the name of the specified
+    /// widget.
+    pub fn from_widget(
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        data: impl MessageData,
+    ) -> Self {
+        Self::with_data(data)
+            .with_destination(handle.transmute())
+            .with_direction(MessageDirection::FromWidget)
     }
 
     /// Sets the desired destination of the message.
@@ -424,15 +337,15 @@ impl UiMessage {
         self
     }
 
-    /// Sets the desired perform layout flag of the message.
-    pub fn with_perform_layout(self, perform_layout: bool) -> Self {
-        self.perform_layout.set(perform_layout);
-        self
-    }
-
     /// Sets the desired routing strategy.
     pub fn with_routing_strategy(mut self, routing_strategy: RoutingStrategy) -> Self {
         self.routing_strategy = routing_strategy;
+        self
+    }
+
+    /// Sets the desired delivery mode for the message.
+    pub fn with_delivery_mode(mut self, delivery_mode: DeliveryMode) -> Self {
+        self.delivery_mode = delivery_mode;
         self
     }
 
@@ -443,8 +356,8 @@ impl UiMessage {
     }
 
     /// Creates a new copy of the message with reversed direction. Typical use case is to re-send messages to create "response"
-    /// in a widget. For example you have a float input field and it has Value message. When the input field receives Value message
-    /// with [`MessageDirection::ToWidget`] it checks if value needs to be changed and if it does, it re-sends same message, but with
+    /// in a widget. For example, you have a float input field, and it has a Value message. When the input field receives a Value message
+    /// with [`MessageDirection::ToWidget`] it checks if value needs to be changed and if it does, it re-sends the same message, but with
     /// reversed direction back to message queue so every "listener" can reach properly. The input field won't react at
     /// [`MessageDirection::FromWidget`] message so there will be no infinite message loop.
     #[must_use = "method creates new value which must be used"]
@@ -455,9 +368,115 @@ impl UiMessage {
             destination: self.destination,
             direction: self.direction.reverse(),
             routing_strategy: self.routing_strategy,
-            perform_layout: self.perform_layout.clone(),
+            delivery_mode: self.delivery_mode,
             flags: self.flags,
         }
+    }
+
+    /// Checks if the message comes from the specified widget (via [`Self::is_from`]) and the data
+    /// type matches the given type and returns a reference to the data.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// # use fyrox_core::pool::Handle;
+    /// # use fyrox_ui::message::{MessageDirection, MessageData, UiMessage};
+    /// # use fyrox_ui::UiNode;
+    /// # let widget_handle = Handle::<UiNode>::NONE;
+    /// # #[derive(Debug, Clone, PartialEq)]
+    /// # struct MyMessage;
+    /// # impl MessageData for MyMessage {}
+    /// # let message = UiMessage::with_data(MyMessage);
+    /// if let Some(data) = message.data_from::<MyMessage>(widget_handle) {
+    ///     // Do something
+    /// }
+    /// ```
+    ///
+    /// This method call is essentially a shortcut for:
+    ///
+    /// ```rust
+    /// # use fyrox_core::pool::Handle;
+    /// # use fyrox_ui::message::{MessageData, MessageDirection, UiMessage};
+    /// # use fyrox_ui::UiNode;
+    /// # let widget_handle = Handle::<UiNode>::NONE;
+    /// # #[derive(Debug, Clone, PartialEq)]
+    /// # struct MyMessage;
+    /// # impl MessageData for MyMessage {}
+    /// # let message = UiMessage::with_data(MyMessage);
+    /// if message.destination() == widget_handle && message.direction() == MessageDirection::FromWidget {
+    ///     if let Some(data) = message.data::<MyMessage>() {
+    ///         // Do something
+    ///     }
+    /// }
+    /// ```
+    pub fn data_from<T: MessageData>(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+    ) -> Option<&T> {
+        if self.is_from(handle) {
+            self.data()
+        } else {
+            None
+        }
+    }
+
+    /// Checks if the message was sent to the specified widget (via [`Self::is_for`]) and the data
+    /// type matches the given type and returns a reference to the data.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// # use fyrox_core::pool::Handle;
+    /// # use fyrox_ui::message::{MessageDirection, MessageData, UiMessage};
+    /// # use fyrox_ui::UiNode;
+    /// # let widget_handle = Handle::<UiNode>::NONE;
+    /// # #[derive(Debug, Clone, PartialEq)]
+    /// # struct MyMessage;
+    /// # impl MessageData for MyMessage {}
+    /// # let message = UiMessage::with_data(MyMessage);
+    /// if let Some(data) = message.data_for::<MyMessage>(widget_handle) {
+    ///     // Do something
+    /// }
+    /// ```
+    ///
+    /// This method call is essentially a shortcut for:
+    ///
+    /// ```rust
+    /// # use fyrox_core::pool::Handle;
+    /// # use fyrox_ui::message::{MessageData, MessageDirection, UiMessage};
+    /// # use fyrox_ui::UiNode;
+    /// # let widget_handle = Handle::<UiNode>::NONE;
+    /// # #[derive(Debug, Clone, PartialEq)]
+    /// # struct MyMessage;
+    /// # impl MessageData for MyMessage {}
+    /// # let message = UiMessage::with_data(MyMessage);
+    /// if message.destination() == widget_handle && message.direction() == MessageDirection::ToWidget {
+    ///     if let Some(data) = message.data::<MyMessage>() {
+    ///         // Do something
+    ///     }
+    /// }
+    /// ```
+    pub fn data_for<T: MessageData>(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+    ) -> Option<&T> {
+        if self.is_for(handle) {
+            self.data()
+        } else {
+            None
+        }
+    }
+
+    /// Checks whether the message destination node handle matches the given one and the message
+    /// direction is [`MessageDirection::FromWidget`].
+    pub fn is_from(&self, handle: Handle<impl ObjectOrVariant<UiNode>>) -> bool {
+        self.destination == handle && self.direction == MessageDirection::FromWidget
+    }
+
+    /// Checks whether the message destination node handle matches the given one and the message
+    /// direction is [`MessageDirection::ToWidget`].
+    pub fn is_for(&self, handle: Handle<impl ObjectOrVariant<UiNode>>) -> bool {
+        self.destination == handle && self.direction == MessageDirection::ToWidget
     }
 
     /// Returns destination widget handle of the message.
@@ -485,24 +504,25 @@ impl UiMessage {
         self.direction
     }
 
-    /// Sets perform layout flag.
-    pub fn set_perform_layout(&self, value: bool) {
-        self.perform_layout.set(value);
-    }
-
     /// Returns perform layout flag.
     pub fn need_perform_layout(&self) -> bool {
-        self.perform_layout.get()
+        self.data.need_perform_layout()
     }
 
     /// Checks if the message has particular flags.
     pub fn has_flags(&self, flags: u64) -> bool {
         self.flags & flags != 0
     }
+
+    /// Checks if the message is intended for syncing.
+    pub fn is_sync(&self) -> bool {
+        self.delivery_mode == DeliveryMode::SyncOnly
+    }
 }
 
 /// Mouse button state.
 #[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy, Visit, Reflect)]
+#[reflect(type_uuid = "520d4eae-6772-4037-bff2-23a591a761ee")]
 pub enum ButtonState {
     /// Pressed state.
     Pressed,
@@ -512,6 +532,7 @@ pub enum ButtonState {
 
 /// A set of possible mouse buttons.
 #[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy, Default, Visit, Reflect)]
+#[reflect(type_uuid = "3e3097b4-5845-439f-8926-91850ee376da")]
 pub enum MouseButton {
     /// Left mouse button.
     #[default]
@@ -530,6 +551,7 @@ pub enum MouseButton {
 
 /// A set of possible touch phases
 #[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy, Visit, Reflect)]
+#[reflect(type_uuid = "cae97887-4afd-4259-a572-e79e56fe43db")]
 pub enum TouchPhase {
     /// Touch started
     Started,
@@ -543,6 +565,7 @@ pub enum TouchPhase {
 
 /// Describes the force of a touch event
 #[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy, Visit, Reflect)]
+#[reflect(type_uuid = "037e4017-1d9d-4f82-a545-7e13444c7f1f")]
 pub enum Force {
     /// On iOS, the force is calibrated so that the same number corresponds to
     /// roughly the same amount of pressure on the screen regardless of the
@@ -570,7 +593,7 @@ pub enum Force {
     /// If the platform reports the force as normalized, we have no way of
     /// knowing how much pressure 1.0 corresponds to – we know it's the maximum
     /// amount of force, but as to how much force, you might either have to
-    /// press really really hard, or not hard at all, depending on the device.
+    /// press really, really hard, or not hard at all, depending on the device.
     Normalized([u8; 8]),
 }
 
@@ -657,6 +680,7 @@ pub enum OsEvent {
     Reflect,
     Visit,
 )]
+#[reflect(type_uuid = "ccd546cc-aa63-4be7-b41c-476fa38cb1d3")]
 pub struct KeyboardModifiers {
     /// `Alt` key is pressed.
     pub alt: bool,
@@ -697,6 +721,7 @@ impl KeyboardModifiers {
 )]
 #[repr(u32)]
 #[allow(missing_docs)]
+#[reflect(type_uuid = "45face46-97f2-4f3c-88a0-3a96d8c06105")]
 pub enum KeyCode {
     /// This variant is used when the key cannot be translated to any other variant.
     #[default]
@@ -1144,6 +1169,145 @@ pub enum KeyCode {
     F35,
 }
 
+impl KeyCode {
+    /// Attempts to convert the key code to its respective character.
+    pub fn to_char(self) -> Option<char> {
+        match self {
+            KeyCode::Backquote => Some('`'),
+            KeyCode::Backslash => Some('\\'),
+            KeyCode::BracketLeft => Some('['),
+            KeyCode::BracketRight => Some(']'),
+            KeyCode::Comma => Some(','),
+            KeyCode::Digit0 => Some('0'),
+            KeyCode::Digit1 => Some('1'),
+            KeyCode::Digit2 => Some('2'),
+            KeyCode::Digit3 => Some('3'),
+            KeyCode::Digit4 => Some('4'),
+            KeyCode::Digit5 => Some('5'),
+            KeyCode::Digit6 => Some('6'),
+            KeyCode::Digit7 => Some('7'),
+            KeyCode::Digit8 => Some('8'),
+            KeyCode::Digit9 => Some('9'),
+            KeyCode::Equal => Some('='),
+            KeyCode::KeyA => Some('A'),
+            KeyCode::KeyB => Some('B'),
+            KeyCode::KeyC => Some('C'),
+            KeyCode::KeyD => Some('D'),
+            KeyCode::KeyE => Some('E'),
+            KeyCode::KeyF => Some('F'),
+            KeyCode::KeyG => Some('G'),
+            KeyCode::KeyH => Some('H'),
+            KeyCode::KeyI => Some('I'),
+            KeyCode::KeyJ => Some('J'),
+            KeyCode::KeyK => Some('K'),
+            KeyCode::KeyL => Some('L'),
+            KeyCode::KeyM => Some('M'),
+            KeyCode::KeyN => Some('N'),
+            KeyCode::KeyO => Some('O'),
+            KeyCode::KeyP => Some('P'),
+            KeyCode::KeyQ => Some('Q'),
+            KeyCode::KeyR => Some('R'),
+            KeyCode::KeyS => Some('S'),
+            KeyCode::KeyT => Some('T'),
+            KeyCode::KeyU => Some('U'),
+            KeyCode::KeyV => Some('V'),
+            KeyCode::KeyW => Some('W'),
+            KeyCode::KeyX => Some('X'),
+            KeyCode::KeyY => Some('Y'),
+            KeyCode::KeyZ => Some('Z'),
+            KeyCode::Minus => Some('-'),
+            KeyCode::Period => Some('.'),
+            KeyCode::Quote => Some('\''),
+            KeyCode::Semicolon => Some(';'),
+            KeyCode::Slash => Some('/'),
+            KeyCode::Enter => Some('\n'),
+            KeyCode::Space => Some(' '),
+            KeyCode::Tab => Some('\t'),
+            KeyCode::Numpad0 => Some('0'),
+            KeyCode::Numpad1 => Some('1'),
+            KeyCode::Numpad2 => Some('2'),
+            KeyCode::Numpad3 => Some('3'),
+            KeyCode::Numpad4 => Some('4'),
+            KeyCode::Numpad5 => Some('5'),
+            KeyCode::Numpad6 => Some('6'),
+            KeyCode::Numpad7 => Some('7'),
+            KeyCode::Numpad8 => Some('8'),
+            KeyCode::Numpad9 => Some('9'),
+            KeyCode::NumpadAdd => Some('+'),
+            KeyCode::NumpadComma => Some('.'),
+            KeyCode::NumpadDecimal => Some(','),
+            KeyCode::NumpadDivide => Some('/'),
+            KeyCode::NumpadEnter => Some('\n'),
+            KeyCode::NumpadEqual => Some('='),
+            KeyCode::NumpadHash => Some('#'),
+            KeyCode::NumpadMultiply => Some('*'),
+            KeyCode::NumpadParenLeft => Some('('),
+            KeyCode::NumpadParenRight => Some(')'),
+            KeyCode::NumpadStar => Some('*'),
+            KeyCode::NumpadSubtract => Some('-'),
+            _ => None,
+        }
+    }
+}
+
+impl TryFrom<char> for KeyCode {
+    type Error = &'static str;
+
+    fn try_from(value: char) -> Result<Self, Self::Error> {
+        match value {
+            '-' | '_' => Ok(Self::Minus),
+            '+' | '=' => Ok(Self::NumpadAdd),
+            ' ' => Ok(Self::Space),
+            '\\' | '|' => Ok(Self::Backslash),
+            '/' | '?' => Ok(Self::Slash),
+            '.' | '>' => Ok(Self::Period),
+            ',' | '<' => Ok(Self::Comma),
+            '\'' | '"' => Ok(Self::Quote),
+            ';' | ':' => Ok(Self::Semicolon),
+            '`' | '~' => Ok(Self::Backquote),
+            '0' | ')' => Ok(Self::Digit0),
+            '1' | '!' => Ok(Self::Digit1),
+            '2' | '@' => Ok(Self::Digit2),
+            '3' | '#' => Ok(Self::Digit3),
+            '4' | '$' => Ok(Self::Digit4),
+            '5' | '%' => Ok(Self::Digit5),
+            '6' | '^' => Ok(Self::Digit6),
+            '7' | '&' => Ok(Self::Digit7),
+            '8' | '*' => Ok(Self::Digit8),
+            '9' | '(' => Ok(Self::Digit9),
+            'a' | 'A' => Ok(Self::KeyA),
+            'b' | 'B' => Ok(Self::KeyB),
+            'c' | 'C' => Ok(Self::KeyC),
+            'd' | 'D' => Ok(Self::KeyD),
+            'e' | 'E' => Ok(Self::KeyE),
+            'f' | 'F' => Ok(Self::KeyF),
+            'g' | 'G' => Ok(Self::KeyG),
+            'h' | 'H' => Ok(Self::KeyH),
+            'i' | 'I' => Ok(Self::KeyI),
+            'j' | 'J' => Ok(Self::KeyJ),
+            'k' | 'K' => Ok(Self::KeyK),
+            'l' | 'L' => Ok(Self::KeyL),
+            'm' | 'M' => Ok(Self::KeyM),
+            'n' | 'N' => Ok(Self::KeyN),
+            'o' | 'O' => Ok(Self::KeyO),
+            'p' | 'P' => Ok(Self::KeyP),
+            'q' | 'Q' => Ok(Self::KeyQ),
+            'r' | 'R' => Ok(Self::KeyR),
+            's' | 'S' => Ok(Self::KeyS),
+            't' | 'T' => Ok(Self::KeyT),
+            'u' | 'U' => Ok(Self::KeyU),
+            'v' | 'V' => Ok(Self::KeyV),
+            'w' | 'W' => Ok(Self::KeyW),
+            'x' | 'X' => Ok(Self::KeyX),
+            'y' | 'Y' => Ok(Self::KeyY),
+            'z' | 'Z' => Ok(Self::KeyZ),
+            '[' | '{' => Ok(Self::BracketLeft),
+            ']' | '}' => Ok(Self::BracketRight),
+            _ => Err("unsupported"),
+        }
+    }
+}
+
 /// A fixed set of cursor icons that available on most OSes.
 #[derive(
     Debug,
@@ -1159,6 +1323,7 @@ pub enum KeyCode {
     EnumString,
     VariantNames,
 )]
+#[reflect(type_uuid = "da7f3a5f-9d26-460a-8e46-38da25f8a8db")]
 pub enum CursorIcon {
     /// The platform-dependent default cursor. Often rendered as arrow.
     #[default]
@@ -1190,7 +1355,7 @@ pub enum CursorIcon {
     Cell,
 
     /// A simple crosshair (e.g., short line segments resembling a "+" sign).
-    /// Often used to indicate a two dimensional bitmap selection mode.
+    /// Often used to indicate a two-dimensional bitmap selection mode.
     Crosshair,
 
     /// Indicates text that may be selected. Often rendered as an I-beam.
@@ -1287,5 +1452,3 @@ pub enum CursorIcon {
     /// magnifying glass with a "-" in the center of the glass.
     ZoomOut,
 }
-
-uuid_provider!(CursorIcon = "da7f3a5f-9d26-460a-8e46-38da25f8a8db");

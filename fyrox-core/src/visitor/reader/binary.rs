@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::visitor::VisitorVersion;
 use crate::{
     pool::{Handle, Pool},
     visitor::{
@@ -246,9 +245,7 @@ impl Reader for BinaryReader<'_> {
         let mut magic: [u8; 4] = Default::default();
         src.read_exact(&mut magic)?;
 
-        let version = if magic.eq(Visitor::MAGIC_BINARY_OLD.as_bytes()) {
-            VisitorVersion::Legacy as u32
-        } else if magic.eq(Visitor::MAGIC_BINARY_CURRENT.as_bytes()) {
+        let version = if magic.eq(Visitor::MAGIC_BINARY_CURRENT.as_bytes()) {
             src.read_u32::<LittleEndian>()?
         } else {
             return Err(VisitError::NotSupportedFormat);
@@ -257,6 +254,7 @@ impl Reader for BinaryReader<'_> {
         let mut visitor = Visitor {
             nodes: Pool::new(),
             unique_id_counter: 1,
+            type_name_map: Default::default(),
             rc_map: Default::default(),
             arc_map: Default::default(),
             reading: true,

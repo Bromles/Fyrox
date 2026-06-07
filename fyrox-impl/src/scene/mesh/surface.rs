@@ -37,13 +37,10 @@ use crate::{
         pool::{ErasedHandle, Handle},
         reflect::prelude::*,
         sparse::AtomicIndex,
-        type_traits::prelude::*,
-        uuid_provider,
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
-        Uuid,
     },
-    material::{self, Material, MaterialResource, MaterialResourceExtension},
+    material::{Material, MaterialResource, MaterialResourceExtension},
     resource::texture::{TextureKind, TexturePixelKind, TextureResource, TextureResourceExtension},
     scene::{
         mesh::{
@@ -61,16 +58,16 @@ use bytemuck::{Pod, Zeroable};
 use fxhash::{FxHashMap, FxHasher};
 use fyrox_resource::manager::BuiltInResource;
 use half::f16;
-use lazy_static::lazy_static;
 use std::{
     error::Error,
     hash::Hasher,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 /// A target shape for blending.
 #[derive(Debug, Clone, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "fea08418-58fe-4fde-991b-36be235432bd")]
 pub struct BlendShape {
     /// Weight of the shape.
     #[reflect(min_value = 0.0, max_value = 100.0, step = 1.0)]
@@ -79,8 +76,6 @@ pub struct BlendShape {
     #[reflect(read_only)]
     pub name: String,
 }
-
-uuid_provider!(BlendShape = "fea08418-58fe-4fde-991b-36be235432bd");
 
 impl Default for BlendShape {
     fn default() -> Self {
@@ -93,6 +88,7 @@ impl Default for BlendShape {
 
 /// A container for multiple blend shapes/
 #[derive(Reflect, Debug, Clone, Default)]
+#[reflect(type_uuid = "bd60343b-4a27-42aa-959e-b0d1bc8682db")]
 pub struct BlendShapesContainer {
     /// A list of blend shapes.
     pub blend_shapes: Vec<BlendShape>,
@@ -224,8 +220,8 @@ impl BlendShapesContainer {
 /// Data source of a surface. Each surface can share same data source, this is used
 /// in instancing technique to render multiple instances of same model at different
 /// places.
-#[derive(Debug, Clone, Default, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "8a23a414-e66d-4e12-9628-92c6ab49c2f0")]
+#[derive(Debug, Clone, Default, Reflect)]
+#[reflect(type_uuid = "8a23a414-e66d-4e12-9628-92c6ab49c2f0")]
 pub struct SurfaceData {
     /// Current vertex buffer.
     pub vertex_buffer: VertexBuffer,
@@ -238,12 +234,10 @@ pub struct SurfaceData {
 }
 
 impl ResourceData for SurfaceData {
-    fn type_uuid(&self) -> Uuid {
-        <SurfaceData as fyrox_core::TypeUuidProvider>::type_uuid()
-    }
-
-    fn save(&mut self, _path: &Path) -> Result<(), Box<dyn Error>> {
-        // TODO: Add saving.
+    fn save(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
+        let mut visitor = Visitor::new();
+        self.visit("SurfaceData", &mut visitor)?;
+        visitor.save_ascii_to_file(path)?;
         Ok(())
     }
 
@@ -336,7 +330,7 @@ impl SurfaceData {
             if v1 == v2 || v1 == v3 || v2 == v3 {
                 Log::warn(format!(
                     "Degenerated triangle found when calculating tangents. Lighting may be \
-                    incorrect! Triangle indices: {triangle:?}. Triangle vertices: {v1} {v2} {v3}",
+                    incorrect! Triangle indices: {triangle:?}. Triangle vertices: {v1:?} {v2:?} {v3:?}",
                 ));
             }
 
@@ -737,8 +731,8 @@ impl SurfaceData {
                 let c = ((num_segments + 1) * (j - 1) + i) as u32;
                 let d = ((num_segments + 1) * j + i) as u32;
 
-                triangles.push(TriangleDefinition([a, b, d]));
-                triangles.push(TriangleDefinition([b, c, d]));
+                triangles.push(TriangleDefinition([d, b, a]));
+                triangles.push(TriangleDefinition([d, c, b]));
             }
         }
 
@@ -1162,7 +1156,11 @@ pub trait SurfaceResourceExtension {
 
 impl SurfaceResourceExtension for SurfaceResource {
     fn deep_clone(&self) -> Self {
-        Self::new_ok(Uuid::new_v4(), self.kind(), self.data_ref().clone())
+        Self::new_ok(
+            Uuid::new_v4(),
+            ResourceKind::Embedded,
+            self.data_ref().clone(),
+        )
     }
 }
 
@@ -1246,7 +1244,8 @@ impl SurfaceResourceExtension for SurfaceResource {
 ///
 /// This code snippet creates a cone surface instance, check the docs for [`SurfaceData`] for more info about built-in
 /// methods.
-#[derive(Debug, Reflect, PartialEq)]
+#[derive(Debug, Reflect, Visit, PartialEq)]
+#[reflect(type_uuid = "485caf12-4e7d-4b1a-b6bd-0681fd92f789")]
 pub struct Surface {
     pub(crate) data: InheritableVariable<SurfaceResource>,
 
@@ -1255,11 +1254,9 @@ pub struct Surface {
     /// Array of handles to scene nodes which are used as bones.
     pub bones: InheritableVariable<Vec<Handle<Node>>>,
 
-    #[reflect(
-        description = "If true, then the current material will become a unique instance when cloning the surface.\
-        Could be useful if you need to have unique materials per on every instance. Keep in mind that this option \
-        might affect performance!"
-    )]
+    /// If true, then the current material will become a unique instance when cloning the surface.
+    /// Could be useful if you need to have unique materials per on every instance. Keep in mind that
+    /// this option might affect performance!
     unique_material: InheritableVariable<bool>,
 
     // Temporal array for FBX conversion needs, it holds skinning data (weight + bone handle)
@@ -1269,10 +1266,9 @@ pub struct Surface {
     // like so: iterate over all vertices and weight data and calculate index of node handle that
     // associated with vertex in `bones` array and store it as bone index in vertex.
     #[reflect(hidden)]
+    #[visit(skip)]
     pub(crate) vertex_weights: Vec<VertexWeightSet>,
 }
-
-uuid_provider!(Surface = "485caf12-4e7d-4b1a-b6bd-0681fd92f789");
 
 impl Clone for Surface {
     fn clone(&self) -> Self {
@@ -1289,29 +1285,6 @@ impl Clone for Surface {
             unique_material: self.unique_material.clone(),
             vertex_weights: self.vertex_weights.clone(),
         }
-    }
-}
-
-impl Visit for Surface {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        let mut region = visitor.enter_region(name)?;
-
-        // Backward compatibility.
-        if region.is_reading() {
-            if let Some(material) = material::visit_old_material(&mut region) {
-                self.material = material.into();
-            } else {
-                self.material.visit("Material", &mut region)?;
-            }
-        } else {
-            self.material.visit("Material", &mut region)?;
-        }
-
-        self.data.visit("Data", &mut region)?;
-        self.bones.visit("Bones", &mut region)?;
-        let _ = self.unique_material.visit("UniqueMaterial", &mut region); // Backward compatibility.
-
-        Ok(())
     }
 }
 
@@ -1465,8 +1438,12 @@ impl ResourceLoader for SurfaceDataLoader {
         &["surface"]
     }
 
+    fn is_native_extension(&self, ext: &str) -> bool {
+        fyrox_core::cmp_strings_case_insensitive(ext, "surface")
+    }
+
     fn data_type_uuid(&self) -> Uuid {
-        <SurfaceData as TypeUuidProvider>::type_uuid()
+        <SurfaceData as Reflect>::type_info().type_uuid
     }
 
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
@@ -1484,64 +1461,74 @@ impl ResourceLoader for SurfaceDataLoader {
     }
 }
 
-lazy_static! {
-    /// Cube surface resource.
-    pub static ref CUBE: BuiltInResource<SurfaceData> = BuiltInResource::new_no_source(
-        "__CubeSurface",
+/// Cube surface resource.
+pub static CUBE: LazyLock<BuiltInResource<SurfaceData>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Cube Surface",
         SurfaceResource::new_ok(
             uuid!("d3a4604a-e1c6-430b-b524-8d3213723952"),
-            ResourceKind::Embedded,
+            ResourceKind::External,
             SurfaceData::make_cube(Matrix4::identity()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Quad surface resource.
-    pub static ref QUAD: BuiltInResource<SurfaceData> = BuiltInResource::new_no_source(
-        "__QuadSurface",
+/// Quad surface resource.
+pub static QUAD: LazyLock<BuiltInResource<SurfaceData>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Quad Surface",
         SurfaceResource::new_ok(
             uuid!("a124317f-640b-4c1b-9fdc-af62f745eeba"),
-            ResourceKind::Embedded,
+            ResourceKind::External,
             SurfaceData::make_quad(&Matrix4::identity()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Cylinder surface resource.
-    pub static ref CYLINDER: BuiltInResource<SurfaceData> = BuiltInResource::new_no_source(
-        "__CylinderSurface",
+/// Cylinder surface resource.
+pub static CYLINDER: LazyLock<BuiltInResource<SurfaceData>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Cylinder Surface",
         SurfaceResource::new_ok(
             uuid!("16300ec8-4446-41a7-8ad6-9b45428d0b1b"),
-            ResourceKind::Embedded,
+            ResourceKind::External,
             SurfaceData::make_cylinder(32, 1.0, 1.0, true, &Matrix4::identity()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Sphere surface resource.
-    pub static ref SPHERE: BuiltInResource<SurfaceData> = BuiltInResource::new_no_source(
-        "__SphereSurface",
+/// Sphere surface resource.
+pub static SPHERE: LazyLock<BuiltInResource<SurfaceData>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Sphere Surface",
         SurfaceResource::new_ok(
             uuid!("ff1811ba-b9ad-4c37-89b8-503f79aaa4bd"),
-            ResourceKind::Embedded,
+            ResourceKind::External,
             SurfaceData::make_sphere(32, 32, 1.0, &Matrix4::identity()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Cone surface resource.
-    pub static ref CONE: BuiltInResource<SurfaceData> = BuiltInResource::new_no_source(
-        "__ConeSurface",
+/// Cone surface resource.
+pub static CONE: LazyLock<BuiltInResource<SurfaceData>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Cone Surface",
         SurfaceResource::new_ok(
             uuid!("e4e79405-39c5-4fe4-ba3e-c961f3d7379e"),
-            ResourceKind::Embedded,
+            ResourceKind::External,
             SurfaceData::make_cone(32, 1.0, 1.0, &Matrix4::identity()),
-        )
-    );
+        ),
+    )
+});
 
-    /// Torus surface resource.
-    pub static ref TORUS: BuiltInResource<SurfaceData> = BuiltInResource::new_no_source(
-        "__TorusSurface",
+/// Torus surface resource.
+pub static TORUS: LazyLock<BuiltInResource<SurfaceData>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Torus Surface",
         SurfaceResource::new_ok(
             uuid!("d2bb5455-c72e-475d-90da-e3a7bd5b7d07"),
-            ResourceKind::Embedded,
-            SurfaceData::make_torus(1.0, 0.25,32, 32,  &Matrix4::identity()),
-        )
-    );
-}
+            ResourceKind::External,
+            SurfaceData::make_torus(1.0, 0.25, 32, 32, &Matrix4::identity()),
+        ),
+    )
+});

@@ -21,6 +21,7 @@
 //! Possible errors that may occur during serialization/deserialization.
 
 use crate::io::FileError;
+use crate::visitor::Visitor;
 use base64::DecodeError;
 use std::num::{ParseFloatError, ParseIntError};
 use std::{
@@ -32,6 +33,9 @@ use std::{
 /// Errors that may occur while reading or writing [`crate::visitor::Visitor`].
 #[derive(Debug)]
 pub enum VisitError {
+    /// An error that occured for multiple reasons, when there are multiple potential ways
+    /// to visit a node, and all of them lead to errors.
+    Multiple(Vec<VisitError>),
     /// An [std::io::Error] occured while reading or writing a file with Visitor data.
     Io(std::io::Error),
     /// When a field is encoded as bytes, the field data is prefixed by an identifying byte
@@ -62,8 +66,7 @@ pub enum VisitError {
     RegionDoesNotExist(String),
     /// The Visitor tried to leave is current node, but somehow it had no current node. This should never happen.
     NoActiveNode,
-    /// The [`crate::Visitor::MAGIC_BINARY_CURRENT`], [`crate::Visitor::MAGIC_ASCII_CURRENT`],
-    /// [`crate::Visitor::MAGIC_BINARY_OLD`] or [`crate::Visitor::MAGIC_ASCII_OLD`]
+    /// The [`crate::Visitor::MAGIC_BINARY_CURRENT`], [`crate::Visitor::MAGIC_ASCII_CURRENT`].
     /// bytes were missing from the beginning of encoded Visitor data.
     NotSupportedFormat,
     /// Some sequence of bytes was not in UTF8 format.
@@ -72,7 +75,12 @@ pub enum VisitError {
     /// to a single shared value. This causes the visitor to store the data once and then later references
     /// to the same value point back to its first occurrence. This error occurs if one of these references
     /// points to a value of the wrong type.
-    TypeMismatch,
+    TypeMismatch {
+        /// The type that was visiting when the error occurred.
+        expected: &'static str,
+        /// The type that was stored in the `Rc` or `Arc`.
+        actual: &'static str,
+    },
     /// Attempting to visit a mutably borrowed RefCell.
     RefCellAlreadyMutableBorrowed,
     /// A plain-text error message that could indicate almost anything.
@@ -92,16 +100,51 @@ pub enum VisitError {
     DecodeError(DecodeError),
     /// An error occurred when trying to parse uuid from a string.
     UuidError(uuid::Error),
+    /// Arbitrary error.
+    Any(Box<dyn Error + Send + Sync>),
 }
 
 impl Error for VisitError {}
 
+impl VisitError {
+    /// Create a [`VisitError::FieldDoesNotExist`] containing the given field name and the
+    /// breadcrumbs of the current visitor node.
+    pub fn field_does_not_exist(name: &str, visitor: &Visitor) -> Self {
+        Self::FieldDoesNotExist(visitor.breadcrumbs() + " > " + name)
+    }
+    /// Create an error from two errors.
+    pub fn multiple(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Multiple(mut a), Self::Multiple(mut b)) => {
+                a.append(&mut b);
+                Self::Multiple(a)
+            }
+            (Self::Multiple(mut a), b) => {
+                a.push(b);
+                Self::Multiple(a)
+            }
+            (a, Self::Multiple(mut b)) => {
+                b.push(a);
+                Self::Multiple(b)
+            }
+            (a, b) => Self::Multiple(vec![a, b]),
+        }
+    }
+}
+
 impl Display for VisitError {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         match self {
+            Self::Multiple(errs) => {
+                write!(f, "multiple errors:[")?;
+                for err in errs {
+                    write!(f, "{err};")?;
+                }
+                write!(f, "]")
+            }
             Self::Io(io) => write!(f, "io error: {io}"),
             Self::UnknownFieldType(type_index) => write!(f, "unknown field type {type_index}"),
-            Self::FieldDoesNotExist(name) => write!(f, "field does not exists {name}"),
+            Self::FieldDoesNotExist(name) => write!(f, "field does not exist: {name}"),
             Self::FieldAlreadyExists(name) => write!(f, "field already exists {name}"),
             Self::RegionAlreadyExists(name) => write!(f, "region already exists {name}"),
             Self::InvalidCurrentNode => write!(f, "invalid current node"),
@@ -113,7 +156,9 @@ impl Display for VisitError {
             Self::NoActiveNode => write!(f, "no active node"),
             Self::NotSupportedFormat => write!(f, "not supported format"),
             Self::InvalidName => write!(f, "invalid name"),
-            Self::TypeMismatch => write!(f, "type mismatch"),
+            Self::TypeMismatch { expected, actual } => {
+                write!(f, "type mismatch. expected: {expected}, actual: {actual}")
+            }
             Self::RefCellAlreadyMutableBorrowed => write!(f, "ref cell already mutable borrowed"),
             Self::User(msg) => write!(f, "user defined error: {msg}"),
             Self::UnexpectedRcNullIndex => write!(f, "unexpected rc null index"),
@@ -123,6 +168,9 @@ impl Display for VisitError {
             Self::ParseFloatError(e) => write!(f, "unable to parse float: {e:?}"),
             Self::DecodeError(e) => write!(f, "base64 decoding error: {e:?}"),
             Self::UuidError(e) => write!(f, "uuid error: {e:?}"),
+            Self::Any(e) => {
+                write!(f, "{e}")
+            }
         }
     }
 }
@@ -190,5 +238,11 @@ impl From<DecodeError> for VisitError {
 impl From<uuid::Error> for VisitError {
     fn from(value: uuid::Error) -> Self {
         Self::UuidError(value)
+    }
+}
+
+impl From<Box<dyn Error + Send + Sync>> for VisitError {
+    fn from(value: Box<dyn Error + Send + Sync>) -> Self {
+        Self::Any(value)
     }
 }

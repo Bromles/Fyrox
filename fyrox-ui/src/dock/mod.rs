@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Docking manager allows you to dock windows and hold them in-place.
+//! The docking manager allows you to dock windows and hold them in-place.
 //!
 //! # Notes
 //!
@@ -26,58 +26,148 @@
 //! for windows.
 
 use crate::{
-    core::{
-        log::Log, pool::Handle, reflect::prelude::*, type_traits::prelude::*, uuid_provider,
-        visitor::prelude::*,
-    },
-    define_constructor,
+    core::{log::Log, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     dock::config::{DockingManagerLayoutDescriptor, FloatingWindowDescriptor, TileDescriptor},
-    message::{MessageDirection, UiMessage},
+    message::UiMessage,
     widget::{Widget, WidgetBuilder, WidgetMessage},
     window::WindowMessage,
     BuildContext, Control, UiNode, UserInterface,
 };
 
+use fyrox_core::pool::HandlesArrayExtension;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::{BaseSceneGraph, SceneGraph};
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut},
-};
+use fyrox_graph::SceneGraph;
+use std::cell::RefCell;
 
 pub mod config;
 mod tile;
 
+use crate::message::MessageData;
+use crate::window::{Window, WindowAlignment};
 pub use tile::*;
 
 /// Supported docking manager-specific messages.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DockingManagerMessage {
     Layout(DockingManagerLayoutDescriptor),
-    AddFloatingWindow(Handle<UiNode>),
-    RemoveFloatingWindow(Handle<UiNode>),
+    AddFloatingWindow(Handle<Window>),
+    RemoveFloatingWindow(Handle<Window>),
 }
+impl MessageData for DockingManagerMessage {}
 
-impl DockingManagerMessage {
-    define_constructor!(
-        /// Creates a new [Self::Layout] message.
-        DockingManagerMessage:Layout => fn layout(DockingManagerLayoutDescriptor), layout: false
-    );
-    define_constructor!(
-        /// Creates a new [Self::AddFloatingWindow] message.
-        DockingManagerMessage:AddFloatingWindow => fn add_floating_window(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates a new [Self::RemoveFloatingWindow] message.
-        DockingManagerMessage:RemoveFloatingWindow => fn remove_floating_window(Handle<UiNode>), layout: false
-    );
-}
-
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+/// Docking manager is a special container widget, that holds a bunch of children widgets in-place
+/// using [`Tile`]s and a bunch of floating windows. Any window can be undocked and become a floating
+/// window and vice versa. Docking manager is typically used to "pack" multiple windows into a
+/// rectangular. The most notable use case is IDEs where you can drag,
+/// dock, undock, stack windows.
+///
+/// ## Tiles
+///
+/// The main element of the docking manager is the [`Tile`] widget, which can be in two major states:
+///
+/// 1) It can hold a window
+/// 2) It can be split into two more sub-tiles (either vertically or horizontally), which can in
+/// their turn either contain some other window or a sub-tile.
+///
+/// This structure essentially forms a tree of pretty much unlimited depth. This approach basically
+/// allows you to "pack" multiple windows in a rectangular area with no free space between the tiles.
+/// Split tiles have a special parameter called splitter, which is simply a fraction that shows how
+/// much space each half takes. In the case of a horizontal tile, if the splitter is 0.25, then the left
+/// tile will take 25% of the width of the tile and the right tile will take the rest 75% of the
+/// width.
+///
+/// ## Floating Windows
+///
+/// The docking manager can control an unlimited number of floating windows, floating windows can be
+/// docked and vice versa. When a window is undocked, it is automatically placed into a list of floating
+/// windows. Only the windows from this list can be docked.
+///
+/// ## Example
+///
+/// The following example shows how to create a docking manager with one root tile split vertically
+/// into two smaller tiles where each tile holds a separate window.
+///
+/// ```rust
+/// # use fyrox_ui::{
+/// #     core::pool::Handle,
+/// #     dock::{DockingManagerBuilder, TileBuilder, TileContent},
+/// #     widget::WidgetBuilder,
+/// #     window::{WindowBuilder, WindowTitle},
+/// #     BuildContext, UiNode,
+/// # };
+/// # use fyrox_ui::dock::DockingManager;
+/// fn create_docking_manager(ctx: &mut BuildContext) -> Handle<DockingManager> {
+///     let top_window = WindowBuilder::new(WidgetBuilder::new())
+///         .with_title(WindowTitle::text("Top Window"))
+///         .build(ctx);
+///
+///     let bottom_window = WindowBuilder::new(WidgetBuilder::new())
+///         .with_title(WindowTitle::text("Bottom Window"))
+///         .build(ctx);
+///
+///     let root_tile = TileBuilder::new(WidgetBuilder::new())
+///         .with_content(TileContent::VerticalTiles {
+///             splitter: 0.5,
+///             tiles: [
+///                 TileBuilder::new(WidgetBuilder::new())
+///                     // Note that you have to put the window into a separate tile, otherwise
+///                     // you'll get unexpected results.
+///                     .with_content(TileContent::Window(top_window))
+///                     .build(ctx),
+///                 TileBuilder::new(WidgetBuilder::new())
+///                     .with_content(TileContent::Window(bottom_window))
+///                     .build(ctx),
+///             ],
+///         })
+///         .build(ctx);
+///
+///     DockingManagerBuilder::new(
+///         WidgetBuilder::new()
+///             .with_child(root_tile)
+///             .with_width(500.0)
+///             .with_height(500.0),
+///     )
+///     .build(ctx)
+/// }
+/// ```
+///
+/// ## Layout
+///
+/// The current docking manager layout can be saved and restored later if needed. This is a very useful
+/// option for customizable user interfaces, where users can adjust the interface as they like,
+/// save it and then load on the next session. Use the following code to save the layout:
+///
+/// ```rust
+/// # use fyrox_ui::{
+/// #     dock::config::DockingManagerLayoutDescriptor, dock::DockingManager, UiNode, UserInterface,
+/// # };
+/// # use fyrox_core::pool::Handle;
+/// # use fyrox_graph::SceneGraph;
+/// #
+/// fn save_layout(
+///     ui: &UserInterface,
+///     docking_manager_handle: Handle<UiNode>,
+/// ) -> Option<DockingManagerLayoutDescriptor> {
+///     ui.try_get_of_type::<DockingManager>(docking_manager_handle)
+///         .as_ref().ok()
+///         .map(|docking_manager| docking_manager.layout(ui))
+/// }
+/// ```
+///
+/// The layout can be restored by sending a [`DockingManagerMessage::Layout`] message to the docking
+/// manager.
+///
+/// To be able to restore the layout to its defaults, just create a desired layout from code,
+/// save the layout and use the returned layout descriptor when you need to restore the layout
+/// to its defaults.
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "b04299f7-3f6b-45f1-89a6-0dce4ad929e1"
+)]
 pub struct DockingManager {
     pub widget: Widget,
-    pub floating_windows: RefCell<Vec<Handle<UiNode>>>,
+    pub floating_windows: RefCell<Vec<Handle<Window>>>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for DockingManager {
@@ -86,6 +176,7 @@ impl ConstructorProvider<UiNode, UserInterface> for DockingManager {
             .with_variant("Docking Manager", |ui| {
                 DockingManagerBuilder::new(WidgetBuilder::new().with_name("Docking Manager"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -94,25 +185,20 @@ impl ConstructorProvider<UiNode, UserInterface> for DockingManager {
 
 crate::define_widget_deref!(DockingManager);
 
-uuid_provider!(DockingManager = "b04299f7-3f6b-45f1-89a6-0dce4ad929e1");
-
 impl Control for DockingManager {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if message.destination() == self.handle && message.direction() == MessageDirection::ToWidget
-        {
-            if let Some(msg) = message.data() {
-                match msg {
-                    DockingManagerMessage::Layout(layout_descriptor) => {
-                        self.set_layout(layout_descriptor, ui);
-                    }
-                    DockingManagerMessage::AddFloatingWindow(window) => {
-                        self.add_floating_window(*window)
-                    }
-                    DockingManagerMessage::RemoveFloatingWindow(window) => {
-                        self.remove_floating_window(*window)
-                    }
+        if let Some(msg) = message.data_for(self.handle) {
+            match msg {
+                DockingManagerMessage::Layout(layout_descriptor) => {
+                    self.set_layout(layout_descriptor, ui);
+                }
+                DockingManagerMessage::AddFloatingWindow(window) => {
+                    self.add_floating_window(*window)
+                }
+                DockingManagerMessage::RemoveFloatingWindow(window) => {
+                    self.remove_floating_window(*window)
                 }
             }
         }
@@ -124,7 +210,7 @@ impl Control for DockingManager {
                 .floating_windows
                 .borrow()
                 .iter()
-                .position(|&i| i == message.destination());
+                .position(|&i| message.destination() == i);
             if let Some(pos) = pos {
                 self.floating_windows.borrow_mut().remove(pos);
             }
@@ -140,7 +226,7 @@ impl DockingManager {
                 .borrow()
                 .iter()
                 .filter_map(|h| {
-                    ui.try_get(*h).map(|w| FloatingWindowDescriptor {
+                    ui.try_get(*h).ok().map(|w| FloatingWindowDescriptor {
                         name: w.name.clone(),
                         position: w.actual_local_position(),
                         size: w.actual_local_size(),
@@ -151,7 +237,7 @@ impl DockingManager {
             root_tile_descriptor: self
                 .children()
                 .first()
-                .map(|c| TileDescriptor::from_tile_handle(*c, ui)),
+                .map(|c| TileDescriptor::from_tile_handle(c.to_variant(), ui)),
         }
     }
 
@@ -164,10 +250,7 @@ impl DockingManager {
             let mut windows = Vec::new();
             let mut stack = vec![root_tile_handle];
             while let Some(tile_handle) = stack.pop() {
-                if let Some(tile) = ui
-                    .try_get(tile_handle)
-                    .and_then(|n| n.query_component::<Tile>())
-                {
+                if let Ok(tile) = ui.try_get_of_type::<Tile>(tile_handle) {
                     match tile.content {
                         TileContent::Window(window) => {
                             if ui.is_valid_handle(window) {
@@ -189,7 +272,7 @@ impl DockingManager {
                         }
                         TileContent::VerticalTiles { tiles, .. }
                         | TileContent::HorizontalTiles { tiles, .. } => {
-                            stack.extend_from_slice(&tiles);
+                            stack.extend_from_slice(&tiles.to_base());
                         }
                         TileContent::Empty => (),
                     }
@@ -197,19 +280,12 @@ impl DockingManager {
             }
 
             // Destroy the root tile with all descendant tiles.
-            ui.send_message(WidgetMessage::remove(
-                root_tile_handle,
-                MessageDirection::ToWidget,
-            ));
+            ui.send(root_tile_handle, WidgetMessage::Remove);
 
             // Re-create the tiles according to the layout and attach it to the docking manager.
             if let Some(root_tile_descriptor) = layout_descriptor.root_tile_descriptor.as_ref() {
                 let root_tile = root_tile_descriptor.create_tile(ui, &windows);
-                ui.send_message(WidgetMessage::link(
-                    root_tile,
-                    MessageDirection::ToWidget,
-                    self.handle,
-                ));
+                ui.send(root_tile, WidgetMessage::LinkWith(self.handle));
             }
 
             // Restore floating windows.
@@ -223,59 +299,58 @@ impl DockingManager {
                     );
                 }
 
-                let floating_window =
-                    ui.find_handle(ui.root(), &mut |n| n.name == floating_window_desc.name);
+                let floating_window = ui
+                    .find_handle(ui.root(), &mut |n| {
+                        n.is_or_has_field::<Window>() && n.name == floating_window_desc.name
+                    })
+                    .to_variant();
                 if floating_window.is_some() {
                     self.floating_windows.borrow_mut().push(floating_window);
 
                     if floating_window_desc.is_open {
-                        ui.send_message(WindowMessage::open(
+                        ui.send(
                             floating_window,
-                            MessageDirection::ToWidget,
-                            false,
-                            false,
-                        ));
+                            WindowMessage::Open {
+                                alignment: WindowAlignment::None,
+                                modal: false,
+                                focus_content: false,
+                            },
+                        );
                     } else {
-                        ui.send_message(WindowMessage::close(
-                            floating_window,
-                            MessageDirection::ToWidget,
-                        ));
+                        ui.send(floating_window, WindowMessage::Close);
                     }
 
-                    ui.send_message(WidgetMessage::desired_position(
+                    ui.send(
                         floating_window,
-                        MessageDirection::ToWidget,
-                        floating_window_desc.position,
-                    ));
+                        WidgetMessage::DesiredPosition(floating_window_desc.position),
+                    );
 
                     if floating_window_desc.size.x != 0.0 {
-                        ui.send_message(WidgetMessage::width(
+                        ui.send(
                             floating_window,
-                            MessageDirection::ToWidget,
-                            floating_window_desc.size.x,
-                        ));
+                            WidgetMessage::Width(floating_window_desc.size.x),
+                        );
                     }
 
                     if floating_window_desc.size.y != 0.0 {
-                        ui.send_message(WidgetMessage::height(
+                        ui.send(
                             floating_window,
-                            MessageDirection::ToWidget,
-                            floating_window_desc.size.y,
-                        ));
+                            WidgetMessage::Height(floating_window_desc.size.y),
+                        );
                     }
                 }
             }
         }
     }
 
-    fn add_floating_window(&mut self, window: Handle<UiNode>) {
+    fn add_floating_window(&mut self, window: Handle<Window>) {
         let mut windows = self.floating_windows.borrow_mut();
         if !windows.contains(&window) {
             windows.push(window);
         }
     }
 
-    fn remove_floating_window(&mut self, window: Handle<UiNode>) {
+    fn remove_floating_window(&mut self, window: Handle<Window>) {
         let mut windows = self.floating_windows.borrow_mut();
         if let Some(position) = windows.iter().position(|&w| w == window) {
             windows.remove(position);
@@ -285,7 +360,7 @@ impl DockingManager {
 
 pub struct DockingManagerBuilder {
     widget_builder: WidgetBuilder,
-    floating_windows: Vec<Handle<UiNode>>,
+    floating_windows: Vec<Handle<Window>>,
 }
 
 impl DockingManagerBuilder {
@@ -296,18 +371,18 @@ impl DockingManagerBuilder {
         }
     }
 
-    pub fn with_floating_windows(mut self, windows: Vec<Handle<UiNode>>) -> Self {
+    pub fn with_floating_windows(mut self, windows: Vec<Handle<Window>>) -> Self {
         self.floating_windows = windows;
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<DockingManager> {
         let docking_manager = DockingManager {
             widget: self.widget_builder.with_preview_messages(true).build(ctx),
             floating_windows: RefCell::new(self.floating_windows),
         };
 
-        ctx.add_node(UiNode::new(docking_manager))
+        ctx.add(docking_manager)
     }
 }
 

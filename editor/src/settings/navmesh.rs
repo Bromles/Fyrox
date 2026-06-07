@@ -22,13 +22,13 @@ use crate::fyrox::core::reflect::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Reflect)]
+#[reflect(type_uuid = "e2432bfe-3204-48e3-9cab-607443246e10")]
 pub struct NavmeshSettings {
-    #[reflect(
-        description = "Show all navigational meshes in scene. With this function turned off, only currently edited navmesh will be shown."
-    )]
+    /// Show all navigational meshes in scene. With this function turned off, only currently edited
+    /// navmesh will be shown.
     pub draw_all: bool,
 
-    #[reflect(description = "Radius of a nav mesh vertex.")]
+    /// Radius of a nav mesh vertex.
     pub vertex_radius: f32,
 }
 

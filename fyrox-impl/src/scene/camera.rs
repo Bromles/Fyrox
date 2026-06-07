@@ -28,13 +28,11 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, frustum::Frustum, ray::Ray, Rect},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
-        uuid_provider,
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
     },
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     resource::texture::{
         TextureKind, TexturePixelKind, TextureResource, TextureResourceExtension, TextureWrapMode,
     },
@@ -58,6 +56,7 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
 /// with increasing distance. This the projection type "used" by human eyes, photographic lens and
 /// it looks most realistic.
 #[derive(Reflect, Clone, Debug, PartialEq, Visit, Serialize, Deserialize)]
+#[reflect(type_uuid = "7a9662f3-28f1-4353-ba57-d610cc04834b")]
 pub struct PerspectiveProjection {
     /// Vertical angle at the top of viewing frustum, in radians. Larger values will increase field
     /// of view and create fish-eye effect, smaller values could be used to create "binocular" effect
@@ -110,6 +109,7 @@ impl PerspectiveProjection {
 /// Parallel projection. Object's size won't be affected by distance from the viewer, it can be
 /// used for 2D games.
 #[derive(Reflect, Clone, Debug, PartialEq, Visit, Serialize, Deserialize)]
+#[reflect(type_uuid = "dcfe9e8b-f6a7-42ce-a2be-5d389175d555")]
 pub struct OrthographicProjection {
     /// Location of the near clipping plane. If it is larger than [`Self::z_far`] then it will be
     /// treated like far clipping plane.
@@ -192,14 +192,13 @@ impl OrthographicProjection {
     Serialize,
     Deserialize,
 )]
+#[reflect(type_uuid = "0eb5bec0-fc4e-4945-99b6-e6c5392ad971")]
 pub enum Projection {
     /// See [`PerspectiveProjection`] docs.
     Perspective(PerspectiveProjection),
     /// See [`OrthographicProjection`] docs.
     Orthographic(OrthographicProjection),
 }
-
-uuid_provider!(Projection = "0eb5bec0-fc4e-4945-99b6-e6c5392ad971");
 
 impl Projection {
     /// Sets the new value for the near clipping plane.
@@ -290,39 +289,42 @@ impl Default for Projection {
 
 /// Exposure is a parameter that describes how many light should be collected for one
 /// frame. The higher the value, the more brighter the final frame will be and vice versa.
-#[derive(Visit, Copy, Clone, PartialEq, Debug, Reflect, AsRefStr, EnumString, VariantNames)]
+#[derive(
+    Visit,
+    Copy,
+    Clone,
+    PartialEq,
+    Debug,
+    Reflect,
+    AsRefStr,
+    EnumString,
+    VariantNames,
+    Serialize,
+    Deserialize,
+)]
+#[reflect(type_uuid = "0e35ee3d-8baa-4b0c-b3dd-6c31a08c121e")]
 pub enum Exposure {
     /// Automatic exposure based on the frame luminance. High luminance values will result
-    /// in lower exposure levels and vice versa. This is default option.
-    ///
-    /// # Equation
-    ///
-    /// `exposure = key_value / clamp(avg_luminance, min_luminance, max_luminance)`
+    /// in lower exposure levels and vice versa.
     Auto {
-        /// A key value in the formula above. Default is 0.01556.
-        #[reflect(min_value = 0.0, step = 0.1)]
-        key_value: f32,
-        /// A min luminance value in the formula above. Default is 0.00778.
+        /// A min luminance value. The lower the value, the higher exposure values will be used for
+        /// dark images. The default value is 0.035.
         #[reflect(min_value = 0.0, step = 0.1)]
         min_luminance: f32,
-        /// A max luminance value in the formula above. Default is 64.0.
+        /// A max luminance value. The higher the value, the lower exposure values will be used for
+        /// bright images. The default value is 10.0.
         #[reflect(min_value = 0.0, step = 0.1)]
         max_luminance: f32,
     },
 
-    /// Specific exposure level. To "disable" any HDR effects use [`std::f32::consts::E`] as a value.
+    /// Specific exposure level. To "disable" any HDR effects use 1.0 as a value. This is the default
+    /// option.
     Manual(f32),
 }
 
-uuid_provider!(Exposure = "0e35ee3d-8baa-4b0c-b3dd-6c31a08c121e");
-
 impl Default for Exposure {
     fn default() -> Self {
-        Self::Auto {
-            key_value: 0.01556,
-            min_luminance: 0.00778,
-            max_luminance: 64.0,
-        }
+        Self::Manual(1.0)
     }
 }
 
@@ -349,8 +351,11 @@ impl Default for Exposure {
 ///
 /// Each camera forces engine to re-render same scene one more time, which may cause almost double load
 /// of your GPU.
-#[derive(Debug, Visit, Reflect, Clone, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Visit, Reflect, Clone)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "198d3aca-433c-4ce1-bb25-3190699b757f"
+)]
 pub struct Camera {
     base: Base,
 
@@ -374,6 +379,9 @@ pub struct Camera {
 
     #[reflect(setter = "set_color_grading_enabled")]
     color_grading_enabled: InheritableVariable<bool>,
+
+    #[reflect(setter = "set_hdr_adaptation_speed")]
+    hdr_adaptation_speed: InheritableVariable<f32>,
 
     #[reflect(setter = "set_render_target")]
     #[visit(skip)]
@@ -408,12 +416,6 @@ impl Default for Camera {
     }
 }
 
-impl TypeUuidProvider for Camera {
-    fn type_uuid() -> Uuid {
-        uuid!("198d3aca-433c-4ce1-bb25-3190699b757f")
-    }
-}
-
 /// A set of camera fitting parameters for different projection modes. You should take these parameters
 /// and modify camera position and projection accordingly. In case of perspective projection all you need
 /// to do is to set new world-space position of the camera. In cae of orthographic projection, do previous
@@ -434,6 +436,15 @@ pub enum FitParameters {
         /// New vertical size for orthographic projection.
         vertical_size: f32,
     },
+}
+
+impl FitParameters {
+    fn fallback_perspective() -> Self {
+        Self::Perspective {
+            position: Default::default(),
+            distance: 1.0,
+        }
+    }
 }
 
 impl Camera {
@@ -573,6 +584,18 @@ impl Camera {
         (*self.environment).clone()
     }
 
+    /// Sets the speed of automatic adaptation for the current frame luminance. In other words,
+    /// it defines how fast the reaction to the new frame brightness will be. The lower the value,
+    /// the longer it will take to adjust the exposure for the new brightness level.
+    pub fn set_hdr_adaptation_speed(&mut self, speed: f32) -> f32 {
+        self.hdr_adaptation_speed.set_value_and_mark_modified(speed)
+    }
+
+    /// The speed of automatic adaptation for the current frame luminance.
+    pub fn hdr_adaptation_speed(&self) -> f32 {
+        *self.hdr_adaptation_speed
+    }
+
     /// Creates picking ray from given screen coordinates.
     pub fn make_ray(&self, screen_coord: Vector2<f32>, screen_size: Vector2<f32>) -> Ray {
         let viewport = self.viewport_pixels(screen_size);
@@ -600,7 +623,16 @@ impl Camera {
     /// the method returns a set of parameters that can be used as you want.
     #[inline]
     #[must_use]
-    pub fn fit(&self, aabb: &AxisAlignedBoundingBox, aspect_ratio: f32) -> FitParameters {
+    pub fn fit(
+        &self,
+        aabb: &AxisAlignedBoundingBox,
+        aspect_ratio: f32,
+        scale: f32,
+    ) -> FitParameters {
+        if aabb.is_invalid_or_degenerate() {
+            return FitParameters::fallback_perspective();
+        }
+
         let look_vector = self
             .look_vector()
             .try_normalize(f32::EPSILON)
@@ -609,8 +641,13 @@ impl Camera {
         match self.projection.deref() {
             Projection::Perspective(perspective) => {
                 let radius = aabb.half_extents().max();
-                let distance = radius / (perspective.fov * 0.5).sin();
 
+                let denominator = (perspective.fov * 0.5).sin();
+                if denominator == 0.0 {
+                    return FitParameters::fallback_perspective();
+                }
+
+                let distance = radius / denominator * scale;
                 FitParameters::Perspective {
                     position: aabb.center() - look_vector.scale(distance),
                     distance,
@@ -639,8 +676,9 @@ impl Camera {
                 }
 
                 FitParameters::Orthographic {
-                    position: aabb.center() - look_vector.scale((aabb.max - aabb.min).norm()),
-                    vertical_size: (max_y - min_y).max((max_x - min_x) * aspect_ratio),
+                    position: aabb.center()
+                        - look_vector.scale((aabb.max - aabb.min).norm() * scale),
+                    vertical_size: (max_y - min_y).max((max_x - min_x) * aspect_ratio) * scale,
                 }
             }
         }
@@ -769,7 +807,7 @@ impl NodeTrait for Camera {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn update(&mut self, context: &mut UpdateContext) {
@@ -836,7 +874,7 @@ impl Display for ColorGradingLutCreationError {
                 )
             }
             ColorGradingLutCreationError::Texture(v) => {
-                write!(f, "Texture load error: {v:?}")
+                write!(f, "Texture load error: {v}")
             }
         }
     }
@@ -849,6 +887,7 @@ impl Display for ColorGradingLutCreationError {
 ///
 /// See [more info in Unreal engine docs](https://docs.unrealengine.com/4.26/en-US/RenderingAndGraphics/PostProcessEffects/UsingLUTs/)
 #[derive(Visit, Clone, Default, PartialEq, Debug, Reflect, Eq)]
+#[reflect(type_uuid = "bca9c90a-7cde-4960-8814-c132edfc9614")]
 pub struct ColorGradingLut {
     unwrapped_lut: Option<TextureResource>,
 
@@ -856,8 +895,6 @@ pub struct ColorGradingLut {
     #[reflect(hidden)]
     lut: Option<TextureResource>,
 }
-
-uuid_provider!(ColorGradingLut = "bca9c90a-7cde-4960-8814-c132edfc9614");
 
 impl ColorGradingLut {
     /// Creates 3D look-up texture from 2D strip.
@@ -1003,6 +1040,7 @@ pub struct CameraBuilder {
     color_grading_enabled: bool,
     projection: Projection,
     render_target: Option<TextureResource>,
+    hdr_adaptation_speed: f32,
 }
 
 impl CameraBuilder {
@@ -1016,11 +1054,12 @@ impl CameraBuilder {
             z_far: 2048.0,
             viewport: Rect::new(0.0, 0.0, 1.0, 1.0),
             environment: None,
-            exposure: Exposure::Manual(std::f32::consts::E),
+            exposure: Default::default(),
             color_grading_lut: None,
             color_grading_enabled: false,
             projection: Projection::default(),
             render_target: None,
+            hdr_adaptation_speed: 0.5,
         }
     }
 
@@ -1090,6 +1129,12 @@ impl CameraBuilder {
         self
     }
 
+    /// Sets the speed of automatic adaptation for the current frame luminance.
+    pub fn with_hdr_adaptation_speed(mut self, speed: f32) -> Self {
+        self.hdr_adaptation_speed = speed;
+        self
+    }
+
     /// Creates new instance of camera.
     pub fn build_camera(self) -> Camera {
         Camera {
@@ -1105,6 +1150,7 @@ impl CameraBuilder {
             exposure: self.exposure.into(),
             color_grading_lut: self.color_grading_lut.into(),
             color_grading_enabled: self.color_grading_enabled.into(),
+            hdr_adaptation_speed: self.hdr_adaptation_speed.into(),
             render_target: self.render_target,
         }
     }
@@ -1115,7 +1161,7 @@ impl CameraBuilder {
     }
 
     /// Creates new instance of camera node and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Camera> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

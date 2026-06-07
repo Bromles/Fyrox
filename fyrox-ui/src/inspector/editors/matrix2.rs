@@ -25,7 +25,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     matrix::{MatrixEditorBuilder, MatrixEditorMessage},
     message::{MessageDirection, UiMessage},
@@ -62,31 +62,29 @@ impl<const R: usize, const C: usize, T: NumericType> PropertyEditorDefinition
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<SMatrix<T, R, C>>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: MatrixEditorBuilder::new(
-                WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
-            )
-            .with_min(SMatrix::repeat(
-                ctx.property_info
-                    .min_value
-                    .and_then(NumCast::from)
-                    .unwrap_or_else(T::min_value),
-            ))
-            .with_max(SMatrix::repeat(
-                ctx.property_info
-                    .max_value
-                    .and_then(NumCast::from)
-                    .unwrap_or_else(T::max_value),
-            ))
-            .with_step(SMatrix::repeat(
-                ctx.property_info
-                    .step
-                    .and_then(NumCast::from)
-                    .unwrap_or_else(T::one),
-            ))
-            .with_value(*value)
-            .build(ctx.build_context),
-        })
+        Ok(PropertyEditorInstance::simple(
+            MatrixEditorBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(1.0)))
+                .with_min(SMatrix::repeat(
+                    ctx.property_info
+                        .min_value
+                        .and_then(NumCast::from)
+                        .unwrap_or_else(T::min_value),
+                ))
+                .with_max(SMatrix::repeat(
+                    ctx.property_info
+                        .max_value
+                        .and_then(NumCast::from)
+                        .unwrap_or_else(T::max_value),
+                ))
+                .with_step(SMatrix::repeat(
+                    ctx.property_info
+                        .step
+                        .and_then(NumCast::from)
+                        .unwrap_or_else(T::one),
+                ))
+                .with_value(*value)
+                .build(ctx.build_context),
+        ))
     }
 
     fn create_message(
@@ -94,10 +92,9 @@ impl<const R: usize, const C: usize, T: NumericType> PropertyEditorDefinition
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<SMatrix<T, R, C>>()?;
-        Ok(Some(MatrixEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            *value,
+            MatrixEditorMessage::Value(*value),
         )))
     }
 
@@ -108,7 +105,7 @@ impl<const R: usize, const C: usize, T: NumericType> PropertyEditorDefinition
             {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(*value),
+                    action: FieldAction::object(*value),
                 });
             }
         }

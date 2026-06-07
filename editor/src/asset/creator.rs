@@ -24,33 +24,38 @@ use crate::{
             manager::ResourceManager,
             untyped::{ResourceKind, UntypedResource},
         },
-        core::{log::Log, pool::Handle, Uuid},
+        core::{log::Log, make_pretty_type_name, pool::Handle, SafeLock},
         engine::Engine,
         gui::{
             button::{ButtonBuilder, ButtonMessage},
             grid::{Column, GridBuilder, Row},
             list_view::{ListViewBuilder, ListViewMessage},
-            message::{MessageDirection, UiMessage},
+            message::UiMessage,
             stack_panel::StackPanelBuilder,
             text::TextMessage,
             text_box::TextBoxBuilder,
             utils::make_dropdown_list_option,
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
         },
     },
     message::MessageSender,
     Message,
 };
+use fyrox::core::uuid::Uuid;
+use fyrox::gui::button::Button;
+use fyrox::gui::list_view::ListView;
+use fyrox::gui::text_box::TextBox;
+use fyrox::gui::window::{Window, WindowAlignment};
 use std::path::{Path, PathBuf};
 
 pub struct ResourceCreator {
-    pub window: Handle<UiNode>,
-    resource_constructors_list: Handle<UiNode>,
-    ok: Handle<UiNode>,
-    cancel: Handle<UiNode>,
-    name: Handle<UiNode>,
+    pub window: Handle<Window>,
+    resource_constructors_list: Handle<ListView>,
+    ok: Handle<Button>,
+    cancel: Handle<Button>,
+    name: Handle<TextBox>,
     selected: Option<usize>,
     supported_resource_data_uuids: Vec<Uuid>,
     name_str: String,
@@ -59,14 +64,17 @@ pub struct ResourceCreator {
 impl ResourceCreator {
     pub fn new(ctx: &mut BuildContext, resource_manager: &ResourceManager) -> Self {
         let rm_state = resource_manager.state();
-        let mut constructors = rm_state.constructors_container.map.lock();
+        let mut constructors = rm_state.constructors_container.map.safe_lock();
         let mut items = Vec::new();
         let mut supported_resource_data_uuids = Vec::new();
         for (uuid, constructor) in constructors.iter_mut() {
             let instance = (constructor.callback)();
             if instance.can_be_saved() {
                 supported_resource_data_uuids.push(*uuid);
-                items.push(make_dropdown_list_option(ctx, &constructor.type_name))
+                items.push(make_dropdown_list_option(
+                    ctx,
+                    make_pretty_type_name(&constructor.type_name),
+                ))
             }
         }
 
@@ -155,12 +163,14 @@ impl ResourceCreator {
     }
 
     pub fn open(&self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::open_modal(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
     }
 
     #[must_use]
@@ -173,53 +183,46 @@ impl ResourceCreator {
     ) -> bool {
         let mut asset_added = false;
 
-        if let Some(ListViewMessage::SelectionChanged(selection)) = message.data() {
-            if message.destination() == self.resource_constructors_list
-                && message.direction() == MessageDirection::FromWidget
+        if let Some(ListViewMessage::Selection(selection)) =
+            message.data_from(self.resource_constructors_list)
+        {
+            self.selected = selection.first().cloned();
+            engine
+                .user_interfaces
+                .first()
+                .send(self.ok, WidgetMessage::Enabled(true));
+
+            // Propose extension for the resource.
+            let resource_manager_state = engine.resource_manager.state();
+            if let Some(data_type_uuid) = self
+                .supported_resource_data_uuids
+                .get(self.selected.unwrap_or_default())
             {
-                self.selected = selection.first().cloned();
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(WidgetMessage::enabled(
-                        self.ok,
-                        MessageDirection::ToWidget,
-                        true,
-                    ));
-
-                // Propose extension for the resource.
-                let resource_manager_state = engine.resource_manager.state();
-                if let Some(data_type_uuid) = self
-                    .supported_resource_data_uuids
-                    .get(self.selected.unwrap_or_default())
+                let loaders = resource_manager_state.loaders.safe_lock();
+                if let Some(loader) = loaders
+                    .iter()
+                    .find(|loader| &loader.data_type_uuid() == data_type_uuid)
                 {
-                    let loaders = resource_manager_state.loaders.lock();
-                    if let Some(loader) = loaders
-                        .iter()
-                        .find(|loader| &loader.data_type_uuid() == data_type_uuid)
-                    {
-                        if let Some(first) = loader.extensions().first() {
-                            let mut path = PathBuf::from(&self.name_str);
-                            path.set_extension(first);
+                    if let Some(first) = loader.extensions().first() {
+                        let mut path = PathBuf::from(&self.name_str);
+                        path.set_extension(first);
 
-                            self.name_str = path.to_string_lossy().to_string();
+                        self.name_str = path.to_string_lossy().to_string();
 
-                            engine
-                                .user_interfaces
-                                .first_mut()
-                                .send_message(TextMessage::text(
-                                    self.name,
-                                    MessageDirection::ToWidget,
-                                    self.name_str.clone(),
-                                ));
-                        }
-                    };
-                }
+                        engine
+                            .user_interfaces
+                            .first()
+                            .send(self.name, TextMessage::Text(self.name_str.clone()));
+                    }
+                };
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.ok {
                 let resource_manager_state = engine.resource_manager.state();
-                let mut constructors = resource_manager_state.constructors_container.map.lock();
+                let mut constructors = resource_manager_state
+                    .constructors_container
+                    .map
+                    .safe_lock();
 
                 if let Some(mut instance) = self
                     .supported_resource_data_uuids
@@ -253,18 +256,11 @@ impl ResourceCreator {
             if message.destination() == self.ok || message.destination() == self.cancel {
                 engine
                     .user_interfaces
-                    .first_mut()
-                    .send_message(WindowMessage::close(
-                        self.window,
-                        MessageDirection::ToWidget,
-                    ));
+                    .first()
+                    .send(self.window, WindowMessage::Close);
             }
-        } else if let Some(TextMessage::Text(text)) = message.data() {
-            if message.destination() == self.name
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.name_str.clone_from(text);
-            }
+        } else if let Some(TextMessage::Text(text)) = message.data_from(self.name) {
+            self.name_str.clone_from(text);
         }
 
         asset_added

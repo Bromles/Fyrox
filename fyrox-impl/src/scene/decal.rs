@@ -28,7 +28,6 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -43,7 +42,7 @@ use crate::{
 };
 
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// Decal is an image that gets projected to a geometry of a scene. Blood splatters, bullet holes, scratches
@@ -94,8 +93,9 @@ use std::ops::{Deref, DerefMut};
 /// #     core::algebra::Vector3
 /// # };
 /// # use fyrox_impl::resource::texture::Texture;
+/// # use fyrox_impl::scene::decal::Decal;
 ///
-/// fn create_bullet_hole(resource_manager: ResourceManager, graph: &mut Graph) -> Handle<Node> {
+/// fn create_bullet_hole(resource_manager: ResourceManager, graph: &mut Graph) -> Handle<Decal> {
 ///     DecalBuilder::new(
 ///             BaseBuilder::new()
 ///                 .with_local_transform(
@@ -107,8 +107,11 @@ use std::ops::{Deref, DerefMut};
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Visit, Default, Clone, Reflect, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Visit, Default, Clone, Reflect)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "c4d24e48-edd1-4fb2-ad82-4b3d3ea985d8"
+)]
 pub struct Decal {
     base: Base,
 
@@ -137,12 +140,6 @@ impl Deref for Decal {
 impl DerefMut for Decal {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.base
-    }
-}
-
-impl TypeUuidProvider for Decal {
-    fn type_uuid() -> Uuid {
-        uuid!("c4d24e48-edd1-4fb2-ad82-4b3d3ea985d8")
     }
 }
 
@@ -238,7 +235,7 @@ impl NodeTrait for Decal {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 }
 
@@ -304,7 +301,7 @@ impl DecalBuilder {
     }
 
     /// Creates new instance of Decal node and puts it in the given graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Decal> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

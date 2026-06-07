@@ -20,21 +20,20 @@
 
 //! A widget for showing handles in the tile set editor.
 
-use crate::{
-    fyrox::gui::{
-        button::ButtonMessage,
-        define_constructor, define_widget_deref,
-        grid::{Column, GridBuilder, Row},
-        stack_panel::StackPanelBuilder,
-        text::{TextBuilder, TextMessage},
-        text_box::TextBoxBuilder,
-        widget::Widget,
-        Control, Orientation,
-    },
-    send_sync_message,
-};
-
 use super::*;
+use crate::fyrox::gui::{
+    button::ButtonMessage,
+    define_widget_deref,
+    grid::{Column, GridBuilder, Row},
+    stack_panel::StackPanelBuilder,
+    text::{TextBuilder, TextMessage},
+    text_box::TextBoxBuilder,
+    widget::Widget,
+    Control, Orientation,
+};
+use fyrox::gui::message::MessageData;
+use fyrox::gui::text::Text;
+use fyrox::gui::text_box::TextBox;
 
 const BUTTON_SIZE: f32 = 12.0;
 
@@ -44,12 +43,7 @@ pub enum TileHandleEditorMessage {
     OpenPalette(TileDefinitionHandle),
     Value(Option<TileDefinitionHandle>),
 }
-
-impl TileHandleEditorMessage {
-    define_constructor!(TileHandleEditorMessage:Goto => fn goto(TileDefinitionHandle), layout: false);
-    define_constructor!(TileHandleEditorMessage:OpenPalette => fn open_palette(TileDefinitionHandle), layout: false);
-    define_constructor!(TileHandleEditorMessage:Value => fn value(Option<TileDefinitionHandle>), layout: false);
-}
+impl MessageData for TileHandleEditorMessage {}
 
 /// The widget for editing a [`TileDefinitionHandle`].
 /// It has a button for focusing the tile map control panel on the tile represented
@@ -59,15 +53,15 @@ impl TileHandleEditorMessage {
 /// pair is the page coordinates and the second pair is the tile coordinates.
 /// When editing the handle, one need merely type four integers. Whatever
 /// characters separate the integers are ignored, so "1 2 3 4" would be accepted.
-#[derive(Debug, Default, Clone, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "86513074-461d-4583-a214-fb84f5aacac1")]
+#[derive(Debug, Default, Clone, Visit, Reflect)]
+#[reflect(type_uuid = "86513074-461d-4583-a214-fb84f5aacac1")]
 #[reflect(derived_type = "UiNode")]
 pub struct TileHandleField {
     widget: Widget,
     value: Option<TileDefinitionHandle>,
-    field: Handle<UiNode>,
-    palette_button: Handle<UiNode>,
-    goto_button: Handle<UiNode>,
+    field: Handle<TextBox>,
+    palette_button: Handle<Button>,
+    goto_button: Handle<Button>,
 }
 
 define_widget_deref!(TileHandleField);
@@ -80,7 +74,7 @@ fn value_to_string(value: Option<TileDefinitionHandle>) -> String {
     }
 }
 
-fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<Text> {
     TextBuilder::new(WidgetBuilder::new())
         .with_text(name)
         .build(ctx)
@@ -92,27 +86,15 @@ impl Control for TileHandleField {
         if message.direction() == MessageDirection::ToWidget {
             if let Some(TileHandleEditorMessage::Value(value)) = message.data() {
                 self.value = *value;
-                ui.send_message(TextMessage::text(
-                    self.field,
-                    MessageDirection::ToWidget,
-                    value_to_string(*value),
-                ));
-                ui.send_message(message.reverse());
+                ui.send(self.field, TextMessage::Text(value_to_string(*value)));
+                ui.try_send_response(message);
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
             if let Some(value) = self.value {
                 if message.destination() == self.palette_button {
-                    ui.send_message(TileHandleEditorMessage::open_palette(
-                        self.handle(),
-                        MessageDirection::FromWidget,
-                        value,
-                    ));
+                    ui.post(self.handle(), TileHandleEditorMessage::OpenPalette(value));
                 } else if message.destination() == self.goto_button {
-                    ui.send_message(TileHandleEditorMessage::goto(
-                        self.handle(),
-                        MessageDirection::FromWidget,
-                        value,
-                    ));
+                    ui.post(self.handle(), TileHandleEditorMessage::Goto(value));
                 }
             }
         } else if let Some(TextMessage::Text(text)) = message.data() {
@@ -120,21 +102,10 @@ impl Control for TileHandleField {
                 if let Ok(value) = text.parse() {
                     if self.value != Some(value) {
                         self.value = Some(value);
-                        ui.send_message(TileHandleEditorMessage::value(
-                            self.handle(),
-                            MessageDirection::FromWidget,
-                            self.value,
-                        ));
+                        ui.post(self.handle(), TileHandleEditorMessage::Value(self.value));
                     }
                 }
-                send_sync_message(
-                    ui,
-                    TextMessage::text(
-                        self.field,
-                        MessageDirection::ToWidget,
-                        value_to_string(self.value),
-                    ),
-                );
+                ui.send_sync(self.field, TextMessage::Text(value_to_string(self.value)));
             }
         }
     }
@@ -162,7 +133,7 @@ impl TileHandleFieldBuilder {
         self.value = value;
         self
     }
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<TileHandleField> {
         let field = TextBoxBuilder::new(WidgetBuilder::new().on_column(1))
             .with_text(value_to_string(self.value))
             .build(ctx);
@@ -202,12 +173,12 @@ impl TileHandleFieldBuilder {
         .add_column(Column::auto())
         .build(ctx);
 
-        ctx.add_node(UiNode::new(TileHandleField {
+        ctx.add(TileHandleField {
             widget: self.widget_builder.with_child(content).build(ctx),
             value: self.value,
             field,
             goto_button,
             palette_button,
-        }))
+        })
     }
 }

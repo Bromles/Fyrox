@@ -29,7 +29,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     widget::WidgetBuilder,
@@ -50,15 +50,15 @@ impl PropertyEditorDefinition for ColorPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Color>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: ColorFieldBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            ColorFieldBuilder::new(
                 WidgetBuilder::new()
                     .with_min_size(Vector2::new(0.0, 17.0))
                     .with_margin(Thickness::uniform(1.0)),
             )
             .with_color(*value)
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -66,10 +66,9 @@ impl PropertyEditorDefinition for ColorPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Color>()?;
-        Ok(Some(ColorFieldMessage::color(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            *value,
+            ColorFieldMessage::Color(*value),
         )))
     }
 
@@ -79,7 +78,7 @@ impl PropertyEditorDefinition for ColorPropertyEditorDefinition {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(*value),
+                    action: FieldAction::object(*value),
                 });
             }
         }
@@ -100,15 +99,15 @@ impl PropertyEditorDefinition for ColorGradientPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<ColorGradient>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: ColorGradientEditorBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            ColorGradientEditorBuilder::new(
                 WidgetBuilder::new()
                     .with_min_size(Vector2::new(0.0, 40.0))
                     .with_margin(Thickness::uniform(1.0)),
             )
             .with_color_gradient(value.clone())
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -116,10 +115,9 @@ impl PropertyEditorDefinition for ColorGradientPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<ColorGradient>()?;
-        Ok(Some(ColorGradientEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            ColorGradientEditorMessage::Value(value.clone()),
         )))
     }
 
@@ -129,7 +127,7 @@ impl PropertyEditorDefinition for ColorGradientPropertyEditorDefinition {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }

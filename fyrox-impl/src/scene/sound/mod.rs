@@ -26,7 +26,6 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, m4x4_approx_eq},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -47,7 +46,7 @@ pub use fyrox_sound::{
         DataSource, SoundBuffer, SoundBufferResource, SoundBufferResourceLoadError,
     },
     bus::*,
-    context::{DistanceModel, SAMPLE_RATE},
+    context::DistanceModel,
     dsp::{filters::*, DelayLine},
     effects::*,
     engine::SoundEngine,
@@ -60,7 +59,7 @@ pub use fyrox_sound::{
 use crate::scene::node::constructor::NodeConstructor;
 use crate::scene::Scene;
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use fyrox_resource::state::ResourceState;
 use fyrox_sound::source::SoundSource;
 use std::{
@@ -73,8 +72,11 @@ pub mod context;
 pub mod listener;
 
 /// Sound source.
-#[derive(Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "28621735-8cd1-4fad-8faf-ecd24bf8aa99"
+)]
 pub struct Sound {
     base: Base,
 
@@ -121,10 +123,8 @@ pub struct Sound {
     #[reflect(setter = "set_spatial_blend")]
     spatial_blend: InheritableVariable<f32>,
 
+    /// A name of a sound effect to which the sound will attach to when instantiated.
     #[visit(optional)]
-    #[reflect(
-        description = "A name of a sound effect to which the sound will attach to when instantiated."
-    )]
     audio_bus: InheritableVariable<String>,
 
     #[reflect(hidden)]
@@ -188,12 +188,6 @@ impl Clone for Sound {
             // Do not copy. The copy will have its own native representation.
             native: Default::default(),
         }
-    }
-}
-
-impl TypeUuidProvider for Sound {
-    fn type_uuid() -> Uuid {
-        uuid!("28621735-8cd1-4fad-8faf-ecd24bf8aa99")
     }
 }
 
@@ -269,7 +263,7 @@ impl Sound {
         *self.panning
     }
 
-    /// Sets playback status.    
+    /// Sets playback status.
     pub fn set_status(&mut self, status: Status) -> Status {
         let prev = self.status();
         match status {
@@ -412,7 +406,7 @@ impl NodeTrait for Sound {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn on_removed_from_graph(&mut self, graph: &mut Graph) {
@@ -458,15 +452,16 @@ impl NodeTrait for Sound {
                 let header = buffer.header();
                 match header.state {
                     ResourceState::Pending { .. } | ResourceState::Ok { .. } => Ok(()),
-                    ResourceState::LoadError { ref error, .. } => {
-                        match &error.0 {
-                            None => Err("Sound buffer is failed to load, the reason is unknown!"
-                                .to_string()),
-                            Some(err) => {
-                                Err(format!("Sound buffer is failed to load. Reason: {err:?}"))
-                            }
-                        }
+                    ResourceState::Unloaded => {
+                        Err("Sound buffer is unloaded because it was never requested.".to_string())
                     }
+                    ResourceState::LoadError { ref error, .. } => match &error.0 {
+                        None => {
+                            Err("Sound buffer is failed to load, the reason is unknown!"
+                                .to_string())
+                        }
+                        Some(err) => Err(format!("Sound buffer is failed to load. Reason: {err}")),
+                    },
                 }
             }
             None => Err("Sound buffer is not set, the sound won't play!".to_string()),
@@ -607,7 +602,7 @@ impl SoundBuilder {
     }
 
     /// Create a new [`Sound`] node and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Sound> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

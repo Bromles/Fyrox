@@ -21,16 +21,14 @@
 //! Uniform buffer cache could be considered as pool of uniform buffers of fixed size. See
 //! [`UniformBufferCache`] for more info.
 
-use crate::renderer::framework::{
-    buffer::{BufferKind, BufferUsage},
+use crate::graphics::{
+    buffer::{BufferKind, BufferUsage, GpuBuffer, GpuBufferDescriptor},
     error::FrameworkError,
     framebuffer::{BufferDataUsage, ResourceBinding},
-    server::GraphicsServer,
+    server::{GraphicsServer, SharedGraphicsServer},
     uniform::{ByteStorage, DynamicUniformBuffer, UniformBuffer},
 };
 use fxhash::FxHashMap;
-use fyrox_graphics::buffer::{GpuBuffer, GpuBufferDescriptor};
-use fyrox_graphics::server::SharedGraphicsServer;
 use std::cell::RefCell;
 
 #[derive(Default)]
@@ -128,10 +126,14 @@ struct Page {
     is_submitted: bool,
 }
 
+/// The position of a uniform within a [`UniformMemoryAllocator`].
 #[derive(Clone, Copy, Debug)]
 pub struct UniformBlockLocation {
+    /// Index of the buffer in the buffer list of [`UniformMemoryAllocator`].
     pub page: usize,
+    /// The position of the uniform within the buffer.
     pub offset: usize,
+    /// The size of the uniform.
     pub size: usize,
 }
 

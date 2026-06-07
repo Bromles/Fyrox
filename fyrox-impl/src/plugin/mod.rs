@@ -23,27 +23,35 @@
 #![warn(missing_docs)]
 
 pub mod dylib;
+pub mod error;
 
-use crate::engine::ApplicationLoopController;
 use crate::{
-    asset::manager::ResourceManager,
-    core::{pool::Handle, reflect::Reflect, visitor::Visit},
+    asset::{manager::ResourceManager, untyped::UntypedResource},
+    core::{
+        define_as_any_trait, dyntype::DynTypeConstructorContainer, log::Log, pool::Handle,
+        reflect::Reflect, variable::try_inherit_properties, visitor::error::VisitError,
+        visitor::Visit,
+    },
     engine::{
-        task::TaskPoolHandler, AsyncSceneLoader, GraphicsContext, PerformanceStatistics,
-        ScriptProcessor, SerializationContext,
+        input::InputState, task::TaskPoolHandler, ApplicationLoopController, GraphicsContext,
+        PerformanceStatistics, ScriptProcessor, SerializationContext,
     },
     event::Event,
+    graph::NodeMapping,
     gui::{
         constructor::WidgetConstructorContainer,
         inspector::editors::PropertyEditorDefinitionContainer, message::UiMessage, UiContainer,
+        UserInterface,
     },
-    scene::{Scene, SceneContainer},
+    plugin::error::{GameError, GameResult},
+    resource::model::Model,
+    scene::{graph::NodePool, navmesh, Scene, SceneContainer, SceneLoader},
 };
-use fyrox_core::define_as_any_trait;
-use fyrox_core::visitor::error::VisitError;
+use fyrox_core::err;
+use std::path::{Path, PathBuf};
 use std::{
+    any::TypeId,
     ops::{Deref, DerefMut},
-    path::Path,
     sync::Arc,
 };
 
@@ -109,6 +117,29 @@ impl DerefMut for PluginContainer {
     }
 }
 
+/// Output data of a loader.
+pub struct LoaderOutput<T> {
+    /// The object produced by the loader.
+    pub payload: T,
+    /// A path of the source file.
+    pub path: PathBuf,
+    /// A raw data from which the loader output was created from. Usually it is just a content of
+    /// the source file.
+    pub data: Vec<u8>,
+}
+
+/// Alias for `LoaderOutput<Scene>`;
+pub type SceneLoaderOutput = LoaderOutput<Scene>;
+
+/// Alias for `Result<SceneLoaderOutput, VisitError>`;
+pub type SceneLoaderResult = Result<SceneLoaderOutput, VisitError>;
+
+/// Alias for `LoaderOutput<UserInterface>`
+pub type UiLoaderOutput = LoaderOutput<UserInterface>;
+
+/// Alias for `Result<UiLoaderOutput, VisitError>`
+pub type UiLoaderResult = Result<UiLoaderOutput, VisitError>;
+
 /// Contains plugin environment for the registration stage.
 pub struct PluginRegistrationContext<'a> {
     /// A reference to serialization context of the engine. See [`SerializationContext`] for more
@@ -117,6 +148,9 @@ pub struct PluginRegistrationContext<'a> {
     /// A reference to serialization context of the engine. See [`WidgetConstructorContainer`] for more
     /// info.
     pub widget_constructors: &'a Arc<WidgetConstructorContainer>,
+    /// A container with constructors for dynamic types. See [`DynTypeConstructorContainer`] for more
+    /// info.
+    pub dyn_type_constructors: &'a Arc<DynTypeConstructorContainer>,
     /// A reference to the resource manager instance of the engine. Could be used to register resource loaders.
     pub resource_manager: &'a ResourceManager,
 }
@@ -161,6 +195,10 @@ pub struct PluginContext<'a, 'b> {
     /// info.
     pub widget_constructors: &'a Arc<WidgetConstructorContainer>,
 
+    /// A container with constructors for dynamic types. See [`DynTypeConstructorContainer`] for more
+    /// info.
+    pub dyn_type_constructors: &'a Arc<DynTypeConstructorContainer>,
+
     /// Performance statistics from the last frame.
     pub performance_statistics: &'a PerformanceStatistics,
 
@@ -172,10 +210,6 @@ pub struct PluginContext<'a, 'b> {
     /// Script processor is used to run script methods in a strict order.
     pub script_processor: &'a ScriptProcessor,
 
-    /// Asynchronous scene loader. It is used to request scene loading. See [`AsyncSceneLoader`] docs
-    /// for usage example.
-    pub async_scene_loader: &'a mut AsyncSceneLoader,
-
     /// Special field that associates the main application event loop (not game loop) with OS-specific
     /// windows. It also can be used to alternate control flow of the application. `None` if the
     /// engine is running in headless mode.
@@ -183,6 +217,253 @@ pub struct PluginContext<'a, 'b> {
 
     /// Task pool for asynchronous task management.
     pub task_pool: &'a mut TaskPoolHandler,
+
+    /// A stored state of most common input events. It is used a "shortcut" in cases where event-based
+    /// approach is too verbose. It may be useful in simple scenarios where you just need to know
+    /// if a button (on keyboard, mouse) was pressed and do something.
+    ///
+    /// **Important:** this structure does not track from which device the corresponding event has
+    /// come from, if you have more than one keyboard and/or mouse, use event-based approach instead!
+    pub input_state: &'a InputState,
+}
+
+impl<'a, 'b> PluginContext<'a, 'b> {
+    /// Spawns an asynchronous task that tries to load a user interface from the given path.
+    /// When the task is completed, the specified callback is called that can be used to
+    /// modify the UI. The loaded UI must be registered in the engine, otherwise it will be
+    /// discarded.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// # use fyrox_impl::{
+    /// #     core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
+    /// #     event::Event,
+    /// #     plugin::{error::GameResult, Plugin, PluginContext, PluginRegistrationContext},
+    /// #     scene::Scene,
+    /// # };
+    /// # use std::str::FromStr;
+    ///
+    /// #[derive(Default, Visit, Reflect, Debug)]
+    /// #[reflect(non_cloneable, type_uuid = "ce9c7ff9-f490-4274-89c9-0b53b9f80532")]
+    /// struct MyGame {}
+    ///
+    /// impl Plugin for MyGame {
+    ///     fn init(&mut self, _scene_path: Option<&str>, mut ctx: PluginContext) -> GameResult {
+    ///         ctx.load_ui("data/my.ui", |result, game: &mut MyGame, mut ctx| {
+    ///             // The loaded UI must be registered in the engine.
+    ///             ctx.user_interfaces.add(result?.payload);
+    ///             Ok(())
+    ///         });
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    pub fn load_ui<U, P, C>(&mut self, path: U, callback: C)
+    where
+        U: Into<PathBuf>,
+        P: Plugin,
+        for<'c, 'd> C:
+            FnOnce(UiLoaderResult, &mut P, &mut PluginContext<'c, 'd>) -> GameResult + 'static,
+    {
+        let path = path.into();
+        self.task_pool.spawn_plugin_task(
+            UserInterface::load_from_file(
+                path.clone(),
+                self.widget_constructors.clone(),
+                self.dyn_type_constructors.clone(),
+                self.resource_manager.clone(),
+            ),
+            move |result, plugin, ctx| match result {
+                Ok((ui, data)) => callback(
+                    Ok(LoaderOutput {
+                        payload: ui,
+                        data,
+                        path,
+                    }),
+                    plugin,
+                    ctx,
+                ),
+                Err(e) => callback(Err(e), plugin, ctx),
+            },
+        );
+    }
+
+    /// Tries to load a game scene at the given path.
+    ///
+    /// This method has a special flag `is_derived` which dictates how to load the scene:
+    ///
+    /// - `false` - the scene is loaded as-is and returned to the caller. Use this option if you
+    ///   don't want to use built-in "saved game" system. See the next option for details.
+    /// - `true`, then the requested scene is loaded and a new model resource is
+    ///   registered in the resource manager that references the scene source file. Then the loaded
+    ///   scene is _cloned_ and all its nodes links to their originals in the source file. Then this
+    ///   cloned and processed scene ("derived") is returned. This process essentially links the
+    ///   scene to its source file, so when the derived scene is saved to disk, it does not save all
+    ///   its content, but only changes from the original scene. Derived scenes are used to create
+    ///   saved games. Keep in mind, if you've created a derived scene and saved it, you must load
+    ///   this saved game with `is_derived` set to `false`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use fyrox_impl::{
+    /// #     core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
+    /// #     event::Event,
+    /// #     plugin::{error::GameResult, SceneLoaderResult, Plugin, PluginContext, PluginRegistrationContext},
+    /// #     scene::Scene,
+    /// # };
+    /// # use std::str::FromStr;
+    /// #
+    /// #[derive(Default, Visit, Reflect, Debug)]
+    /// #[reflect(non_cloneable, type_uuid = "65b2da10-3926-48e4-93b4-01193cdc11ca")]
+    /// struct MyGame {}
+    ///
+    /// impl MyGame {
+    ///     fn on_scene_loading_result(&mut self, result: SceneLoaderResult, ctx: &mut PluginContext) -> GameResult {
+    ///         // Register the scene.
+    ///         ctx.scenes.add(result?.payload);
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// impl Plugin for MyGame {
+    ///     fn init(&mut self, scene_path: Option<&str>, mut ctx: PluginContext) -> GameResult {
+    ///         ctx.load_scene(
+    ///             scene_path.unwrap_or("data/scene.rgs"),
+    ///             false, // See the docs for details.
+    ///             |result, game: &mut MyGame, ctx| game.on_scene_loading_result(result, ctx),
+    ///         );
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    pub fn load_scene<U, P, C>(&mut self, path: U, is_derived: bool, callback: C)
+    where
+        U: Into<PathBuf>,
+        P: Plugin,
+        for<'c, 'd> C:
+            FnOnce(SceneLoaderResult, &mut P, &mut PluginContext<'c, 'd>) -> GameResult + 'static,
+    {
+        let path = path.into();
+
+        let serialization_context = self.serialization_context.clone();
+        let dyn_type_constructors = self.dyn_type_constructors.clone();
+        let resource_manager = self.resource_manager.clone();
+        let uuid = resource_manager.find::<Model>(&path).resource_uuid();
+        let io = resource_manager.resource_io();
+
+        self.task_pool.spawn_plugin_task(
+            {
+                let path = path.clone();
+                async move {
+                    match SceneLoader::from_file(
+                        path,
+                        io.as_ref(),
+                        serialization_context,
+                        dyn_type_constructors,
+                        resource_manager.clone(),
+                    )
+                    .await
+                    {
+                        Ok((loader, data)) => Ok((loader.finish().await, data)),
+                        Err(e) => Err(e),
+                    }
+                }
+            },
+            move |result, plugin, ctx| {
+                match result {
+                    Ok((mut scene, data)) => {
+                        if is_derived {
+                            let model = ctx.resource_manager.find_uuid::<Model>(uuid);
+                            // Create a resource, that will point to the scene we've loaded the
+                            // scene from and force scene nodes to inherit data from them.
+                            let data = Model {
+                                mapping: NodeMapping::UseHandles,
+                                // We have to create a full copy of the scene, because otherwise
+                                // some methods (`Base::root_resource` in particular) won't work
+                                // correctly.
+                                scene: scene.clone_one_to_one().0,
+                            };
+                            model.header().state.commit_ok(data);
+
+                            for (handle, node) in scene.graph.pair_iter_mut() {
+                                node.set_inheritance_data(handle, model.clone());
+                            }
+
+                            // Reset modified flags in every inheritable property of the scene.
+                            // Except nodes, they're inherited in a separate place.
+                            (&mut scene as &mut dyn Reflect).apply_recursively_mut(
+                                &mut |object| {
+                                    let type_id = (*object).type_id();
+                                    if type_id != TypeId::of::<NodePool>() {
+                                        if let Some(variable) = object.as_inheritable_variable_mut()
+                                        {
+                                            variable.reset_modified_flag();
+                                        }
+                                    }
+                                },
+                                &[
+                                    TypeId::of::<UntypedResource>(),
+                                    TypeId::of::<navmesh::Container>(),
+                                ],
+                            )
+                        } else {
+                            // Take scene data from the source scene.
+                            if let Some(source_asset) =
+                                scene.graph[scene.graph.get_root()].root_resource()
+                            {
+                                let source_asset_ref = source_asset.data_ref();
+                                let source_scene_ref = &source_asset_ref.scene;
+                                Log::verify(try_inherit_properties(
+                                    &mut scene,
+                                    source_scene_ref,
+                                    &[
+                                        TypeId::of::<NodePool>(),
+                                        TypeId::of::<UntypedResource>(),
+                                        TypeId::of::<navmesh::Container>(),
+                                    ],
+                                ));
+                            }
+                        }
+
+                        callback(
+                            Ok(LoaderOutput {
+                                payload: scene,
+                                path,
+                                data,
+                            }),
+                            plugin,
+                            ctx,
+                        )
+                    }
+                    Err(error) => callback(Err(error), plugin, ctx),
+                }
+            },
+        );
+    }
+
+    /// Tries to load either a game scene (via [`Self::load_scene`] or a user interface [`Self::load_ui`].
+    /// This method tries to guess the actual type of the asset by comparing the extension in the
+    /// path. When a game scene or a UI is loaded, it is added to the respective engine container.
+    pub fn load_scene_or_ui<P: Plugin>(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match ext.as_str() {
+            "rgs" => self.load_scene(path, false, |result, _: &mut P, ctx| {
+                ctx.scenes.add(result?.payload);
+                Ok(())
+            }),
+            "ui" => self.load_ui(path, |result, _: &mut P, ctx| {
+                ctx.user_interfaces.add(result?.payload);
+                Ok(())
+            }),
+            _ => err!("File {path:?} is not a game scene nor a user interface!"),
+        }
+    }
 }
 
 define_as_any_trait!(PluginAsAny => Plugin);
@@ -201,60 +482,110 @@ impl dyn Plugin {
 
 /// Plugin is a convenient interface that allow you to extend engine's functionality.
 ///
-/// # Static vs dynamic plugins
-///
-/// Every plugin must be linked statically to ensure that everything is memory safe. There was some
-/// long research about hot reloading and dynamic plugins (in DLLs) and it turned out that they're
-/// not guaranteed to be memory safe because Rust does not have stable ABI. When a plugin compiled
-/// into DLL, Rust compiler is free to reorder struct members in any way it needs to. It is not
-/// guaranteed that two projects that uses the same library will have compatible ABI. This fact
-/// indicates that you either have to use static linking of your plugins or provide C interface
-/// to every part of the engine and "communicate" with plugin using C interface with C ABI (which
-/// is standardized and guaranteed to be compatible). The main problem with C interface is
-/// boilerplate code and the need to mark every structure "visible" through C interface with
-/// `#[repr(C)]` attribute which is not always easy and even possible (because some structures could
-/// be re-exported from dependencies). These are the main reasons why the engine uses static plugins.
-///
 /// # Example
 ///
 /// ```rust
 /// # use fyrox_impl::{
 /// #     core::{pool::Handle}, core::visitor::prelude::*, core::reflect::prelude::*,
-/// #     plugin::{Plugin, PluginContext, PluginRegistrationContext},
+/// #     plugin::{Plugin, PluginContext, PluginRegistrationContext, error::GameResult},
 /// #     scene::Scene,
 /// #     event::Event
 /// # };
 /// # use std::str::FromStr;
 ///
 /// #[derive(Default, Visit, Reflect, Debug)]
-/// #[reflect(non_cloneable)]
+/// #[reflect(non_cloneable, type_uuid = "342b2ef7-210d-465f-bcae-f59aa3a96420")]
 /// struct MyPlugin {}
 ///
 /// impl Plugin for MyPlugin {
-///     fn on_deinit(&mut self, context: PluginContext) {
+///     fn on_deinit(&mut self, context: PluginContext) -> GameResult {
 ///         // The method is called when the plugin is disabling.
 ///         // The implementation is optional.
+///         Ok(())
 ///     }
 ///
-///     fn update(&mut self, context: &mut PluginContext) {
+///     fn update(&mut self, context: &mut PluginContext) -> GameResult {
 ///         // The method is called on every frame, it is guaranteed to have fixed update rate.
 ///         // The implementation is optional.
+///         Ok(())
 ///     }
 ///
-///     fn on_os_event(&mut self, event: &Event<()>, context: PluginContext) {
+///     fn on_os_event(&mut self, event: &Event<()>, context: PluginContext) -> GameResult {
 ///         // The method is called when the main window receives an event from the OS.
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// # Error Handling
+///
+/// Every plugin method returns [`GameResult`] (which is a simple wrapper over `Result<(), GameError>`),
+/// this helps to reduce the amount of boilerplate code related to error handling. There are a number
+/// of errors that can be automatically handled via `?` operator. All supported error types listed
+/// in [`error::GameError`] enum.
+///
+/// The following code snippet shows the most common use cases for error handling:
+///
+/// ```rust
+/// # use fyrox_impl::{
+/// #     core::{err, pool::Handle, reflect::prelude::*, visitor::prelude::*},
+/// #     event::Event,
+/// #     graph::SceneGraph,
+/// #     plugin::{error::GameResult, Plugin, PluginContext, PluginRegistrationContext},
+/// #     scene::{node::Node, Scene},
+/// # };
+/// # use std::str::FromStr;
+/// #[derive(Default, Visit, Reflect, Debug)]
+/// #[reflect(non_cloneable, type_uuid = "94801cca-3f50-4bef-9b6f-ee2edd9dcb2b")]
+/// struct MyPlugin {
+///     scene: Handle<Scene>,
+///     player: Handle<Node>,
+/// }
+///
+/// impl Plugin for MyPlugin {
+///     fn update(&mut self, context: &mut PluginContext) -> GameResult {
+///         // 1. This is the old approach.
+///         match context.scenes.try_get(self.scene) {
+///             Ok(scene) => match scene.graph.try_get(self.player) {
+///                 Ok(player) => {
+///                     println!("Player name is: {}", player.name());
+///                 }
+///                 Err(error) => {
+///                     err!("Unable to borrow the player. Reason: {error}")
+///                 }
+///             },
+///             Err(error) => {
+///                 err!("Unable to borrow the scene. Reason: {error}")
+///             }
+///         }
+///
+///         // 2. This is the same code as above, but with shortcuts for easier error handling.
+///         // Message report is will be something like this:
+///         // `An error occurred during update plugin method call. Reason: <error message>`.
+///         let scene = context.scenes.try_get(self.scene)?;
+///         let player = scene.graph.try_get(self.player)?;
+///         println!("Player name is: {}", player.name());
+///
+///         Ok(())
 ///     }
 /// }
 /// ```
 pub trait Plugin: PluginAsAny + Visit + Reflect {
     /// The method is called when the plugin constructor was just registered in the engine. The main
     /// use of this method is to register scripts and custom scene graph nodes in [`SerializationContext`].
-    fn register(&self, #[allow(unused_variables)] context: PluginRegistrationContext) {}
+    fn register(
+        &self,
+        #[allow(unused_variables)] context: PluginRegistrationContext,
+    ) -> GameResult {
+        Ok(())
+    }
 
     /// This method is used to register property editors for your game types; to make them editable
     /// in the editor.
-    fn register_property_editors(&self) -> PropertyEditorDefinitionContainer {
-        PropertyEditorDefinitionContainer::empty()
+    fn register_property_editors(
+        &self,
+        #[allow(unused_variables)] editors: Arc<PropertyEditorDefinitionContainer>,
+    ) {
     }
 
     /// This method is used to initialize your plugin.
@@ -262,25 +593,37 @@ pub trait Plugin: PluginAsAny + Visit + Reflect {
         &mut self,
         #[allow(unused_variables)] scene_path: Option<&str>,
         #[allow(unused_variables)] context: PluginContext,
-    ) {
+    ) -> GameResult {
+        Ok(())
     }
 
     /// This method is called when your plugin was re-loaded from a dynamic library. It could be used
     /// to restore some runtime state, that cannot be serialized. This method is called **only for
     /// dynamic plugins!** It is guaranteed to be called after all plugins were constructed, so the
     /// cross-plugins interactions are possible.
-    fn on_loaded(&mut self, #[allow(unused_variables)] context: PluginContext) {}
+    fn on_loaded(&mut self, #[allow(unused_variables)] context: PluginContext) -> GameResult {
+        Ok(())
+    }
 
     /// The method is called before plugin will be disabled. It should be used for clean up, or some
     /// additional actions.
-    fn on_deinit(&mut self, #[allow(unused_variables)] context: PluginContext) {}
+    fn on_deinit(&mut self, #[allow(unused_variables)] context: PluginContext) -> GameResult {
+        Ok(())
+    }
 
     /// Updates the plugin internals at fixed rate (see [`PluginContext::dt`] parameter for more
     /// info).
-    fn update(&mut self, #[allow(unused_variables)] context: &mut PluginContext) {}
+    fn update(&mut self, #[allow(unused_variables)] context: &mut PluginContext) -> GameResult {
+        Ok(())
+    }
 
     /// called after all Plugin and Script updates
-    fn post_update(&mut self, #[allow(unused_variables)] context: &mut PluginContext) {}
+    fn post_update(
+        &mut self,
+        #[allow(unused_variables)] context: &mut PluginContext,
+    ) -> GameResult {
+        Ok(())
+    }
 
     /// The method is called when the main window receives an event from the OS. The main use of
     /// the method is to respond to some external events, for example an event from keyboard or
@@ -289,7 +632,8 @@ pub trait Plugin: PluginAsAny + Visit + Reflect {
         &mut self,
         #[allow(unused_variables)] event: &Event<()>,
         #[allow(unused_variables)] context: PluginContext,
-    ) {
+    ) -> GameResult {
+        Ok(())
     }
 
     /// The method is called when a graphics context was successfully created. It could be useful
@@ -297,55 +641,66 @@ pub trait Plugin: PluginAsAny + Visit + Reflect {
     fn on_graphics_context_initialized(
         &mut self,
         #[allow(unused_variables)] context: PluginContext,
-    ) {
+    ) -> GameResult {
+        Ok(())
     }
 
     /// The method is called before the actual frame rendering. It could be useful to render off-screen
     /// data (render something to texture, that can be used later in the main frame).
-    fn before_rendering(&mut self, #[allow(unused_variables)] context: PluginContext) {}
-
-    /// The method is called when the current graphics context was destroyed.
-    fn on_graphics_context_destroyed(&mut self, #[allow(unused_variables)] context: PluginContext) {
+    fn before_rendering(
+        &mut self,
+        #[allow(unused_variables)] context: PluginContext,
+    ) -> GameResult {
+        Ok(())
     }
 
-    /// The method will be called when there is any message from main user interface instance
-    /// of the engine.
+    /// The method is called when the current graphics context was destroyed.
+    fn on_graphics_context_destroyed(
+        &mut self,
+        #[allow(unused_variables)] context: PluginContext,
+    ) -> GameResult {
+        Ok(())
+    }
+
+    /// The method will be called when there is any message from a user interface (UI) instance
+    /// of the engine. Use `ui_handle` parameter to find out from which UI the message has come
+    /// from.
     fn on_ui_message(
         &mut self,
         #[allow(unused_variables)] context: &mut PluginContext,
         #[allow(unused_variables)] message: &UiMessage,
-    ) {
+        #[allow(unused_variables)] ui_handle: Handle<UserInterface>,
+    ) -> GameResult {
+        Ok(())
     }
 
-    /// This method is called when the engine starts loading a scene from the given `path`. It could
-    /// be used to "catch" the moment when the scene is about to be loaded; to show a progress bar
-    /// for example. See [`AsyncSceneLoader`] docs for usage example.
-    fn on_scene_begin_loading(
+    /// This method is called when a game error has occurred, allowing you to perform some
+    /// specific action to react to it (for example - to show an error message UI in your game).
+    ///
+    /// ## Important notes
+    ///
+    /// This method is called at the end of the current frame, and before that, the engine collects
+    /// all the errors into a queue and then processes them one by one. This means that this method
+    /// won't be called immediately when an error was returned by any of your plugin or script methods,
+    /// but instead the processing will be delayed to the end of the frame.
+    ///
+    /// The error passed by a reference here instead of by-value, because there could be multiple
+    /// plugins that can handle the error. This might seem counterintuitive, but remember that
+    /// [`GameError`] can occur during script execution, which is not a part of a plugin and its
+    /// methods executed separately, outside the plugin routines.
+    ///
+    /// ## Error handling
+    ///
+    /// This method should return `true` if the error was handled and no logging is needed, otherwise
+    /// it should return `false` and in this case, the error will be logged by the engine. When
+    /// `true` is returned by the plugin, the error won't be passed to any other plugins. By default,
+    /// this method returns `false`, which means that it does not handle any errors and the engine
+    /// will log the errors as usual.
+    fn on_game_error(
         &mut self,
-        #[allow(unused_variables)] path: &Path,
         #[allow(unused_variables)] context: &mut PluginContext,
-    ) {
-    }
-
-    /// This method is called when the engine finishes loading a scene from the given `path`. Use
-    /// this method if you need do something with a newly loaded scene. See [`AsyncSceneLoader`] docs
-    /// for usage example.
-    fn on_scene_loaded(
-        &mut self,
-        #[allow(unused_variables)] path: &Path,
-        #[allow(unused_variables)] scene: Handle<Scene>,
-        #[allow(unused_variables)] data: &[u8],
-        #[allow(unused_variables)] context: &mut PluginContext,
-    ) {
-    }
-
-    /// This method is called when the engine finishes loading a scene from the given `path` with
-    /// some error. This method could be used to report any issues to a user.
-    fn on_scene_loading_failed(
-        &mut self,
-        #[allow(unused_variables)] path: &Path,
-        #[allow(unused_variables)] error: &VisitError,
-        #[allow(unused_variables)] context: &mut PluginContext,
-    ) {
+        #[allow(unused_variables)] error: &GameError,
+    ) -> bool {
+        false
     }
 }

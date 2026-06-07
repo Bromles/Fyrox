@@ -26,15 +26,13 @@ use crate::fyrox::{
         math::Rect,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
-        uuid_provider,
         visitor::prelude::*,
     },
     gui::{
         brush::Brush,
-        define_constructor, define_widget_deref,
+        define_widget_deref,
         draw::{CommandTexture, Draw, DrawingContext},
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         widget::{Widget, WidgetBuilder, WidgetMessage},
         BuildContext, Control, UiNode, UserInterface,
     },
@@ -45,42 +43,40 @@ use crate::plugins::absm::{
 };
 use crate::utils::fetch_node_center;
 
+use fyrox::gui::message::MessageData;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use fyrox::material::MaterialResource;
-use std::ops::{Deref, DerefMut};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionMessage {
     Activate,
 }
+impl MessageData for TransitionMessage {}
 
-impl TransitionMessage {
-    define_constructor!(TransitionMessage:Activate => fn activate(), layout: false);
-}
-
-#[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "01798aee-8fe5-4480-a69d-8e5b95c3cc96"
+)]
 pub struct TransitionView {
     widget: Widget,
     pub segment: Segment,
     pub model_handle: ErasedHandle,
-    #[component(include)]
     selectable: Selectable,
     activity_factor: f32,
 }
 
 impl TransitionView {
     fn handle_selection_change(&self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::foreground(
+        ui.send(
             self.handle(),
-            MessageDirection::ToWidget,
-            if self.selectable.selected {
+            WidgetMessage::Foreground(if self.selectable.selected {
                 ui.style.property(Style::BRUSH_BRIGHT)
             } else {
                 ui.style.property(Style::BRUSH_LIGHTER)
-            },
-        ));
+            }),
+        );
     }
 }
 
@@ -111,8 +107,6 @@ pub fn draw_transition(
     drawing_context.commit(clip_bounds, brush, CommandTexture::None, material, None);
 }
 
-uuid_provider!(TransitionView = "01798aee-8fe5-4480-a69d-8e5b95c3cc96");
-
 impl Control for TransitionView {
     fn draw(&self, drawing_context: &mut DrawingContext) {
         let brush = if let Brush::Solid(color) = self.foreground() {
@@ -133,30 +127,31 @@ impl Control for TransitionView {
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
-        self.selectable
-            .handle_routed_message(self.handle(), ui, message);
-        self.segment.handle_routed_message(self.handle(), message);
+        if self
+            .selectable
+            .handle_routed_message(self.handle(), ui, message)
+        {
+            self.invalidate_visual();
+        }
+        if self.segment.handle_routed_message(self.handle(), message) {
+            self.invalidate_visual();
+        }
 
         if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
                 WidgetMessage::MouseEnter => {
-                    ui.send_message(WidgetMessage::foreground(
+                    ui.send(
                         self.handle(),
-                        MessageDirection::ToWidget,
-                        ui.style.property(Style::BRUSH_LIGHTEST),
-                    ));
+                        WidgetMessage::Foreground(ui.style.property(Style::BRUSH_LIGHTEST)),
+                    );
                 }
                 WidgetMessage::MouseLeave => {
                     self.handle_selection_change(ui);
                 }
                 _ => (),
             }
-        } else if let Some(SelectableMessage::Select(_)) = message.data() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.handle_selection_change(ui);
-            }
+        } else if let Some(SelectableMessage::Select(_)) = message.data_from(self.handle()) {
+            self.handle_selection_change(ui);
         } else if let Some(TransitionMessage::Activate) = message.data() {
             self.activity_factor = 1.0;
         }
@@ -193,7 +188,11 @@ impl TransitionBuilder {
         self
     }
 
-    pub fn build(self, model_handle: ErasedHandle, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(
+        self,
+        model_handle: ErasedHandle,
+        ctx: &mut BuildContext,
+    ) -> Handle<TransitionView> {
         let transition = TransitionView {
             widget: self
                 .widget_builder
@@ -212,7 +211,7 @@ impl TransitionBuilder {
             activity_factor: 0.0,
         };
 
-        ctx.add_node(UiNode::new(transition))
+        ctx.add(transition)
     }
 }
 

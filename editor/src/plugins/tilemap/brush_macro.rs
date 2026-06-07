@@ -18,6 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use super::*;
+use crate::command::{Command, CommandContext, CommandTrait};
+use fyrox::gui::dropdown_list::DropdownList;
+use fyrox::gui::message::{DeliveryMode, MessageData};
 use fyrox::{
     asset::{untyped::UntypedResource, Resource, ResourceData, ResourceDataRef},
     core::{
@@ -40,13 +44,6 @@ use fyrox::{
         MacroTilesUpdate,
     },
 };
-
-use crate::{
-    command::{Command, CommandContext, CommandTrait},
-    send_sync_message,
-};
-
-use super::*;
 
 const PROPERTY_LABEL_WIDTH: f32 = 150.0;
 const UNKNOWN_PROPERTY: &str = "UNKNOWN PROPERTY";
@@ -131,7 +128,7 @@ impl BrushMacroInstance {
     /// A typed reference to the configuration resource.
     pub fn settings<T>(&self) -> Option<Resource<T>>
     where
-        T: ResourceData + Default + TypeUuidProvider,
+        T: ResourceData + Default,
     {
         self.settings.as_ref()?.try_cast()
     }
@@ -214,7 +211,7 @@ impl BrushMacroCellContext {
     /// A typed reference to the configuration resource.
     pub fn settings<T>(&self) -> Option<Resource<T>>
     where
-        T: ResourceData + Default + TypeUuidProvider,
+        T: ResourceData + Default,
     {
         self.settings.as_ref()?.try_cast()
     }
@@ -618,6 +615,7 @@ impl CommandTrait for SetMacroNameCommand {
 /// Message sent from a [`MacroPropertyValueField`] when the value changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TileSetPropertyValueMessage(pub TileSetPropertyValueElement);
+impl MessageData for TileSetPropertyValueMessage {}
 
 impl TileSetPropertyValueMessage {
     /// Construct a message to indicate a change in the value of a [`MacroPropertyValueField`].
@@ -635,6 +633,7 @@ impl TileSetPropertyValueMessage {
 /// Message sent from a [`MacroPropertyField`] when the value changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TileSetPropertyMessage(pub Option<Uuid>);
+impl MessageData for TileSetPropertyMessage {}
 
 impl TileSetPropertyMessage {
     /// Construct a message to indicate a change in the value of a [`MacroPropertyField`].
@@ -656,7 +655,7 @@ impl TileSetPropertyMessage {
 pub struct MacroPropertyValueField {
     handle: Handle<UiNode>,
     textbox: Handle<UiNode>,
-    list: Handle<UiNode>,
+    list: Handle<DropdownList>,
 }
 
 fn make_index_and_value_list(
@@ -714,14 +713,17 @@ impl MacroPropertyValueField {
         let textbox = match &value {
             Element::I32(v) => NumericUpDownBuilder::<i32>::new(wb)
                 .with_value(*v)
-                .build(ctx),
+                .build(ctx)
+                .to_base(),
             Element::F32(v) => NumericUpDownBuilder::<f32>::new(wb)
                 .with_value(*v)
-                .build(ctx),
+                .build(ctx)
+                .to_base(),
             Element::I8(v) => NumericUpDownBuilder::<i8>::new(wb)
                 .with_value(*v)
-                .build(ctx),
-            Element::String(v) => TextBoxBuilder::new(wb).with_text(v).build(ctx),
+                .build(ctx)
+                .to_base(),
+            Element::String(v) => TextBoxBuilder::new(wb).with_text(v).build(ctx).to_base(),
         };
         let list = if let Ok(value) = value.try_into() {
             let (index, items) = make_index_and_value_list(prop, value, ctx);
@@ -742,7 +744,8 @@ impl MacroPropertyValueField {
         .add_column(Column::stretch())
         .add_row(Row::auto())
         .add_row(Row::auto())
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Self {
             handle,
             textbox,
@@ -766,31 +769,18 @@ impl MacroPropertyValueField {
     ) {
         use TileSetPropertyValueElement as Element;
         let msg = match &value {
-            Element::I32(v) => {
-                NumericUpDownMessage::value(self.textbox, MessageDirection::ToWidget, *v)
-            }
-            Element::F32(v) => {
-                NumericUpDownMessage::value(self.textbox, MessageDirection::ToWidget, *v)
-            }
+            Element::I32(v) => UiMessage::for_widget(self.textbox, NumericUpDownMessage::Value(*v)),
+            Element::F32(v) => UiMessage::for_widget(self.textbox, NumericUpDownMessage::Value(*v)),
             Element::String(v) => {
-                TextMessage::text(self.textbox, MessageDirection::ToWidget, v.to_string())
+                UiMessage::for_widget(self.textbox, TextMessage::Text(v.to_string()))
             }
-            Element::I8(v) => {
-                NumericUpDownMessage::value(self.textbox, MessageDirection::ToWidget, *v)
-            }
+            Element::I8(v) => UiMessage::for_widget(self.textbox, NumericUpDownMessage::Value(*v)),
         };
-        send_sync_message(ui, msg);
+        ui.send_message(msg.with_delivery_mode(DeliveryMode::SyncOnly));
         if let Ok(value) = value.try_into() {
             let (index, items) = make_index_and_value_list(prop, value, &mut ui.build_ctx());
-            ui.send_message(DropdownListMessage::items(
-                self.list,
-                MessageDirection::ToWidget,
-                items,
-            ));
-            send_sync_message(
-                ui,
-                DropdownListMessage::selection(self.list, MessageDirection::ToWidget, Some(index)),
-            );
+            ui.send_sync(self.list, DropdownListMessage::Items(items));
+            ui.send_sync(self.list, DropdownListMessage::Selection(Some(index)));
         }
     }
     fn on_numeric_message(
@@ -805,13 +795,9 @@ impl MacroPropertyValueField {
             MessageDirection::FromWidget,
             element,
         ));
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(
-                self.list,
-                MessageDirection::ToWidget,
-                Some(find_list_index(prop, value)),
-            ),
+        ui.send_sync(
+            self.list,
+            DropdownListMessage::Selection(Some(find_list_index(prop, value))),
         );
     }
     /// Handle the given message, which might be relevant to some widget in the field.
@@ -864,7 +850,7 @@ impl MacroPropertyValueField {
                     ui,
                 );
             }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+        } else if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
             if message.destination() == self.list
                 && message.direction() == MessageDirection::FromWidget
                 && *index > 0
@@ -877,16 +863,16 @@ impl MacroPropertyValueField {
                     ));
                     let msg = match v.value {
                         NamableValue::I32(v) => {
-                            NumericUpDownMessage::value(self.textbox, MessageDirection::ToWidget, v)
+                            UiMessage::for_widget(self.textbox, NumericUpDownMessage::Value(v))
                         }
                         NamableValue::F32(v) => {
-                            NumericUpDownMessage::value(self.textbox, MessageDirection::ToWidget, v)
+                            UiMessage::for_widget(self.textbox, NumericUpDownMessage::Value(v))
                         }
                         NamableValue::I8(v) => {
-                            NumericUpDownMessage::value(self.textbox, MessageDirection::ToWidget, v)
+                            UiMessage::for_widget(self.textbox, NumericUpDownMessage::Value(v))
                         }
                     };
-                    send_sync_message(ui, msg);
+                    ui.send_message(msg.with_delivery_mode(DeliveryMode::SyncOnly));
                 }
             }
         }
@@ -902,6 +888,7 @@ fn make_item(text: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
         ),
     ))
     .build(ctx)
+    .to_base()
 }
 
 /// A field that allows the user to choose a property from a [`TileSet`].
@@ -911,7 +898,7 @@ fn make_item(text: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
 pub struct MacroPropertyField {
     prop_type: TileSetPropertyType,
     handle: Handle<UiNode>,
-    list: Handle<UiNode>,
+    list: Handle<DropdownList>,
 }
 
 fn make_index_and_items(
@@ -971,7 +958,8 @@ impl MacroPropertyField {
             .add_column(Column::strict(PROPERTY_LABEL_WIDTH))
             .add_column(Column::stretch())
             .add_row(Row::auto())
-            .build(ctx);
+            .build(ctx)
+            .to_base();
         Self {
             prop_type,
             handle,
@@ -987,15 +975,8 @@ impl MacroPropertyField {
     pub fn sync(&self, value: Option<&Uuid>, tile_set: Option<&TileSet>, ui: &mut UserInterface) {
         let (index, items) =
             make_index_and_items(self.prop_type, value, tile_set, &mut ui.build_ctx());
-        ui.send_message(DropdownListMessage::items(
-            self.list,
-            MessageDirection::ToWidget,
-            items,
-        ));
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(self.list, MessageDirection::ToWidget, Some(index)),
-        );
+        ui.send_sync(self.list, DropdownListMessage::Items(items));
+        ui.send_sync(self.list, DropdownListMessage::Selection(Some(index)));
     }
     /// Handle the given message, which might be relevant to some widget in the field.
     pub fn on_ui_message(
@@ -1004,7 +985,7 @@ impl MacroPropertyField {
         message: &UiMessage,
         ui: &mut UserInterface,
     ) {
-        if let Some(DropdownListMessage::SelectionChanged(index)) = message.data() {
+        if let Some(DropdownListMessage::Selection(index)) = message.data() {
             if message.destination() == self.list
                 && message.direction() == MessageDirection::FromWidget
             {

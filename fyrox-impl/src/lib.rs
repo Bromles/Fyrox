@@ -32,6 +32,7 @@
 #![allow(clippy::approx_constant)]
 #![allow(clippy::doc_lazy_continuation)]
 #![allow(clippy::mutable_key_type)]
+#![allow(mismatched_lifetime_syntaxes)]
 
 pub mod engine;
 pub mod material;
@@ -44,18 +45,17 @@ pub mod utils;
 
 pub use crate::core::rand;
 pub use fxhash;
-pub use lazy_static;
 pub use walkdir;
 pub use winit::*;
+
+#[doc(inline)]
+pub use fyrox_core as core;
 
 #[doc(inline)]
 pub use fyrox_animation as generic_animation;
 
 #[doc(inline)]
 pub use fyrox_graph as graph;
-
-#[doc(inline)]
-pub use fyrox_core as core;
 
 #[doc(inline)]
 pub use fyrox_resource as asset;
@@ -65,6 +65,12 @@ pub use fyrox_ui as gui;
 
 #[doc(inline)]
 pub use fyrox_autotile as autotile;
+
+#[doc(inline)]
+pub use fyrox_graphics as graphics;
+
+#[doc(inline)]
+pub use fyrox_graphics_gl as graphics_gl;
 
 /// Defines a builder's `with_xxx` method.
 #[macro_export]
@@ -95,14 +101,14 @@ mod test {
         let widget = WidgetBuilder::new().build(&ui.build_ctx());
         let status = Status::Stopped;
 
-        assert_eq!(var.assembly_name(), "fyrox-core");
-        assert_eq!(base.assembly_name(), "fyrox-impl");
-        assert_eq!(widget.assembly_name(), "fyrox-ui");
-        assert_eq!(status.assembly_name(), "fyrox-sound");
+        assert_eq!(var.type_info_ref().assembly_name, "fyrox-core");
+        assert_eq!(base.type_info_ref().assembly_name, "fyrox-impl");
+        assert_eq!(widget.type_info_ref().assembly_name, "fyrox-ui");
+        assert_eq!(status.type_info_ref().assembly_name, "fyrox-sound");
 
-        assert_eq!(ImmutableString::type_assembly_name(), "fyrox-core");
-        assert_eq!(Base::type_assembly_name(), "fyrox-impl");
-        assert_eq!(Widget::type_assembly_name(), "fyrox-ui");
-        assert_eq!(Status::type_assembly_name(), "fyrox-sound");
+        assert_eq!(ImmutableString::type_info().assembly_name, "fyrox-core");
+        assert_eq!(Base::type_info().assembly_name, "fyrox-impl");
+        assert_eq!(Widget::type_info().assembly_name, "fyrox-ui");
+        assert_eq!(Status::type_info().assembly_name, "fyrox-sound");
     }
 }

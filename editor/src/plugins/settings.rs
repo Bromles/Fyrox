@@ -20,26 +20,24 @@
 
 //! Settings window plugin.
 
+use crate::menu::create_menu_item_shortcut;
 use crate::{
     fyrox::{
-        core::{log::Log, parking_lot::lock_api::Mutex, pool::Handle, some_or_return},
+        core::{
+            log::Log, parking_lot::lock_api::Mutex, pool::Handle, reflect::Reflect, some_or_return,
+        },
         engine::Engine,
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
         gui::{
             button::{ButtonBuilder, ButtonMessage},
             dock::DockingManagerMessage,
             grid::{Column, GridBuilder, Row},
             inspector::{
-                editors::{
-                    collection::VecCollectionPropertyEditorDefinition,
-                    enumeration::EnumPropertyEditorDefinition,
-                    inspectable::InspectablePropertyEditorDefinition,
-                    key::HotKeyPropertyEditorDefinition, PropertyEditorDefinitionContainer,
-                },
-                Inspector, InspectorBuilder, InspectorContext, InspectorMessage, PropertyAction,
+                editors::PropertyEditorDefinitionContainer, Inspector, InspectorBuilder,
+                InspectorContext, InspectorContextArgs, InspectorMessage, PropertyAction,
             },
             menu::MenuItemMessage,
-            message::{MessageDirection, UiMessage},
+            message::UiMessage,
             scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
             searchbar::{SearchBarBuilder, SearchBarMessage},
             stack_panel::StackPanelBuilder,
@@ -47,86 +45,37 @@ use crate::{
             window::{WindowBuilder, WindowMessage, WindowTitle},
             HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
         },
-        renderer::QualitySettings,
     },
-    menu::create_menu_item,
-    message::MessageSender,
+    load_image,
     plugin::EditorPlugin,
-    settings::{
-        build::BuildSettings,
-        camera::CameraSettings,
-        debugging::DebuggingSettings,
-        general::{EditorStyle, GeneralSettings, ScriptEditor},
-        graphics::GraphicsSettings,
-        keys::{KeyBindings, TerrainKeyBindings},
-        model::ModelSettings,
-        move_mode::MoveInteractionModeSettings,
-        navmesh::NavmeshSettings,
-        rotate_mode::RotateInteractionModeSettings,
-        selection::SelectionSettings,
-        Settings,
-    },
-    Editor, MSG_SYNC_FLAG,
+    settings::Settings,
+    Editor,
 };
-use fyrox::asset::manager::ResourceManager;
-use fyrox::core::reflect::Reflect;
-use fyrox::gui::inspector::InspectorContextArgs;
-use fyrox::renderer::{CsmSettings, ShadowMapPrecision};
-use fyrox_build_tools::{BuildProfile, CommandDescriptor, EnvironmentVariable};
+use fyrox::core::ok_or_return;
+use fyrox::core::uuid::{uuid, Uuid};
+use fyrox::engine::GraphicsContext;
+use fyrox::gui::button::Button;
+use fyrox::gui::dock::DockingManager;
+use fyrox::gui::menu::MenuItem;
+use fyrox::gui::scroll_viewer::ScrollViewer;
+use fyrox::gui::searchbar::SearchBar;
+use fyrox::gui::stack_panel::StackPanel;
+use fyrox::gui::text_box::EmptyTextPlaceholder;
+use fyrox::gui::window::{Window, WindowAlignment};
 use rust_fuzzy_search::fuzzy_compare;
 use std::sync::Arc;
-
-fn make_property_editors_container(
-    sender: MessageSender,
-    resource_manager: ResourceManager,
-) -> Arc<PropertyEditorDefinitionContainer> {
-    let container = crate::plugins::inspector::editors::make_property_editors_container(
-        sender,
-        resource_manager,
-    );
-
-    container.insert(InspectablePropertyEditorDefinition::<GeneralSettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<GraphicsSettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<SelectionSettings>::new());
-    container.insert(EnumPropertyEditorDefinition::<ShadowMapPrecision>::new());
-    container.insert(EnumPropertyEditorDefinition::<ScriptEditor>::new());
-    container.insert(EnumPropertyEditorDefinition::<EditorStyle>::new());
-    container.insert(InspectablePropertyEditorDefinition::<DebuggingSettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<CsmSettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<QualitySettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<CameraSettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<
-        MoveInteractionModeSettings,
-    >::new());
-    container.insert(InspectablePropertyEditorDefinition::<
-        RotateInteractionModeSettings,
-    >::new());
-    container.insert(InspectablePropertyEditorDefinition::<ModelSettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<NavmeshSettings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<KeyBindings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<TerrainKeyBindings>::new());
-    container.insert(InspectablePropertyEditorDefinition::<BuildSettings>::new());
-    container.insert(VecCollectionPropertyEditorDefinition::<EnvironmentVariable>::new());
-    container.insert(InspectablePropertyEditorDefinition::<EnvironmentVariable>::new());
-    container.insert(VecCollectionPropertyEditorDefinition::<BuildProfile>::new());
-    container.insert(InspectablePropertyEditorDefinition::<BuildProfile>::new());
-    container.insert(VecCollectionPropertyEditorDefinition::<CommandDescriptor>::new());
-    container.insert(InspectablePropertyEditorDefinition::<CommandDescriptor>::new());
-    container.insert(HotKeyPropertyEditorDefinition);
-    Arc::new(container)
-}
 
 #[derive(Clone, PartialEq)]
 struct GroupName(String);
 
 pub struct SettingsWindow {
-    pub window: Handle<UiNode>,
-    ok: Handle<UiNode>,
-    default: Handle<UiNode>,
-    inspector: Handle<UiNode>,
-    groups: Handle<UiNode>,
-    scroll_viewer: Handle<UiNode>,
-    search_bar: Handle<UiNode>,
+    pub window: Handle<Window>,
+    ok: Handle<Button>,
+    default: Handle<Button>,
+    inspector: Handle<Inspector>,
+    groups: Handle<StackPanel>,
+    scroll_viewer: Handle<ScrollViewer>,
+    search_bar: Handle<SearchBar>,
     clipboard: Option<Box<dyn Reflect>>,
 }
 
@@ -143,6 +92,7 @@ impl SettingsWindow {
                 .on_column(0)
                 .with_uniform_margin(2.0),
         )
+        .with_empty_text_placeholder(EmptyTextPlaceholder::Text("Search for a setting"))
         .build(ctx);
 
         let inspector = InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
@@ -177,7 +127,7 @@ impl SettingsWindow {
         .add_row(Row::stretch())
         .build(ctx);
 
-        let window = WindowBuilder::new(WidgetBuilder::new().with_width(500.0).with_height(600.0))
+        let window = WindowBuilder::new(WidgetBuilder::new().with_width(700.0).with_height(800.0))
             .open(false)
             .with_title(WindowTitle::text("Settings"))
             .with_tab_label("Settings")
@@ -240,38 +190,39 @@ impl SettingsWindow {
         &self,
         ui: &mut UserInterface,
         settings: &Settings,
-        sender: &MessageSender,
-        resource_manager: ResourceManager,
+        property_editors: Arc<PropertyEditorDefinitionContainer>,
     ) {
-        ui.send_message(WindowMessage::open(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
 
-        self.sync_to_model(ui, settings, sender, resource_manager);
+        self.sync_to_model(ui, settings, property_editors);
     }
 
     fn sync_to_model(
         &self,
         ui: &mut UserInterface,
         settings: &Settings,
-        sender: &MessageSender,
-        resource_manager: ResourceManager,
+        property_editors: Arc<PropertyEditorDefinitionContainer>,
     ) {
         let ctx = &mut ui.build_ctx();
         let context = InspectorContext::from_object(InspectorContextArgs {
             object: &**settings,
             ctx,
-            definition_container: make_property_editors_container(sender.clone(), resource_manager),
+            definition_container: property_editors,
             environment: None,
-            sync_flag: MSG_SYNC_FLAG,
             layer_index: 0,
             generate_property_string_values: true,
             filter: Default::default(),
-            name_column_width: 150.0,
+            name_column_width: 250.0,
+            hide_name_column: false,
             base_path: Default::default(),
+            has_parent_object: false,
         });
         let groups =
             context
@@ -283,18 +234,11 @@ impl SettingsWindow {
                     ))))
                     .with_text(&entry.property_display_name)
                     .build(ctx)
+                    .to_base()
                 })
                 .collect::<Vec<_>>();
-        ui.send_message(WidgetMessage::replace_children(
-            self.groups,
-            MessageDirection::ToWidget,
-            groups,
-        ));
-        ui.send_message(InspectorMessage::context(
-            self.inspector,
-            MessageDirection::ToWidget,
-            context,
-        ));
+        ui.send(self.groups, WidgetMessage::ReplaceChildren(groups));
+        ui.send(self.inspector, InspectorMessage::Context(context));
     }
 
     fn apply_filter(&self, filter_text: &str, ui: &UserInterface) {
@@ -303,7 +247,7 @@ impl SettingsWindow {
             inspector: Handle<UiNode>,
             ui: &UserInterface,
         ) -> bool {
-            let inspector = some_or_return!(ui.try_get_of_type::<Inspector>(inspector), false);
+            let inspector = ok_or_return!(ui.try_get_of_type::<Inspector>(inspector), false);
 
             let mut is_any_match = false;
             for entry in inspector.context.entries.iter() {
@@ -311,7 +255,7 @@ impl SettingsWindow {
                 // matching search criteria.
                 let mut inner_match = false;
                 let sub_inspector = ui.find_handle(entry.property_editor, &mut |node| {
-                    node.has_component::<Inspector>()
+                    node.is_or_has_field::<Inspector>()
                 });
                 if sub_inspector.is_some() {
                     inner_match |= apply_recursive(filter_text, sub_inspector, ui);
@@ -321,11 +265,10 @@ impl SettingsWindow {
                 inner_match |= display_name.contains(filter_text)
                     || fuzzy_compare(filter_text, display_name.as_str()) >= 0.5;
 
-                ui.send_message(WidgetMessage::visibility(
+                ui.send(
                     entry.property_container,
-                    MessageDirection::ToWidget,
-                    inner_match,
-                ));
+                    WidgetMessage::Visibility(inner_match),
+                );
 
                 is_any_match |= inner_match;
             }
@@ -333,7 +276,7 @@ impl SettingsWindow {
             is_any_match
         }
 
-        apply_recursive(filter_text, self.inspector, ui);
+        apply_recursive(filter_text, self.inspector.to_base(), ui);
     }
 
     pub fn handle_ui_message(
@@ -341,8 +284,8 @@ impl SettingsWindow {
         message: &UiMessage,
         engine: &mut Engine,
         settings: &mut Settings,
-        sender: &MessageSender,
-        docking_manager: Handle<UiNode>,
+        docking_manager: Handle<DockingManager>,
+        property_editors: Arc<PropertyEditorDefinitionContainer>,
     ) -> Option<Self> {
         let ui = engine.user_interfaces.first_mut();
 
@@ -361,33 +304,28 @@ impl SettingsWindow {
 
         if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
             if message.destination() == self.ok {
-                ui.send_message(WindowMessage::close(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.window, WindowMessage::Close);
             } else if message.destination() == self.default {
                 **settings = Default::default();
 
-                self.sync_to_model(ui, settings, sender, engine.resource_manager.clone());
+                self.sync_to_model(ui, settings, property_editors);
             }
 
-            if let Some(node) = ui.try_get(message.destination()) {
+            if let Ok(node) = ui.try_get_node(message.destination()) {
                 if let Some(user_data) = node.user_data_cloned::<GroupName>() {
-                    let inspector = ui.try_get_of_type::<Inspector>(self.inspector).unwrap();
-
+                    let inspector = &ui[self.inspector];
                     if let Some(entry) = inspector.context.find_property_editor_by_tag(&user_data.0)
                     {
-                        ui.send_message(ScrollViewerMessage::bring_into_view(
+                        ui.send(
                             self.scroll_viewer,
-                            MessageDirection::ToWidget,
-                            entry.property_container,
-                        ));
+                            ScrollViewerMessage::BringIntoView(entry.property_container),
+                        );
                     }
                 }
             }
         } else if let Some(InspectorMessage::PropertyChanged(property_changed)) = message.data() {
             if message.destination() == self.inspector {
-                PropertyAction::from_field_kind(&property_changed.value).apply(
+                PropertyAction::from_field_action(&property_changed.action).apply(
                     &property_changed.path(),
                     &mut **settings,
                     &mut Log::verify,
@@ -395,38 +333,31 @@ impl SettingsWindow {
             }
         } else if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == self.window {
-                ui.send_message(WidgetMessage::remove(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
-                ui.send_message(DockingManagerMessage::remove_floating_window(
+                ui.send(self.window, WidgetMessage::Remove);
+                ui.send(
                     docking_manager,
-                    MessageDirection::ToWidget,
-                    self.window,
-                ));
+                    DockingManagerMessage::RemoveFloatingWindow(self.window),
+                );
                 return None;
             }
-        } else if let Some(SearchBarMessage::Text(search_text)) = message.data() {
-            if message.destination() == self.search_bar
-                && message.direction() == MessageDirection::FromWidget
-            {
-                let filter = search_text.to_lowercase();
-                self.apply_filter(&filter, ui);
-            }
+        } else if let Some(SearchBarMessage::Text(search_text)) = message.data_from(self.search_bar)
+        {
+            let filter = search_text.to_lowercase();
+            self.apply_filter(&filter, ui);
         }
 
-        let graphics_context = engine.graphics_context.as_initialized_mut();
-
-        if settings.graphics.quality != graphics_context.renderer.get_quality_settings() {
-            if let Err(e) = graphics_context
-                .renderer
-                .set_quality_settings(&settings.graphics.quality)
-            {
-                Log::err(format!(
-                    "An error occurred at attempt to set new graphics settings: {e:?}"
-                ));
-            } else {
-                Log::info("New graphics quality settings were successfully set!");
+        if let GraphicsContext::Initialized(ref mut graphics_context) = engine.graphics_context {
+            if settings.graphics.quality != graphics_context.renderer.get_quality_settings() {
+                if let Err(e) = graphics_context
+                    .renderer
+                    .set_quality_settings(&settings.graphics.quality)
+                {
+                    Log::err(format!(
+                        "An error occurred at attempt to set new graphics settings: {e:?}"
+                    ));
+                } else {
+                    Log::info("New graphics quality settings were successfully set!");
+                }
             }
         }
 
@@ -437,26 +368,22 @@ impl SettingsWindow {
 #[derive(Default)]
 pub struct SettingsPlugin {
     window: Option<SettingsWindow>,
-    open_settings: Handle<UiNode>,
+    open_settings: Handle<MenuItem>,
 }
 
 impl SettingsPlugin {
+    pub const SETTINGS: Uuid = uuid!("7c7799e9-d15e-44be-a70a-8e280d55ff18");
+
     fn on_open_settings_clicked(&mut self, editor: &mut Editor) {
         let window = self
             .window
             .get_or_insert_with(|| SettingsWindow::new(&mut editor.engine));
         let ui = editor.engine.user_interfaces.first_mut();
-        window.open(
-            ui,
-            &editor.settings,
-            &editor.message_sender,
-            editor.engine.resource_manager.clone(),
-        );
-        ui.send_message(DockingManagerMessage::add_floating_window(
+        window.open(ui, &editor.settings, editor.property_editors.clone());
+        ui.send(
             editor.docking_manager,
-            MessageDirection::ToWidget,
-            window.window,
-        ));
+            DockingManagerMessage::AddFloatingWindow(window.window),
+        );
     }
 }
 
@@ -464,12 +391,18 @@ impl EditorPlugin for SettingsPlugin {
     fn on_start(&mut self, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
         let ctx = &mut ui.build_ctx();
-        self.open_settings = create_menu_item("Editor Settings...", vec![], ctx);
-        ui.send_message(MenuItemMessage::add_item(
+        self.open_settings = create_menu_item_shortcut(
+            "Editor Settings...",
+            load_image!("../../resources/settings.png"),
+            Self::SETTINGS,
+            "",
+            vec![],
+            ctx,
+        );
+        ui.send(
             editor.menu.file_menu.menu,
-            MessageDirection::ToWidget,
-            self.open_settings,
-        ));
+            MenuItemMessage::AddItem(self.open_settings),
+        );
     }
 
     fn on_ui_message(&mut self, message: &mut UiMessage, editor: &mut Editor) {
@@ -484,8 +417,8 @@ impl EditorPlugin for SettingsPlugin {
             message,
             &mut editor.engine,
             &mut editor.settings,
-            &editor.message_sender,
             editor.docking_manager,
+            editor.property_editors.clone(),
         );
     }
 }

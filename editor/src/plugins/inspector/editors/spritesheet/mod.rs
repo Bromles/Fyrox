@@ -19,20 +19,17 @@
 // SOFTWARE.
 
 use crate::fyrox::{
-    core::{
-        pool::Handle, reflect::prelude::*, type_traits::prelude::*, uuid_provider,
-        visitor::prelude::*,
-    },
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
     gui::{
         button::{ButtonBuilder, ButtonMessage},
-        define_constructor, define_widget_deref,
+        define_widget_deref,
         grid::{Column, GridBuilder, Row},
         inspector::{
             editors::{
                 PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
                 PropertyEditorMessageContext, PropertyEditorTranslationContext,
             },
-            FieldKind, InspectorError, PropertyChanged,
+            FieldAction, InspectorError, PropertyChanged,
         },
         message::{MessageDirection, UiMessage},
         text::TextBuilder,
@@ -44,10 +41,10 @@ use crate::fyrox::{
 };
 use crate::plugins::inspector::editors::spritesheet::window::SpriteSheetFramesEditorWindow;
 
-use std::{
-    any::TypeId,
-    ops::{Deref, DerefMut},
-};
+use fyrox::gui::button::Button;
+use fyrox::gui::message::MessageData;
+use fyrox::gui::window::WindowAlignment;
+use std::any::TypeId;
 
 mod window;
 
@@ -58,22 +55,20 @@ pub struct SpriteSheetFramesContainerEditorDefinition;
 pub enum SpriteSheetFramesPropertyEditorMessage {
     Value(SpriteSheetFramesContainer),
 }
+impl MessageData for SpriteSheetFramesPropertyEditorMessage {}
 
-impl SpriteSheetFramesPropertyEditorMessage {
-    define_constructor!(SpriteSheetFramesPropertyEditorMessage:Value => fn value(SpriteSheetFramesContainer), layout: false);
-}
-
-#[derive(Clone, Debug, Reflect, Visit, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Debug, Reflect, Visit)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "8994228d-6106-4e41-872c-5191840badcc"
+)]
 pub struct SpriteSheetFramesPropertyEditor {
     widget: Widget,
-    edit_button: Handle<UiNode>,
+    edit_button: Handle<Button>,
     container: SpriteSheetFramesContainer,
 }
 
 define_widget_deref!(SpriteSheetFramesPropertyEditor);
-
-uuid_provider!(SpriteSheetFramesPropertyEditor = "8994228d-6106-4e41-872c-5191840badcc");
 
 impl Control for SpriteSheetFramesPropertyEditor {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -87,25 +82,28 @@ impl Control for SpriteSheetFramesPropertyEditor {
                     self.handle,
                 );
 
-                ui.send_message(WindowMessage::open_modal(
+                ui.send(
                     window,
-                    MessageDirection::ToWidget,
-                    true,
-                    true,
-                ));
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Center,
+                        modal: true,
+                        focus_content: true,
+                    },
+                );
             }
-        } else if let Some(SpriteSheetFramesPropertyEditorMessage::Value(value)) = message.data() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-            {
-                self.container = value.clone();
-            }
+        } else if let Some(SpriteSheetFramesPropertyEditorMessage::Value(value)) =
+            message.data_for(self.handle)
+        {
+            self.container = value.clone();
         }
     }
 }
 
 impl SpriteSheetFramesPropertyEditor {
-    pub fn build(ctx: &mut BuildContext, container: SpriteSheetFramesContainer) -> Handle<UiNode> {
+    pub fn build(
+        ctx: &mut BuildContext,
+        container: SpriteSheetFramesContainer,
+    ) -> Handle<SpriteSheetFramesPropertyEditor> {
         let edit_button;
         let grid = GridBuilder::new(
             WidgetBuilder::new()
@@ -135,11 +133,11 @@ impl SpriteSheetFramesPropertyEditor {
         .add_column(Column::auto())
         .build(ctx);
 
-        ctx.add_node(UiNode::new(Self {
+        ctx.add(Self {
             widget: WidgetBuilder::new().with_child(grid).build(ctx),
             edit_button,
             container,
-        }))
+        })
     }
 }
 
@@ -158,7 +156,7 @@ impl PropertyEditorDefinition for SpriteSheetFramesContainerEditorDefinition {
 
         let editor = SpriteSheetFramesPropertyEditor::build(ctx.build_context, value.clone());
 
-        Ok(PropertyEditorInstance::Simple { editor })
+        Ok(PropertyEditorInstance::simple(editor))
     }
 
     fn create_message(
@@ -169,10 +167,9 @@ impl PropertyEditorDefinition for SpriteSheetFramesContainerEditorDefinition {
             .property_info
             .cast_value::<SpriteSheetFramesContainer>()?;
 
-        Ok(Some(SpriteSheetFramesPropertyEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            SpriteSheetFramesPropertyEditorMessage::Value(value.clone()),
         )))
     }
 
@@ -184,7 +181,7 @@ impl PropertyEditorDefinition for SpriteSheetFramesContainerEditorDefinition {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(container.clone()),
+                    action: FieldAction::object(container.clone()),
                 });
             }
         }

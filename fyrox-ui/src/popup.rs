@@ -18,41 +18,41 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Popup is used to display other widgets in floating panel, that could lock input in self bounds. See [`Popup`] docs
+//! Popup is used to display other widgets in floating panel, that could lock input in its bounds. See [`Popup`] docs
 //! for more info and usage examples.
 
 #![warn(missing_docs)]
 
-use crate::style::resource::StyleResourceExt;
-use crate::style::Style;
+use crate::message::MessageData;
 use crate::{
     border::BorderBuilder,
     core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, variable::InheritableVariable, visitor::prelude::*,
+        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*,
+        variable::InheritableVariable, visitor::prelude::*,
     },
-    define_constructor,
-    message::{ButtonState, KeyCode, MessageDirection, OsEvent, UiMessage},
+    message::{ButtonState, KeyCode, OsEvent, UiMessage},
+    style::{resource::StyleResourceExt, Style},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, RestrictionEntry, Thickness, UiNode, UserInterface,
 };
-
-use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
-use std::ops::{Deref, DerefMut};
+use fyrox_core::pool::ObjectOrVariant;
+use fyrox_graph::{
+    constructor::{ConstructorProvider, GraphNodeConstructor},
+    SceneGraph,
+};
 
 /// A set of messages for [`Popup`] widget.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PopupMessage {
-    /// Used to open a [`Popup`] widgets. Use [`PopupMessage::open`] to create the message.
+    /// Used to open a [`Popup`] widgets. Use [`PopupMessage::Open`] to create the message.
     Open,
-    /// Used to close a [`Popup`] widgets. Use [`PopupMessage::close`] to create the message.
+    /// Used to close a [`Popup`] widgets. Use [`PopupMessage::Close`] to create the message.
     Close,
-    /// Used to change the content of a [`Popup`] widgets. Use [`PopupMessage::content`] to create the message.
+    /// Used to change the content of a [`Popup`] widgets. Use [`PopupMessage::Content`] to create the message.
     Content(Handle<UiNode>),
-    /// Used to change popup's placement. Use [`PopupMessage::placement`] to create the message.
+    /// Used to change popup's placement. Use [`PopupMessage::Placement`] to create the message.
     Placement(Placement),
-    /// Used to adjust position of a popup widget, so it will be on screen. Use [`PopupMessage::adjust_position`] to create
+    /// Used to adjust the position of a popup widget, so it will be on screen. Use [`PopupMessage::AdjustPosition`] to create
     /// the message.
     AdjustPosition,
     /// Used to set the owner of a Popup. The owner will receive Event messages.
@@ -61,39 +61,15 @@ pub enum PopupMessage {
     RelayedMessage(UiMessage),
 }
 
-impl PopupMessage {
-    define_constructor!(
-        /// Creates [`PopupMessage::Open`] message.
-        PopupMessage:Open => fn open(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`PopupMessage::Close`] message.
-        PopupMessage:Close => fn close(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`PopupMessage::Content`] message.
-        PopupMessage:Content => fn content(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`PopupMessage::Placement`] message.
-        PopupMessage:Placement => fn placement(Placement), layout: false
-    );
-    define_constructor!(
-        /// Creates [`PopupMessage::AdjustPosition`] message.
-        PopupMessage:AdjustPosition => fn adjust_position(), layout: true
-    );
-    define_constructor!(
-        /// Creates [`PopupMessage::Owner`] message.
-        PopupMessage:Owner => fn owner(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`PopupMessage::RelayedMessage`] message.
-        PopupMessage:RelayedMessage => fn relayed_message(UiMessage), layout: false
-    );
+impl MessageData for PopupMessage {
+    fn need_perform_layout(&self) -> bool {
+        matches!(self, Self::AdjustPosition)
+    }
 }
 
 /// Defines a method of popup placement.
 #[derive(Copy, Clone, PartialEq, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "1c641540-59eb-4ccd-a090-2173dab02245")]
 pub enum Placement {
     /// A popup should be placed relative to given widget at the left top corner of the widget screen bounds.
     /// Widget handle could be [`Handle::NONE`], in this case the popup will be placed at the left top corner of the screen.
@@ -104,7 +80,7 @@ pub enum Placement {
     RightTop(Handle<UiNode>),
 
     /// A popup should be placed relative to given widget at the center of the widget screen bounds.
-    /// Widget handle could be [`Handle::NONE`], in this case the popup will be placed at the center of the screen.
+    /// Widget handle could be [`Handle::NONE`], in this case, the popup will be placed at the center of the screen.
     Center(Handle<UiNode>),
 
     /// A popup should be placed relative to given widget at the left bottom corner of the widget screen bounds.
@@ -151,7 +127,7 @@ impl Placement {
     }
 }
 
-/// Popup is used to display other widgets in floating panel, that could lock input in self bounds.
+/// Popup is used to display other widgets in floating panel, that could lock input in its bounds.
 ///
 /// ## How to create
 ///
@@ -159,10 +135,10 @@ impl Placement {
 ///
 /// ```rust
 /// # use fyrox_ui::{
-/// #     button::ButtonBuilder, core::pool::Handle, popup::PopupBuilder, widget::WidgetBuilder,
+/// #     button::ButtonBuilder, core::pool::Handle, popup::{Popup, PopupBuilder}, widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
-/// fn create_popup_with_button(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_popup_with_button(ctx: &mut BuildContext) -> Handle<Popup> {
 ///     PopupBuilder::new(WidgetBuilder::new())
 ///         .with_content(
 ///             ButtonBuilder::new(WidgetBuilder::new())
@@ -185,7 +161,9 @@ impl Placement {
 /// #     widget::WidgetBuilder,
 /// #     UiNode, UserInterface,
 /// # };
-/// fn create_popup_with_button_and_open_it(ui: &mut UserInterface) -> Handle<UiNode> {
+/// # use fyrox_ui::popup::Popup;
+///
+/// fn create_popup_with_button_and_open_it(ui: &mut UserInterface) -> Handle<Popup> {
 ///     let popup = PopupBuilder::new(WidgetBuilder::new())
 ///         .with_content(
 ///             ButtonBuilder::new(WidgetBuilder::new())
@@ -195,7 +173,7 @@ impl Placement {
 ///         .build(&mut ui.build_ctx());
 ///
 ///     // Open the popup explicitly.
-///     ui.send_message(PopupMessage::open(popup, MessageDirection::ToWidget));
+///     ui.send(popup, PopupMessage::Open);
 ///
 ///     popup
 /// }
@@ -215,19 +193,21 @@ impl Placement {
 /// #     widget::WidgetBuilder,
 /// #     UiNode, UserInterface,
 /// # };
-/// fn create_popup_with_button_and_open_it(ui: &mut UserInterface) -> Handle<UiNode> {
+/// # use fyrox_ui::popup::Popup;
+///
+/// fn create_popup_with_button_and_open_it(ui: &mut UserInterface) -> Handle<Popup> {
 ///     let popup = PopupBuilder::new(WidgetBuilder::new())
 ///         .with_content(
 ///             ButtonBuilder::new(WidgetBuilder::new())
 ///                 .with_text("Click Me!")
 ///                 .build(&mut ui.build_ctx()),
 ///         )
-///         // Set the placement. For simplicity it is just a cursor position with Handle::NONE as placement target.
+///         // Set the placement. For simplicity, it is just a cursor position with Handle::NONE as placement target.
 ///         .with_placement(Placement::Cursor(Handle::NONE))
 ///         .build(&mut ui.build_ctx());
 ///
 ///     // Open the popup explicitly at the current placement.
-///     ui.send_message(PopupMessage::open(popup, MessageDirection::ToWidget));
+///     ui.send(popup, PopupMessage::Open);
 ///
 ///     popup
 /// }
@@ -235,9 +215,9 @@ impl Placement {
 ///
 /// The example uses [`Placement::Cursor`] with [`Handle::NONE`] placement target for simplicity reasons, however in
 /// the real-world usages this handle must be a handle of some widget that is located under the popup. It is very
-/// important to specify it correctly, otherwise you will lost the built-in ability to fetch the actual placement target.
+/// important to specify it correctly, otherwise you will lose the built-in ability to fetch the actual placement target.
 /// For example, imagine that you're building your own custom [`crate::dropdown_list::DropdownList`] widget and the popup
-/// is used to display content of the list. In this case you could specify the placement target like this:
+/// is used to display content of the list. In this case, you could specify the placement target like this:
 ///
 /// ```rust
 /// # use fyrox_ui::{
@@ -248,10 +228,12 @@ impl Placement {
 /// #     widget::WidgetBuilder,
 /// #     UiNode, UserInterface,
 /// # };
+/// # use fyrox_ui::popup::Popup;
+///
 /// fn create_popup_with_button_and_open_it(
 ///     dropdown_list: Handle<UiNode>,
 ///     ui: &mut UserInterface,
-/// ) -> Handle<UiNode> {
+/// ) -> Handle<Popup> {
 ///     let popup = PopupBuilder::new(WidgetBuilder::new())
 ///         .with_content(
 ///             ButtonBuilder::new(WidgetBuilder::new())
@@ -263,22 +245,22 @@ impl Placement {
 ///         .build(&mut ui.build_ctx());
 ///
 ///     // Open the popup explicitly at the current placement.
-///     ui.send_message(PopupMessage::open(popup, MessageDirection::ToWidget));
+///     ui.send(popup, PopupMessage::Open);
 ///
 ///     popup
 /// }
 /// ```
 ///
 /// In this case, the popup will open at the left bottom corner of the dropdown list automatically. Placement target is also
-/// useful to build context menus, especially for lists with multiple items. Each item in the list usually have the same context
-/// menu, and this is ideal use case for popups, since the single context menu can be shared across multiple list items. To find
-/// which item cause the context menu to open, catch [`PopupMessage::Placement`] and extract the node handle - this will be your
+/// useful to build context menus, especially for lists with multiple items. Each item in the list usually has the same context
+/// menu, and this is an ideal use case for popups, since the single context menu can be shared across multiple list items. To find
+/// which item causes the context menu to open, catch [`PopupMessage::Placement`] and extract the node handle - this will be your
 /// actual item.
 ///
 /// ## Opening mode
 ///
-/// By default, when you click outside of your popup it will automatically close. It is pretty common behaviour in the UI, you
-/// can see it almost everytime you use context menus in various apps. There are cases when this behaviour is undesired and it
+/// By default, when you click outside your popup, it will automatically close. It is pretty common behavior in the UI, you
+/// can see it almost every time you use context menus in various apps. There are cases when this behavior is undesired and it
 /// can be turned off:
 ///
 /// ```rust
@@ -286,14 +268,16 @@ impl Placement {
 /// #     button::ButtonBuilder, core::pool::Handle, popup::PopupBuilder, widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
-/// fn create_popup_with_button(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::popup::Popup;
+///
+/// fn create_popup_with_button(ctx: &mut BuildContext) -> Handle<Popup> {
 ///     PopupBuilder::new(WidgetBuilder::new())
 ///         .with_content(
 ///             ButtonBuilder::new(WidgetBuilder::new())
 ///                 .with_text("Click Me!")
 ///                 .build(ctx),
 ///         )
-///         // This forces the popup to stay open when clicked outside of its bounds
+///         // This forces the popup to stay open when clicked outside its bounds
 ///         .stays_open(true)
 ///         .build(ctx)
 /// }
@@ -303,14 +287,15 @@ impl Placement {
 ///
 /// Popup widget can automatically adjust its position to always remain on screen, which is useful for tooltips, dropdown lists,
 /// etc. To enable this option, use [`PopupBuilder::with_smart_placement`] with `true` as the first argument.
-#[derive(Default, Clone, Visit, Debug, Reflect, ComponentProvider)]
+#[derive(Default, Clone, Visit, Debug, Reflect)]
 #[reflect(derived_type = "UiNode")]
+#[reflect(type_uuid = "5c4bf90d-cfe7-464f-bcf8-71deacb14dd8")]
 pub struct Popup {
     /// Base widget of the popup.
     pub widget: Widget,
     /// Current placement of the popup.
     pub placement: InheritableVariable<Placement>,
-    /// A flag, that defines whether the popup will stay open if a user click outside of its bounds.
+    /// A flag, that defines whether the popup will stay open if a user click outside its bounds.
     pub stays_open: InheritableVariable<bool>,
     /// A flag, that defines whether the popup is open or not.
     pub is_open: InheritableVariable<bool>,
@@ -318,11 +303,13 @@ pub struct Popup {
     pub content: InheritableVariable<Handle<UiNode>>,
     /// Background widget of the popup. It is used as a container for the content.
     pub body: InheritableVariable<Handle<UiNode>>,
-    /// Smart placement prevents the popup from going outside of the screen bounds. It is usually used for tooltips,
-    /// dropdown lists, etc. to prevent the content from being outside of the screen.
+    /// Smart placement prevents the popup from going outside the screen bounds. It is usually used for tooltips,
+    /// dropdown lists, etc. to prevent the content from being outside the screen.
     pub smart_placement: InheritableVariable<bool>,
     /// The destination for Event messages that relay messages from the children of this popup.
     pub owner: Handle<UiNode>,
+    /// A flag, that defines whether the popup should restrict all the mouse input or not.
+    pub restrict_picking: InheritableVariable<bool>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for Popup {
@@ -331,6 +318,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Popup {
             .with_variant("Popup", |ui| {
                 PopupBuilder::new(WidgetBuilder::new().with_name("Popup"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -356,13 +344,14 @@ fn adjust_placement_position(
 
 impl Popup {
     fn left_top_placement(&self, ui: &UserInterface, target: Handle<UiNode>) -> Vector2<f32> {
-        ui.try_get(target)
+        ui.try_get_node(target)
             .map(|n| n.screen_position())
             .unwrap_or_default()
     }
 
     fn right_top_placement(&self, ui: &UserInterface, target: Handle<UiNode>) -> Vector2<f32> {
-        ui.try_get(target)
+        ui.try_get_node(target)
+            .ok()
             .map(|n| n.screen_position() + Vector2::new(n.actual_global_size().x, 0.0))
             .unwrap_or_else(|| {
                 Vector2::new(ui.screen_size().x - self.widget.actual_global_size().x, 0.0)
@@ -370,13 +359,15 @@ impl Popup {
     }
 
     fn center_placement(&self, ui: &UserInterface, target: Handle<UiNode>) -> Vector2<f32> {
-        ui.try_get(target)
+        ui.try_get_node(target)
+            .ok()
             .map(|n| n.screen_position() + n.actual_global_size().scale(0.5))
             .unwrap_or_else(|| (ui.screen_size - self.widget.actual_global_size()).scale(0.5))
     }
 
     fn left_bottom_placement(&self, ui: &UserInterface, target: Handle<UiNode>) -> Vector2<f32> {
-        ui.try_get(target)
+        ui.try_get_node(target)
+            .ok()
             .map(|n| n.screen_position() + Vector2::new(0.0, n.actual_global_size().y))
             .unwrap_or_else(|| {
                 Vector2::new(0.0, ui.screen_size().y - self.widget.actual_global_size().y)
@@ -384,162 +375,127 @@ impl Popup {
     }
 
     fn right_bottom_placement(&self, ui: &UserInterface, target: Handle<UiNode>) -> Vector2<f32> {
-        ui.try_get(target)
+        ui.try_get_node(target)
+            .ok()
             .map(|n| n.screen_position() + n.actual_global_size())
             .unwrap_or_else(|| ui.screen_size - self.widget.actual_global_size())
     }
 }
 
-uuid_provider!(Popup = "1c641540-59eb-4ccd-a090-2173dab02245");
-
 impl Control for Popup {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(msg) = message.data::<PopupMessage>() {
-            if message.destination() == self.handle() {
-                match msg {
-                    PopupMessage::Open => {
-                        if !*self.is_open && message.direction() == MessageDirection::ToWidget {
-                            self.is_open.set_value_and_mark_modified(true);
-                            ui.send_message(WidgetMessage::visibility(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                true,
-                            ));
+        if let Some(msg) = message.data_for::<PopupMessage>(self.handle()) {
+            match msg {
+                PopupMessage::Open => {
+                    if !*self.is_open {
+                        self.is_open.set_value_and_mark_modified(true);
+                        ui.send(self.handle(), WidgetMessage::Visibility(true));
+                        if *self.restrict_picking {
                             ui.push_picking_restriction(RestrictionEntry {
                                 handle: self.handle(),
                                 stop: false,
                             });
-                            ui.send_message(WidgetMessage::topmost(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                            ));
-                            let position = match *self.placement {
-                                Placement::LeftTop(target) => self.left_top_placement(ui, target),
-                                Placement::RightTop(target) => self.right_top_placement(ui, target),
-                                Placement::Center(target) => self.center_placement(ui, target),
-                                Placement::LeftBottom(target) => {
-                                    self.left_bottom_placement(ui, target)
-                                }
-                                Placement::RightBottom(target) => {
-                                    self.right_bottom_placement(ui, target)
-                                }
-                                Placement::Cursor(_) => ui.cursor_position(),
-                                Placement::Position { position, .. } => position,
-                            };
-
-                            ui.send_message(WidgetMessage::desired_position(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                ui.screen_to_root_canvas_space(position),
-                            ));
-                            ui.send_message(WidgetMessage::focus(
-                                if self.content.is_some() {
-                                    *self.content
-                                } else {
-                                    self.handle
-                                },
-                                MessageDirection::ToWidget,
-                            ));
-                            if *self.smart_placement {
-                                ui.send_message(PopupMessage::adjust_position(
-                                    self.handle,
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-                            ui.send_message(message.reverse());
                         }
+                        ui.send(self.handle(), WidgetMessage::Topmost);
+                        let position = match *self.placement {
+                            Placement::LeftTop(target) => self.left_top_placement(ui, target),
+                            Placement::RightTop(target) => self.right_top_placement(ui, target),
+                            Placement::Center(target) => self.center_placement(ui, target),
+                            Placement::LeftBottom(target) => self.left_bottom_placement(ui, target),
+                            Placement::RightBottom(target) => {
+                                self.right_bottom_placement(ui, target)
+                            }
+                            Placement::Cursor(_) => ui.cursor_position(),
+                            Placement::Position { position, .. } => position,
+                        };
+
+                        ui.send(
+                            self.handle(),
+                            WidgetMessage::DesiredPosition(
+                                ui.screen_to_root_canvas_space(position),
+                            ),
+                        );
+                        ui.send(
+                            if self.content.is_some() {
+                                *self.content
+                            } else {
+                                self.handle
+                            },
+                            WidgetMessage::Focus,
+                        );
+                        if *self.smart_placement {
+                            ui.send(self.handle, PopupMessage::AdjustPosition);
+                        }
+                        ui.try_send_response(message);
                     }
-                    PopupMessage::Close => {
-                        if *self.is_open && message.direction() == MessageDirection::ToWidget {
-                            self.is_open.set_value_and_mark_modified(false);
-                            ui.send_message(WidgetMessage::visibility(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                false,
-                            ));
+                }
+                PopupMessage::Close => {
+                    if *self.is_open {
+                        self.is_open.set_value_and_mark_modified(false);
+                        ui.send(self.handle(), WidgetMessage::Visibility(false));
+
+                        if *self.restrict_picking {
                             ui.remove_picking_restriction(self.handle());
 
                             if let Some(top) = ui.top_picking_restriction() {
-                                ui.send_message(WidgetMessage::focus(
-                                    top.handle,
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-
-                            if ui.captured_node() == self.handle() {
-                                ui.release_mouse_capture();
-                            }
-
-                            ui.send_message(message.reverse());
-                        }
-                    }
-                    PopupMessage::Content(content) => {
-                        if *self.content != *content
-                            && message.direction() == MessageDirection::ToWidget
-                        {
-                            if self.content.is_some() {
-                                ui.send_message(WidgetMessage::remove(
-                                    *self.content,
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-                            self.content.set_value_and_mark_modified(*content);
-
-                            ui.send_message(WidgetMessage::link(
-                                *self.content,
-                                MessageDirection::ToWidget,
-                                *self.body,
-                            ));
-
-                            ui.send_message(message.reverse());
-                        }
-                    }
-                    PopupMessage::Placement(placement) => {
-                        if *self.placement != *placement
-                            && message.direction() == MessageDirection::ToWidget
-                        {
-                            self.placement.set_value_and_mark_modified(*placement);
-                            self.invalidate_layout();
-
-                            ui.send_message(message.reverse());
-                        }
-                    }
-                    PopupMessage::AdjustPosition => {
-                        if message.direction() == MessageDirection::ToWidget {
-                            let new_position =
-                                adjust_placement_position(self.screen_bounds(), ui.screen_size());
-
-                            if new_position != self.screen_position() {
-                                ui.send_message(WidgetMessage::desired_position(
-                                    self.handle,
-                                    MessageDirection::ToWidget,
-                                    ui.screen_to_root_canvas_space(new_position),
-                                ));
+                                ui.send(top.handle, WidgetMessage::Focus);
                             }
                         }
-                    }
-                    PopupMessage::Owner(owner) => {
-                        if message.direction() == MessageDirection::ToWidget {
-                            self.owner = *owner;
+
+                        if ui.captured_node() == self.handle() {
+                            ui.release_mouse_capture();
                         }
+
+                        ui.try_send_response(message);
                     }
-                    PopupMessage::RelayedMessage(_) => (),
                 }
+                PopupMessage::Content(content) => {
+                    if *self.content != *content {
+                        if self.content.is_some() {
+                            ui.send(*self.content, WidgetMessage::Remove);
+                        }
+                        self.content.set_value_and_mark_modified(*content);
+                        ui.send(*self.content, WidgetMessage::LinkWith(*self.body));
+
+                        ui.try_send_response(message);
+                    }
+                }
+                PopupMessage::Placement(placement) => {
+                    if *self.placement != *placement {
+                        self.placement.set_value_and_mark_modified(*placement);
+                        self.invalidate_layout();
+
+                        ui.try_send_response(message);
+                    }
+                }
+                PopupMessage::AdjustPosition => {
+                    let new_position =
+                        adjust_placement_position(self.screen_bounds(), ui.screen_size());
+
+                    if new_position != self.screen_position() {
+                        ui.send(
+                            self.handle,
+                            WidgetMessage::DesiredPosition(
+                                ui.screen_to_root_canvas_space(new_position),
+                            ),
+                        );
+                    }
+                }
+                PopupMessage::Owner(owner) => {
+                    self.owner = *owner;
+                }
+                PopupMessage::RelayedMessage(_) => (),
             }
         } else if let Some(WidgetMessage::KeyDown(key)) = message.data() {
             if !message.handled() && *key == KeyCode::Escape {
-                ui.send_message(PopupMessage::close(self.handle, MessageDirection::ToWidget));
+                ui.send(self.handle, PopupMessage::Close);
                 message.set_handled(true);
             }
         }
         if ui.is_valid_handle(self.owner) && !message.handled() {
-            ui.send_message(PopupMessage::relayed_message(
-                self.owner,
-                MessageDirection::ToWidget,
-                message.clone(),
-            ));
+            ui.send(self.owner, PopupMessage::RelayedMessage(message.clone()));
         }
     }
 
@@ -550,19 +506,21 @@ impl Control for Popup {
         event: &OsEvent,
     ) {
         if let OsEvent::MouseInput { state, .. } = event {
-            if let Some(top_restriction) = ui.top_picking_restriction() {
-                if *state == ButtonState::Pressed
-                    && top_restriction.handle == self_handle
-                    && *self.is_open
-                {
-                    let pos = ui.cursor_position();
-                    if !self.widget.screen_bounds().contains(pos) && !*self.stays_open {
-                        ui.send_message(PopupMessage::close(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                        ));
+            if *state != ButtonState::Pressed || !*self.is_open {
+                return;
+            }
+
+            if *self.restrict_picking {
+                if let Some(top_restriction) = ui.top_picking_restriction() {
+                    if top_restriction.handle != self_handle {
+                        return;
                     }
                 }
+            }
+
+            let pos = ui.cursor_position();
+            if !self.widget.screen_bounds().contains(pos) && !*self.stays_open {
+                ui.send(self.handle(), PopupMessage::Close);
             }
         }
     }
@@ -576,6 +534,7 @@ pub struct PopupBuilder {
     content: Handle<UiNode>,
     smart_placement: bool,
     owner: Handle<UiNode>,
+    restrict_picking: bool,
 }
 
 impl PopupBuilder {
@@ -588,6 +547,7 @@ impl PopupBuilder {
             content: Default::default(),
             smart_placement: true,
             owner: Default::default(),
+            restrict_picking: true,
         }
     }
 
@@ -603,21 +563,27 @@ impl PopupBuilder {
         self
     }
 
-    /// Defines whether to keep the popup open when user clicks outside of its content or not.
+    /// Defines whether to keep the popup open when a user clicks outside its content or not.
     pub fn stays_open(mut self, value: bool) -> Self {
         self.stays_open = value;
         self
     }
 
     /// Sets the content of the popup.
-    pub fn with_content(mut self, content: Handle<UiNode>) -> Self {
-        self.content = content;
+    pub fn with_content(mut self, content: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = content.to_base();
         self
     }
 
     /// Sets the desired owner of the popup, to which the popup will relay its own messages.
     pub fn with_owner(mut self, owner: Handle<UiNode>) -> Self {
         self.owner = owner;
+        self
+    }
+
+    /// Sets a flag, that defines whether the popup should restrict all the mouse input or not.
+    pub fn with_restrict_picking(mut self, restrict: bool) -> Self {
+        self.restrict_picking = restrict;
         self
     }
 
@@ -633,7 +599,8 @@ impl PopupBuilder {
                 .with_child(self.content),
         )
         .with_stroke_thickness(Thickness::uniform(1.0).into())
-        .build(ctx);
+        .build(ctx)
+        .to_base();
 
         Popup {
             widget: self
@@ -649,13 +616,14 @@ impl PopupBuilder {
             smart_placement: self.smart_placement.into(),
             body: body.into(),
             owner: self.owner,
+            restrict_picking: self.restrict_picking.into(),
         }
     }
 
     /// Finishes building the [`Popup`] instance and adds to the user interface and returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Popup> {
         let popup = self.build_popup(ctx);
-        ctx.add_node(UiNode::new(popup))
+        ctx.add(popup)
     }
 }
 

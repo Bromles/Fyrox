@@ -18,6 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use super::*;
+use crate::command::{Command, CommandContext, CommandGroup, CommandTrait};
+use fyrox::gui::check_box::CheckBox;
+use fyrox::gui::dropdown_list::DropdownList;
 use fyrox::{
     asset::{untyped::UntypedResource, Resource, ResourceData},
     autotile::{ConstraintFillRules, NeededTerrain, TerrainSource},
@@ -40,13 +44,6 @@ use fyrox::{
         TileSetConstraintMap, TileSetPatternSource, TileTerrainId,
     },
 };
-
-use crate::{
-    command::{Command, CommandContext, CommandGroup, CommandTrait},
-    send_sync_message,
-};
-
-use super::*;
 
 const PATTERN_PROP_DESC: &str = concat!("Choose a nine-slice property from the tile set. ",
     "This property will provide the pattern that the autotiler uses to know whether two tiles match along each edge. ",
@@ -81,7 +78,7 @@ fn make_failure_log_list(
     widget_builder: WidgetBuilder,
     log_kind: Option<MessageKind>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<DropdownList> {
     let items = vec![
         make_list_item("None", ctx),
         make_list_item("Info", ctx),
@@ -106,19 +103,21 @@ fn make_list_item(text: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
             .with_pad_by_corner_radius(false),
     )
     .build(ctx)
+    .to_base()
 }
 
 #[derive(Default)]
 pub struct AutoTileMacro {
     pattern_list: MacroPropertyField,
     frequency_list: MacroPropertyField,
-    failure_log_list: Handle<UiNode>,
+    failure_log_list: Handle<DropdownList>,
     context: TileSetAutoTileContext,
     constraints: TileSetConstraintMap,
     autotiler: TileSetAutoTiler,
 }
 
 #[derive(Default, Debug, Clone, Reflect)]
+#[reflect(type_uuid = "e50fa366-145d-4491-8126-acdd162031ea")]
 struct CellData {
     terrain_id: TileTerrainId,
     #[reflect(hidden)]
@@ -139,8 +138,8 @@ impl Visit for CellData {
     }
 }
 
-#[derive(Debug, Default, Clone, Visit, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "b320543d-3df0-43fd-b0d9-60a398f49853")]
+#[derive(Debug, Default, Clone, Visit, Reflect)]
+#[reflect(type_uuid = "b320543d-3df0-43fd-b0d9-60a398f49853")]
 pub(super) struct AutoTileInstance {
     frequency_property: Option<TileSetPropertyF32>,
     pattern_property: Option<TileSetPropertyNine>,
@@ -156,15 +155,11 @@ pub(super) struct AutoTileInstance {
 struct InstanceCellWidgets {
     handle: Handle<UiNode>,
     value_field: MacroPropertyValueField,
-    adjacent_toggle: Handle<UiNode>,
-    diagonal_toggle: Handle<UiNode>,
+    adjacent_toggle: Handle<CheckBox>,
+    diagonal_toggle: Handle<CheckBox>,
 }
 
 impl ResourceData for AutoTileInstance {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, _path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         Err("Saving is not supported!".to_string().into())
     }
@@ -243,7 +238,7 @@ impl BrushMacro for AutoTileMacro {
                 });
             }
         } else {
-            if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+            if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
                 if message.destination() == self.failure_log_list
                     && message.direction() == MessageDirection::FromWidget
                 {
@@ -535,7 +530,8 @@ impl BrushMacro for AutoTileMacro {
                 .with_child(self.frequency_list.handle())
                 .with_child(failure_log_field),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Some(handle)
     }
 
@@ -607,7 +603,8 @@ impl BrushMacro for AutoTileMacro {
                 .with_child(adjacent_field)
                 .with_child(diagonal_field),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         instance.widgets.handle = handle;
         instance.widgets.value_field = value_field;
         instance.widgets.adjacent_toggle = adjacent_toggle;
@@ -633,13 +630,10 @@ impl BrushMacro for AutoTileMacro {
         let tile_set = tile_set.as_deref();
         self.pattern_list.sync(pattern_id, tile_set, ui);
         self.frequency_list.sync(frequency_id, tile_set, ui);
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(
-                self.failure_log_list,
-                MessageDirection::ToWidget,
-                Some(log_kind_to_index(instance.failure_log_kind)),
-            ),
+
+        ui.send_sync(
+            self.failure_log_list,
+            DropdownListMessage::Selection(Some(log_kind_to_index(instance.failure_log_kind))),
         );
     }
 
@@ -664,27 +658,18 @@ impl BrushMacro for AutoTileMacro {
             let adjacent = cell_data.map(|d| d.fill.include_adjacent);
             let diagonal = cell_data.map(|d| d.fill.include_diagonal);
             settings.widgets.value_field.sync(value, prop, ui);
-            send_sync_message(
-                ui,
-                CheckBoxMessage::checked(
-                    settings.widgets.adjacent_toggle,
-                    MessageDirection::ToWidget,
-                    adjacent,
-                ),
+            ui.send_sync(
+                settings.widgets.adjacent_toggle,
+                CheckBoxMessage::Check(adjacent),
             );
-            send_sync_message(
-                ui,
-                CheckBoxMessage::checked(
-                    settings.widgets.diagonal_toggle,
-                    MessageDirection::ToWidget,
-                    diagonal,
-                ),
+            ui.send_sync(
+                settings.widgets.diagonal_toggle,
+                CheckBoxMessage::Check(diagonal),
             );
-            ui.send_message(WidgetMessage::visibility(
+            ui.send(
                 settings.widgets.handle,
-                MessageDirection::ToWidget,
-                cell_data.is_some(),
-            ));
+                WidgetMessage::Visibility(cell_data.is_some()),
+            );
         }
     }
 

@@ -20,10 +20,11 @@
 
 use directories::ProjectDirs;
 use fyrox::gui::inspector::InspectorContextArgs;
+use fyrox::gui::window::{Window, WindowAlignment};
+use fyrox::gui::Thickness;
 use fyrox::{
     core::{log::Log, pool::Handle, reflect::prelude::*},
     fxhash::FxHashSet,
-    graph::BaseSceneGraph,
     gui::{
         inspector::{
             editors::{
@@ -33,11 +34,11 @@ use fyrox::{
             },
             Inspector, InspectorBuilder, InspectorContext, InspectorMessage, PropertyAction,
         },
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         scroll_viewer::ScrollViewerBuilder,
         widget::WidgetBuilder,
         window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, UiNode, UserInterface,
+        BuildContext, UserInterface,
     },
 };
 use fyrox_build_tools::{CommandDescriptor, EnvironmentVariable};
@@ -70,7 +71,7 @@ pub static CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
             eprintln!("Unable to create config dir: {err:?}",);
         }
     }
-    println!("Config dir: {:?}", config_dir);
+    println!("Config dir: {config_dir:?}");
     config_dir
 });
 
@@ -87,21 +88,29 @@ pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
             eprintln!("Unable to create data dir: {err:?}",);
         }
     }
-    println!("Data dir: {:?}", data_dir);
+    println!("Data dir: {data_dir:?}");
     data_dir
 });
 
+fn default_run_cargo_update() -> bool {
+    true
+}
+
 #[derive(Default, Serialize, Deserialize, Reflect, Clone, Debug)]
+#[reflect(type_uuid = "fab68a7a-58ce-40f5-a354-a7789c43efd3")]
 pub struct SettingsData {
+    /// Defines a command to run an IDE in a project folder. This command should use either
+    /// %MANIFEST_PATH% or %MANIFEST_DIR% built-in variable to provide the selected project path to
+    /// the chosen IDE. In case of Visual Studio Code you should use %MANIFEST_DIR% as the first
+    /// argument.
     #[serde(default = "default_open_ide_command")]
-    #[reflect(
-        description = "Defines a command to run an IDE in a project folder. This command \
-    should use either %MANIFEST_PATH% or %MANIFEST_DIR% built-in variable to provide the selected project path to the \
-    chosen IDE."
-    )]
     pub open_ide_command: CommandDescriptor,
     #[reflect(hidden)]
     pub projects: Vec<Project>,
+    /// Enables or disables `cargo update` command before running the selected project. In some
+    /// cases `cargo update` can be excessive and lead to increased build times.
+    #[serde(default = "default_run_cargo_update")]
+    pub run_cargo_update: bool,
 }
 
 fn default_open_ide_command() -> CommandDescriptor {
@@ -212,8 +221,8 @@ pub struct Project {
 }
 
 pub struct SettingsWindow {
-    window: Handle<UiNode>,
-    inspector: Handle<UiNode>,
+    window: Handle<Window>,
+    inspector: Handle<Inspector>,
     clipboard: Option<Box<dyn Reflect>>,
 }
 
@@ -230,18 +239,20 @@ impl SettingsWindow {
             ctx,
             definition_container: property_editors,
             environment: None,
-            sync_flag: 1,
             layer_index: 0,
             generate_property_string_values: true,
             filter: Default::default(),
             name_column_width: 170.0,
+            hide_name_column: false,
             base_path: Default::default(),
+            has_parent_object: false,
         });
-        let inspector = InspectorBuilder::new(WidgetBuilder::new())
-            .with_context(context)
-            .build(ctx);
+        let inspector =
+            InspectorBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(2.0)))
+                .with_context(context)
+                .build(ctx);
 
-        let window = WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(400.0))
+        let window = WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(200.0))
             .with_content(
                 ScrollViewerBuilder::new(WidgetBuilder::new())
                     .with_content(inspector)
@@ -252,12 +263,14 @@ impl SettingsWindow {
             .with_remove_on_close(true)
             .build(ctx);
 
-        ctx.send_message(WindowMessage::open_modal(
+        ctx.inner().send(
             window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
 
         Self {
             window,
@@ -284,33 +297,29 @@ impl SettingsWindow {
             if message.destination() == self.window {
                 return None;
             }
-        } else if let Some(InspectorMessage::PropertyChanged(args)) = message.data() {
-            if message.destination() == self.inspector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                PropertyAction::from_field_kind(&args.value).apply(
-                    &args.path(),
-                    settings.deref_mut(),
-                    &mut |result| {
-                        Log::verify(result);
-                    },
-                );
+        } else if let Some(InspectorMessage::PropertyChanged(args)) =
+            message.data_from(self.inspector)
+        {
+            PropertyAction::from_field_action(&args.action).apply(
+                &args.path(),
+                settings.deref_mut(),
+                &mut |result| {
+                    Log::verify(result);
+                },
+            );
 
-                let ctx = ui
-                    .node(self.inspector)
-                    .cast::<Inspector>()
-                    .unwrap()
-                    .context()
-                    .clone();
-
-                Log::verify(ctx.sync(
-                    &**settings,
-                    ui,
-                    0,
-                    true,
-                    Default::default(),
-                    Default::default(),
-                ));
+            let ctx = ui[self.inspector].context().clone();
+            if let Err(errs) = ctx.sync(
+                &**settings,
+                ui,
+                0,
+                true,
+                Default::default(),
+                Default::default(),
+            ) {
+                for err in errs {
+                    Log::err(err.to_string());
+                }
             }
         }
 

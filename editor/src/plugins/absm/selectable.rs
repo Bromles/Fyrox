@@ -23,62 +23,56 @@
 use crate::fyrox::{
     core::pool::Handle,
     core::{reflect::prelude::*, visitor::prelude::*},
-    gui::message::{MessageDirection, MouseButton, UiMessage},
+    gui::message::{MouseButton, UiMessage},
     gui::widget::WidgetMessage,
-    gui::{define_constructor, UiNode, UserInterface},
+    gui::{UiNode, UserInterface},
 };
+use fyrox::gui::message::MessageData;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectableMessage {
     Select(bool),
 }
-
-impl SelectableMessage {
-    define_constructor!(SelectableMessage:Select => fn select(bool), layout: false);
-}
+impl MessageData for SelectableMessage {}
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Visit, Reflect)]
+#[reflect(type_uuid = "5a49c5e4-8b2f-4631-8c83-7cc1eb0b2754")]
 pub struct Selectable {
     pub selected: bool,
 }
 
 impl Selectable {
+    #[must_use]
     pub fn handle_routed_message(
         &mut self,
         self_handle: Handle<UiNode>,
         ui: &mut UserInterface,
         message: &mut UiMessage,
-    ) {
+    ) -> bool {
         if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
-                WidgetMessage::MouseDown { button, .. } => {
+                WidgetMessage::MouseDown { button, .. }
                     if (*button == MouseButton::Left || *button == MouseButton::Right)
-                        && !self.selected
-                    {
-                        ui.send_message(SelectableMessage::select(
-                            self_handle,
-                            MessageDirection::ToWidget,
-                            true,
-                        ));
+                        && !self.selected =>
+                {
+                    ui.send(self_handle, SelectableMessage::Select(true));
 
-                        ui.capture_mouse(self_handle);
-                    }
+                    ui.capture_mouse(self_handle);
                 }
-                WidgetMessage::MouseUp { button, .. } => {
-                    if *button == MouseButton::Left || *button == MouseButton::Right {
-                        ui.release_mouse_capture();
-                    }
+                WidgetMessage::MouseUp { button, .. }
+                    if (*button == MouseButton::Left || *button == MouseButton::Right) =>
+                {
+                    ui.release_mouse_capture();
                 }
                 _ => {}
             }
-        } else if let Some(SelectableMessage::Select(selected)) = message.data() {
-            if message.destination() == self_handle
-                && message.direction() == MessageDirection::ToWidget
-                && self.selected != *selected
-            {
+        } else if let Some(SelectableMessage::Select(selected)) = message.data_for(self_handle) {
+            if self.selected != *selected {
                 self.selected = *selected;
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
+                return true;
             }
         }
+        false
     }
 }

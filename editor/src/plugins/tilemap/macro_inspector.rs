@@ -18,6 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use super::*;
+use fyrox::gui::text::Text;
 use fyrox::{
     asset::untyped::UntypedResource,
     gui::{
@@ -30,8 +32,6 @@ use fyrox::{
     scene::tilemap::brush::TileMapBrushResource,
 };
 
-use super::*;
-
 const ADD_BUTTON_LABEL: &str = "+";
 const REMOVE_BUTTON_LABEL: &str = "-";
 const ADD_TOOLTIP: &str = "Add the selected cell to this macro.";
@@ -40,6 +40,7 @@ const CELL_WITH_MACRO_COLOR: Color = Color::DARK_SLATE_BLUE;
 const CELL_WITHOUT_MACRO_COLOR: Color = Color::opaque(50, 50, 50);
 
 #[derive(Visit, Clone, Reflect)]
+#[reflect(type_uuid = "b003f118-4dda-4529-a791-ad20860c124d")]
 pub struct MacroInspector {
     handle: Handle<UiNode>,
     content: Handle<UiNode>,
@@ -81,8 +82,8 @@ struct ItemEditor {
 #[derive(Clone)]
 struct ItemHeader {
     handle: Handle<UiNode>,
-    label: Handle<UiNode>,
-    button: Handle<UiNode>,
+    label: Handle<Text>,
+    button: Handle<Button>,
 }
 
 impl ItemEditor {
@@ -94,17 +95,18 @@ impl ItemEditor {
                     .with_child(content),
             )
             .build(ctx)
+            .to_base()
         } else {
             header.handle
         };
         Self { handle, header }
     }
-    fn button(&self) -> Handle<UiNode> {
+    fn button(&self) -> Handle<Button> {
         self.header.button
     }
 }
 
-fn make_button(title: &str, tooltip: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_button(title: &str, tooltip: &str, ctx: &mut BuildContext) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_column(1)
@@ -116,11 +118,11 @@ fn make_button(title: &str, tooltip: &str, ctx: &mut BuildContext) -> Handle<UiN
     .build(ctx)
 }
 
-fn make_add_button(ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_add_button(ctx: &mut BuildContext) -> Handle<Button> {
     make_button(ADD_BUTTON_LABEL, ADD_TOOLTIP, ctx)
 }
 
-fn make_remove_button(ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_remove_button(ctx: &mut BuildContext) -> Handle<Button> {
     make_button(REMOVE_BUTTON_LABEL, REMOVE_TOOLTIP, ctx)
 }
 
@@ -159,49 +161,37 @@ impl ItemHeader {
                     .with_foreground(Brush::Solid(Color::BLACK).into())
                     .with_child(grid),
             )
-            .build(ctx),
+            .build(ctx)
+            .to_base(),
             label,
             button,
         }
     }
     fn sync(&self, name: String, has_cell: bool, ui: &mut UserInterface) {
-        ui.send_message(TextMessage::text(
-            self.label,
-            MessageDirection::ToWidget,
-            name,
-        ));
+        ui.send(self.label, TextMessage::Text(name));
         let button_text = if has_cell {
             REMOVE_BUTTON_LABEL
         } else {
             ADD_BUTTON_LABEL
         };
-        let button = ui.node(self.button).cast::<Button>().unwrap();
-        ui.send_message(TextMessage::text(
-            *button.content,
-            MessageDirection::ToWidget,
-            button_text.into(),
-        ));
+        let button = &ui[self.button];
+        ui.send(*button.content, TextMessage::Text(button_text.into()));
         let tooltip = if has_cell {
             REMOVE_TOOLTIP
         } else {
             ADD_TOOLTIP
         };
         let tooltip = make_simple_tooltip(&mut ui.build_ctx(), tooltip);
-        ui.send_message(WidgetMessage::tooltip(
-            self.button,
-            MessageDirection::ToWidget,
-            Some(tooltip),
-        ));
+        ui.send(self.button, WidgetMessage::Tooltip(Some(tooltip)));
         let color = if has_cell {
             CELL_WITH_MACRO_COLOR
         } else {
             CELL_WITHOUT_MACRO_COLOR
         };
-        ui.send_message(WidgetMessage::background(
+        ui.send(
             self.handle,
-            MessageDirection::ToWidget,
-            Brush::Solid(color).into(),
-        ));
+            WidgetMessage::Background(Brush::Solid(color).into()),
+        );
     }
 }
 
@@ -300,9 +290,12 @@ impl MacroInspector {
                         .map(|editor| editor.handle),
                 ),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Self {
-            handle: BorderBuilder::new(WidgetBuilder::new().with_child(content)).build(ctx),
+            handle: BorderBuilder::new(WidgetBuilder::new().with_child(content))
+                .build(ctx)
+                .to_base(),
             content,
             macro_list,
             cell_sets,
@@ -339,15 +332,16 @@ impl MacroInspector {
                 &mut ui.build_ctx(),
                 &mut self.items,
             );
-            ui.send_message(WidgetMessage::replace_children(
+            ui.send(
                 self.content,
-                MessageDirection::ToWidget,
-                self.items
-                    .iter()
-                    .filter_map(|item| item.editor.as_ref())
-                    .map(|e| e.handle)
-                    .collect(),
-            ));
+                WidgetMessage::ReplaceChildren(
+                    self.items
+                        .iter()
+                        .filter_map(|item| item.editor.as_ref())
+                        .map(|e| e.handle)
+                        .collect(),
+                ),
+            );
         }
     }
     fn sync_to_cell_inner(
@@ -402,7 +396,7 @@ impl MacroInspector {
                 let Some(cell_editor) = item.editor.as_ref() else {
                     continue;
                 };
-                if cell_editor.button() == message.destination() {
+                if message.destination() == cell_editor.button() {
                     let Some(brush_macro) = macro_list.get_by_uuid_mut(&item.macro_id) else {
                         continue;
                     };

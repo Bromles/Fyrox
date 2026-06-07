@@ -25,11 +25,7 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::{
-        algebra::Vector2, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, visitor::prelude::*,
-    },
-    define_constructor,
+    core::{algebra::Vector2, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     grid::{Column, GridBuilder, Row},
     message::{MessageDirection, UiMessage},
     scroll_bar::{ScrollBar, ScrollBarBuilder, ScrollBarMessage},
@@ -37,12 +33,14 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Orientation, UiNode, UserInterface,
 };
+use fyrox_core::pool::ObjectOrVariant;
 
+use crate::message::MessageData;
+use crate::scroll_panel::ScrollPanel;
 use fyrox_graph::{
     constructor::{ConstructorProvider, GraphNodeConstructor},
-    BaseSceneGraph,
+    SceneGraph,
 };
-use std::ops::{Deref, DerefMut};
 
 /// A set of messages that could be used to alternate the state of a [`ScrollViewer`] widget.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,40 +61,33 @@ pub enum ScrollViewerMessage {
     HorizontalScroll(f32),
 }
 
+impl MessageData for ScrollViewerMessage {
+    fn need_perform_layout(&self) -> bool {
+        matches!(
+            self,
+            Self::BringIntoView(_)
+                | Self::VScrollSpeed(_)
+                | Self::HScrollSpeed(_)
+                | Self::ScrollToEnd
+        )
+    }
+}
+
 impl ScrollViewerMessage {
-    define_constructor!(
-        /// Creates [`ScrollViewerMessage::Content`] message.
-        ScrollViewerMessage:Content => fn content(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`ScrollViewerMessage::BringIntoView`] message.
-        ScrollViewerMessage:BringIntoView => fn bring_into_view(Handle<UiNode>), layout: true
-    );
-    define_constructor!(
-        /// Creates [`ScrollViewerMessage::VScrollSpeed`] message.
-        ScrollViewerMessage:VScrollSpeed => fn v_scroll_speed(f32), layout: true
-    );
-    define_constructor!(
-        /// Creates [`ScrollViewerMessage::HScrollSpeed`] message.
-        ScrollViewerMessage:HScrollSpeed => fn h_scroll_speed(f32), layout: true
-    );
-    define_constructor!(
-        /// Creates [`ScrollViewerMessage::ScrollToEnd`] message.
-        ScrollViewerMessage:ScrollToEnd => fn scroll_to_end(), layout: true
-    );
-    define_constructor!(
-        /// Creates [`ScrollViewerMessage::HorizontalScroll`] message.
-        ScrollViewerMessage:HorizontalScroll => fn horizontal_scroll(f32), layout: false
-    );
-    define_constructor!(
-        /// Creates [`ScrollViewerMessage::VerticalScroll`] message.
-        ScrollViewerMessage:VerticalScroll => fn vertical_scroll(f32), layout: false
-    );
+    /// Creates [`Self::Content`] message.
+    pub fn content(handle: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        Self::Content(handle.to_base())
+    }
+
+    /// Creates [`Self::BringIntoView`] message.
+    pub fn bring_into_view(handle: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        Self::BringIntoView(handle.to_base())
+    }
 }
 
 /// Scroll viewer is a scrollable region with two scroll bars for each axis. It is used to wrap a content of unknown
 /// size to ensure that all of it will be accessible in a parent widget bounds. For example, it could be used in a
-/// Window widget to allow a content of the window to be accessible, even if the window is smaller than the content.
+/// Window widget to allow the content of the window to be accessible, even if the window is smaller than the content.
 ///
 /// ## Example
 ///
@@ -108,8 +99,9 @@ impl ScrollViewerMessage {
 /// #     stack_panel::StackPanelBuilder, text::TextBuilder, widget::WidgetBuilder, BuildContext,
 /// #     UiNode,
 /// # };
+/// # use fyrox_ui::scroll_viewer::ScrollViewer;
 /// #
-/// fn create_scroll_viewer(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_scroll_viewer(ctx: &mut BuildContext) -> Handle<ScrollViewer> {
 ///     ScrollViewerBuilder::new(WidgetBuilder::new())
 ///         .with_content(
 ///             StackPanelBuilder::new(
@@ -135,7 +127,7 @@ impl ScrollViewerMessage {
 ///
 /// ## Scrolling Speed and Controls
 ///
-/// Scroll viewer can have an arbitrary scrolling speed for each axis. Scrolling is performed via mouse wheel and by default it
+/// Scroll viewer can have an arbitrary scrolling speed for each axis. Scrolling is performed via mouse wheel, and by default it
 /// scrolls vertical axis, which can be changed by holding `Shift` key. Scrolling speed can be set during the build phase:
 ///
 /// ```rust
@@ -143,8 +135,9 @@ impl ScrollViewerMessage {
 /// #     core::pool::Handle, scroll_viewer::ScrollViewerBuilder, widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::scroll_viewer::ScrollViewer;
 /// #
-/// fn create_scroll_viewer(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_scroll_viewer(ctx: &mut BuildContext) -> Handle<ScrollViewer> {
 ///     ScrollViewerBuilder::new(WidgetBuilder::new())
 ///         // Set vertical scrolling speed twice as fast as default scrolling speed.
 ///         .with_v_scroll_speed(60.0)
@@ -154,7 +147,7 @@ impl ScrollViewerMessage {
 /// }
 /// ```
 ///
-/// Also it could be set using [`ScrollViewerMessage::HScrollSpeed`] or [`ScrollViewerMessage::VScrollSpeed`] messages.
+/// Also, it could be set using [`ScrollViewerMessage::HScrollSpeed`] or [`ScrollViewerMessage::VScrollSpeed`] messages.
 ///
 /// ## Bringing a child into view
 ///
@@ -170,26 +163,25 @@ impl ScrollViewerMessage {
 ///     child: Handle<UiNode>,
 ///     ui: &UserInterface,
 /// ) {
-///     ui.send_message(ScrollViewerMessage::bring_into_view(
-///         scroll_viewer,
-///         MessageDirection::ToWidget,
-///         child,
-///     ))
+///     ui.send(scroll_viewer, ScrollViewerMessage::BringIntoView(child))
 /// }
 /// ```
-#[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "173e869f-7da0-4ae2-915a-5d545d8150cc"
+)]
 pub struct ScrollViewer {
     /// Base widget of the scroll viewer.
     pub widget: Widget,
     /// A handle of a content.
     pub content: Handle<UiNode>,
-    /// A handle of [`crate::scroll_panel::ScrollPanel`] widget instance that does the actual layouting.
-    pub scroll_panel: Handle<UiNode>,
+    /// A handle of [`ScrollPanel`] widget instance that does the actual lay outing.
+    pub scroll_panel: Handle<ScrollPanel>,
     /// A handle of scroll bar widget for vertical axis.
-    pub v_scroll_bar: Handle<UiNode>,
+    pub v_scroll_bar: Handle<ScrollBar>,
     /// A handle of scroll bar widget for horizontal axis.
-    pub h_scroll_bar: Handle<UiNode>,
+    pub h_scroll_bar: Handle<ScrollBar>,
     /// Current vertical scrolling speed.
     pub v_scroll_speed: f32,
     /// Current horizontal scrolling speed.
@@ -202,6 +194,7 @@ impl ConstructorProvider<UiNode, UserInterface> for ScrollViewer {
             .with_variant("Scroll Viewer", |ui| {
                 ScrollViewerBuilder::new(WidgetBuilder::new().with_name("Scroll Viewer"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -210,15 +203,13 @@ impl ConstructorProvider<UiNode, UserInterface> for ScrollViewer {
 
 crate::define_widget_deref!(ScrollViewer);
 
-uuid_provider!(ScrollViewer = "173e869f-7da0-4ae2-915a-5d545d8150cc");
-
 impl Control for ScrollViewer {
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
         let size = self.widget.arrange_override(ui, final_size);
 
         if self.content.is_some() {
             let content_size = ui.node(self.content).desired_size();
-            let available_size_for_content = ui.node(self.scroll_panel).desired_size();
+            let available_size_for_content = ui[self.scroll_panel].desired_size();
 
             let x_max = (content_size.x - available_size_for_content.x).max(0.0);
             let x_size_ratio = if content_size.x > f32::EPSILON {
@@ -226,16 +217,8 @@ impl Control for ScrollViewer {
             } else {
                 1.0
             };
-            ui.send_message(ScrollBarMessage::max_value(
-                self.h_scroll_bar,
-                MessageDirection::ToWidget,
-                x_max,
-            ));
-            ui.send_message(ScrollBarMessage::size_ratio(
-                self.h_scroll_bar,
-                MessageDirection::ToWidget,
-                x_size_ratio,
-            ));
+            ui.send(self.h_scroll_bar, ScrollBarMessage::MaxValue(x_max));
+            ui.send(self.h_scroll_bar, ScrollBarMessage::SizeRatio(x_size_ratio));
 
             let y_max = (content_size.y - available_size_for_content.y).max(0.0);
             let y_size_ratio = if content_size.y > f32::EPSILON {
@@ -243,16 +226,8 @@ impl Control for ScrollViewer {
             } else {
                 1.0
             };
-            ui.send_message(ScrollBarMessage::max_value(
-                self.v_scroll_bar,
-                MessageDirection::ToWidget,
-                y_max,
-            ));
-            ui.send_message(ScrollBarMessage::size_ratio(
-                self.v_scroll_bar,
-                MessageDirection::ToWidget,
-                y_size_ratio,
-            ));
+            ui.send(self.v_scroll_bar, ScrollBarMessage::MaxValue(y_max));
+            ui.send(self.v_scroll_bar, ScrollBarMessage::SizeRatio(y_size_ratio));
         }
 
         size
@@ -269,32 +244,24 @@ impl Control for ScrollViewer {
                     (self.v_scroll_bar, self.v_scroll_speed)
                 };
 
-                if let Some(scroll_bar) = ui.node(scroll_bar).cast::<ScrollBar>() {
+                if let Ok(scroll_bar) = ui.try_get(scroll_bar) {
                     let old_value = *scroll_bar.value;
                     let new_value = old_value - amount * scroll_speed;
                     if (old_value - new_value).abs() > f32::EPSILON {
                         message.set_handled(true);
                     }
-                    ui.send_message(ScrollBarMessage::value(
-                        scroll_bar.handle,
-                        MessageDirection::ToWidget,
-                        new_value,
-                    ));
+                    ui.send(scroll_bar.handle, ScrollBarMessage::Value(new_value));
                 }
             }
         } else if let Some(msg) = message.data::<ScrollPanelMessage>() {
             if message.destination() == self.scroll_panel {
                 let msg = match *msg {
-                    ScrollPanelMessage::VerticalScroll(value) => ScrollBarMessage::value(
-                        self.v_scroll_bar,
-                        MessageDirection::ToWidget,
-                        value,
-                    ),
-                    ScrollPanelMessage::HorizontalScroll(value) => ScrollBarMessage::value(
-                        self.h_scroll_bar,
-                        MessageDirection::ToWidget,
-                        value,
-                    ),
+                    ScrollPanelMessage::VerticalScroll(value) => {
+                        UiMessage::for_widget(self.v_scroll_bar, ScrollBarMessage::Value(value))
+                    }
+                    ScrollPanelMessage::HorizontalScroll(value) => {
+                        UiMessage::for_widget(self.h_scroll_bar, ScrollBarMessage::Value(value))
+                    }
                     _ => return,
                 };
                 // handle flag here is raised to prevent infinite message loop with the branch down below (ScrollBar::value).
@@ -304,52 +271,37 @@ impl Control for ScrollViewer {
         } else if let Some(msg) = message.data::<ScrollBarMessage>() {
             if message.direction() == MessageDirection::FromWidget {
                 match msg {
-                    ScrollBarMessage::Value(new_value) => {
-                        if !message.handled() {
-                            if message.destination() == self.v_scroll_bar
-                                && self.v_scroll_bar.is_some()
-                            {
-                                ui.send_message(ScrollPanelMessage::vertical_scroll(
-                                    self.scroll_panel,
-                                    MessageDirection::ToWidget,
-                                    *new_value,
-                                ));
-                            } else if message.destination() == self.h_scroll_bar
-                                && self.h_scroll_bar.is_some()
-                            {
-                                ui.send_message(ScrollPanelMessage::horizontal_scroll(
-                                    self.scroll_panel,
-                                    MessageDirection::ToWidget,
-                                    *new_value,
-                                ));
-                            }
+                    ScrollBarMessage::Value(new_value) if !message.handled() => {
+                        if message.destination() == self.v_scroll_bar && self.v_scroll_bar.is_some()
+                        {
+                            ui.send(
+                                self.scroll_panel,
+                                ScrollPanelMessage::VerticalScroll(*new_value),
+                            );
+                        } else if message.destination() == self.h_scroll_bar
+                            && self.h_scroll_bar.is_some()
+                        {
+                            ui.send(
+                                self.scroll_panel,
+                                ScrollPanelMessage::HorizontalScroll(*new_value),
+                            );
                         }
                     }
                     &ScrollBarMessage::MaxValue(_) => {
                         if message.destination() == self.v_scroll_bar && self.v_scroll_bar.is_some()
                         {
-                            if let Some(scroll_bar) = ui.node(self.v_scroll_bar).cast::<ScrollBar>()
-                            {
+                            if let Ok(scroll_bar) = ui.try_get(self.v_scroll_bar) {
                                 let visibility =
                                     (*scroll_bar.max - *scroll_bar.min).abs() >= f32::EPSILON;
-                                ui.send_message(WidgetMessage::visibility(
-                                    self.v_scroll_bar,
-                                    MessageDirection::ToWidget,
-                                    visibility,
-                                ));
+                                ui.send(self.v_scroll_bar, WidgetMessage::Visibility(visibility));
                             }
                         } else if message.destination() == self.h_scroll_bar
                             && self.h_scroll_bar.is_some()
                         {
-                            if let Some(scroll_bar) = ui.node(self.h_scroll_bar).cast::<ScrollBar>()
-                            {
+                            if let Ok(scroll_bar) = ui.try_get(self.h_scroll_bar) {
                                 let visibility =
                                     (*scroll_bar.max - *scroll_bar.min).abs() >= f32::EPSILON;
-                                ui.send_message(WidgetMessage::visibility(
-                                    self.h_scroll_bar,
-                                    MessageDirection::ToWidget,
-                                    visibility,
-                                ));
+                                ui.send(self.h_scroll_bar, WidgetMessage::Visibility(visibility));
                             }
                         }
                     }
@@ -360,25 +312,14 @@ impl Control for ScrollViewer {
             if message.destination() == self.handle() {
                 match msg {
                     ScrollViewerMessage::Content(content) => {
-                        for child in ui.node(self.scroll_panel).children() {
-                            ui.send_message(WidgetMessage::remove(
-                                *child,
-                                MessageDirection::ToWidget,
-                            ));
+                        for child in ui[self.scroll_panel].children() {
+                            ui.send(*child, WidgetMessage::Remove);
                         }
-                        ui.send_message(WidgetMessage::link(
-                            *content,
-                            MessageDirection::ToWidget,
-                            self.scroll_panel,
-                        ));
+                        ui.send(*content, WidgetMessage::link_with(self.scroll_panel));
                     }
                     &ScrollViewerMessage::BringIntoView(handle) => {
                         // Re-cast message to inner panel.
-                        ui.send_message(ScrollPanelMessage::bring_into_view(
-                            self.scroll_panel,
-                            MessageDirection::ToWidget,
-                            handle,
-                        ));
+                        ui.send(self.scroll_panel, ScrollPanelMessage::BringIntoView(handle));
                     }
                     &ScrollViewerMessage::HScrollSpeed(speed) => {
                         if self.h_scroll_speed != speed
@@ -386,7 +327,7 @@ impl Control for ScrollViewer {
                         {
                             self.h_scroll_speed = speed;
 
-                            ui.send_message(message.reverse());
+                            ui.try_send_response(message);
                         }
                     }
                     &ScrollViewerMessage::VScrollSpeed(speed) => {
@@ -395,29 +336,18 @@ impl Control for ScrollViewer {
                         {
                             self.v_scroll_speed = speed;
 
-                            ui.send_message(message.reverse());
+                            ui.try_send_response(message);
                         }
                     }
                     ScrollViewerMessage::ScrollToEnd => {
                         // Re-cast message to inner panel.
-                        ui.send_message(ScrollPanelMessage::scroll_to_end(
-                            self.scroll_panel,
-                            MessageDirection::ToWidget,
-                        ));
+                        ui.send(self.scroll_panel, ScrollPanelMessage::ScrollToEnd);
                     }
                     ScrollViewerMessage::HorizontalScroll(value) => {
-                        ui.send_message(ScrollBarMessage::value(
-                            self.h_scroll_bar,
-                            MessageDirection::ToWidget,
-                            *value,
-                        ));
+                        ui.send(self.h_scroll_bar, ScrollBarMessage::Value(*value));
                     }
                     ScrollViewerMessage::VerticalScroll(value) => {
-                        ui.send_message(ScrollBarMessage::value(
-                            self.v_scroll_bar,
-                            MessageDirection::ToWidget,
-                            *value,
-                        ));
+                        ui.send(self.v_scroll_bar, ScrollBarMessage::Value(*value));
                     }
                 }
             }
@@ -429,8 +359,8 @@ impl Control for ScrollViewer {
 pub struct ScrollViewerBuilder {
     widget_builder: WidgetBuilder,
     content: Handle<UiNode>,
-    h_scroll_bar: Option<Handle<UiNode>>,
-    v_scroll_bar: Option<Handle<UiNode>>,
+    h_scroll_bar: Option<Handle<ScrollBar>>,
+    v_scroll_bar: Option<Handle<ScrollBar>>,
     horizontal_scroll_allowed: bool,
     vertical_scroll_allowed: bool,
     v_scroll_speed: f32,
@@ -453,19 +383,19 @@ impl ScrollViewerBuilder {
     }
 
     /// Sets the desired content of the scroll viewer.
-    pub fn with_content(mut self, content: Handle<UiNode>) -> Self {
-        self.content = content;
+    pub fn with_content(mut self, content: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = content.to_base();
         self
     }
 
     /// Sets the desired vertical scroll bar widget.
-    pub fn with_vertical_scroll_bar(mut self, v_scroll_bar: Handle<UiNode>) -> Self {
+    pub fn with_vertical_scroll_bar(mut self, v_scroll_bar: Handle<ScrollBar>) -> Self {
         self.v_scroll_bar = Some(v_scroll_bar);
         self
     }
 
     /// Sets the desired horizontal scroll bar widget.
-    pub fn with_horizontal_scroll_bar(mut self, h_scroll_bar: Handle<UiNode>) -> Self {
+    pub fn with_horizontal_scroll_bar(mut self, h_scroll_bar: Handle<ScrollBar>) -> Self {
         self.h_scroll_bar = Some(h_scroll_bar);
         self
     }
@@ -495,8 +425,8 @@ impl ScrollViewerBuilder {
     }
 
     /// Finishes widget building and adds it to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        let content_presenter = ScrollPanelBuilder::new(
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<ScrollViewer> {
+        let scroll_panel = ScrollPanelBuilder::new(
             WidgetBuilder::new()
                 .with_child(self.content)
                 .on_row(0)
@@ -528,7 +458,7 @@ impl ScrollViewerBuilder {
                 .with_child(
                     GridBuilder::new(
                         WidgetBuilder::new()
-                            .with_child(content_presenter)
+                            .with_child(scroll_panel)
                             .with_child(h_scroll_bar)
                             .with_child(v_scroll_bar),
                     )
@@ -542,11 +472,11 @@ impl ScrollViewerBuilder {
             content: self.content,
             v_scroll_bar,
             h_scroll_bar,
-            scroll_panel: content_presenter,
+            scroll_panel,
             v_scroll_speed: self.v_scroll_speed,
             h_scroll_speed: self.h_scroll_speed,
         };
-        ctx.add_node(UiNode::new(sv))
+        ctx.add(sv)
     }
 }
 

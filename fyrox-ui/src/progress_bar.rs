@@ -28,20 +28,15 @@ use crate::style::Style;
 use crate::{
     border::BorderBuilder,
     canvas::CanvasBuilder,
-    core::{
-        algebra::Vector2, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
-    define_constructor,
-    message::{MessageDirection, UiMessage},
+    core::{algebra::Vector2, pool::Handle, reflect::prelude::*, visitor::prelude::*},
+    message::UiMessage,
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, UiNode, UserInterface,
 };
 
-use fyrox_core::uuid_provider;
+use crate::message::MessageData;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
 /// A set of messages that can be used to modify the state of a progress bar.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,13 +44,7 @@ pub enum ProgressBarMessage {
     /// A message, that is used to set progress of the progress bar.
     Progress(f32),
 }
-
-impl ProgressBarMessage {
-    define_constructor!(
-        /// Creates [`ProgressBarMessage::Progress`].
-        ProgressBarMessage:Progress => fn progress(f32), layout: false
-    );
-}
+impl MessageData for ProgressBarMessage {}
 
 /// Progress bar is used to show a bar that fills in from left to right according to the progress value. It is used to
 /// show progress for long actions.
@@ -67,7 +56,9 @@ impl ProgressBarMessage {
 /// #     core::pool::Handle, progress_bar::ProgressBarBuilder, widget::WidgetBuilder, BuildContext,
 /// #     UiNode,
 /// # };
-/// fn create_progress_bar(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::progress_bar::ProgressBar;
+///
+/// fn create_progress_bar(ctx: &mut BuildContext) -> Handle<ProgressBar> {
 ///     ProgressBarBuilder::new(WidgetBuilder::new())
 ///         // Keep mind, that the progress is "normalized", which means that it is defined on
 ///         // [0..1] range, where 0 - no progress at all, 1 - maximum progress.
@@ -75,6 +66,13 @@ impl ProgressBarMessage {
 ///         .build(ctx)
 /// }
 /// ```
+///
+/// ## Style
+///
+/// It is possible to specify custom indicator (the part that shows the progress) and the back of
+/// the progress bar. Use [`ProgressBarBuilder::with_indicator`] and [`ProgressBarBuilder::with_body`]
+/// methods respectively. These methods can accept any widget, but usually it is a
+/// [`crate::border::Border`], [`crate::image::Image`], [`crate::nine_patch::NinePatch`] widgets.
 ///
 /// ## Changing progress
 ///
@@ -86,15 +84,14 @@ impl ProgressBarMessage {
 /// #     UserInterface,
 /// # };
 /// fn change_progress(progress_bar: Handle<UiNode>, ui: &UserInterface) {
-///     ui.send_message(ProgressBarMessage::progress(
-///         progress_bar,
-///         MessageDirection::ToWidget,
-///         0.33,
-///     ));
+///     ui.send(progress_bar, ProgressBarMessage::Progress(0.33));
 /// }
 /// ```
-#[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "d6ebb853-d945-46bc-86db-4c8b5d5faf8e"
+)]
 pub struct ProgressBar {
     /// Base widget of the progress bar.
     pub widget: Widget,
@@ -112,6 +109,7 @@ impl ConstructorProvider<UiNode, UserInterface> for ProgressBar {
             .with_variant("Progress Bar", |ui| {
                 ProgressBarBuilder::new(WidgetBuilder::new().with_name("Progress Bar"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Visual")
@@ -120,23 +118,13 @@ impl ConstructorProvider<UiNode, UserInterface> for ProgressBar {
 
 crate::define_widget_deref!(ProgressBar);
 
-uuid_provider!(ProgressBar = "d6ebb853-d945-46bc-86db-4c8b5d5faf8e");
-
 impl Control for ProgressBar {
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
         let size = self.widget.arrange_override(ui, final_size);
 
-        ui.send_message(WidgetMessage::width(
-            *self.indicator,
-            MessageDirection::ToWidget,
-            size.x * *self.progress,
-        ));
-
-        ui.send_message(WidgetMessage::height(
-            *self.indicator,
-            MessageDirection::ToWidget,
-            size.y,
-        ));
+        let width = size.x * *self.progress;
+        ui.send(*self.indicator, WidgetMessage::Width(width));
+        ui.send(*self.indicator, WidgetMessage::Height(size.y));
 
         size
     }
@@ -195,23 +183,26 @@ impl ProgressBarBuilder {
         self
     }
 
-    /// Sets the desired progress value. Input value will be clamped to `[0..1]` range.
+    /// Sets the desired progress value. The input value will be clamped to `[0..1]` range.
     pub fn with_progress(mut self, progress: f32) -> Self {
         self.progress = progress.clamp(0.0, 1.0);
         self
     }
 
     /// Finishes progress bar creation and adds the new instance to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        let body = self
-            .body
-            .unwrap_or_else(|| BorderBuilder::new(WidgetBuilder::new()).build(ctx));
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<ProgressBar> {
+        let body = self.body.unwrap_or_else(|| {
+            BorderBuilder::new(WidgetBuilder::new())
+                .build(ctx)
+                .to_base()
+        });
 
         let indicator = self.indicator.unwrap_or_else(|| {
             BorderBuilder::new(
                 WidgetBuilder::new().with_background(ctx.style.property(Style::BRUSH_BRIGHTEST)),
             )
             .build(ctx)
+            .to_base()
         });
 
         let canvas = CanvasBuilder::new(WidgetBuilder::new().with_child(indicator)).build(ctx);
@@ -225,7 +216,7 @@ impl ProgressBarBuilder {
             body: body.into(),
         };
 
-        ctx.add_node(UiNode::new(progress_bar))
+        ctx.add(progress_bar)
     }
 }
 

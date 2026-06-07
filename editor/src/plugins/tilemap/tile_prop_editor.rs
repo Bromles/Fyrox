@@ -26,10 +26,11 @@
 //! to be applied to other tiles by clicking in the tile palette.
 
 use commands::SetTileSetTilesCommand;
+use fyrox::gui::dropdown_list::DropdownList;
+use fyrox::gui::grid::Grid;
+use fyrox::gui::text::Text;
 use fyrox::{
-    core::{
-        algebra::Vector2, color::Color, pool::Handle, type_traits::prelude::*, ImmutableString,
-    },
+    core::{algebra::Vector2, color::Color, pool::Handle, ImmutableString},
     fxhash::FxHashMap,
     gui::{
         border::BorderBuilder,
@@ -52,11 +53,10 @@ use fyrox::{
 };
 use palette::Subposition;
 
-use crate::{send_sync_message, MSG_SYNC_FLAG};
-
 use super::*;
 
 #[derive(Debug, Clone, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "d10c7388-94a8-41fa-870c-304e7f2805cc")]
 enum DrawValue {
     I8(i8),
     I32(i32),
@@ -95,18 +95,18 @@ pub struct TilePropertyEditor {
     value: TileSetPropertyOptionValue,
     /// The button to activate the editor draw tool that allows this property value
     /// to be applied to other tiles.
-    draw_button: Handle<UiNode>,
+    draw_button: Handle<Button>,
     /// The label showing the name of the layer.
-    name_field: Handle<UiNode>,
+    name_field: Handle<Text>,
     /// The field for editing the current value.
     /// This may be several different widgets, depending on the type of the layer.
     /// For [`TileSetPropertyType::I32`] it will be a [`NumericUpDown`](fyrox::gui::numeric::NumericUpDown) for i32.
     /// For [`TileSetPropertyType::String`] it will be a [`TextBox`](fyrox::gui::text_box::TextBox), and so on.
     value_field: Handle<UiNode>,
     /// The dropdown list of pre-defined values.
-    list: Handle<UiNode>,
+    list: Handle<DropdownList>,
     /// The handles of the buttons in the 9-button grid.
-    nine_buttons: Option<Box<[Handle<UiNode>; 9]>>,
+    nine_buttons: Option<Box<[Handle<Button>; 9]>>,
 }
 
 impl TilePropertyEditor {
@@ -121,16 +121,22 @@ impl TilePropertyEditor {
             .build(ctx);
         let value_field = match prop_layer.prop_type {
             TileSetPropertyType::I32 => {
-                NumericUpDownBuilder::<i32>::new(WidgetBuilder::new().on_column(1)).build(ctx)
+                NumericUpDownBuilder::<i32>::new(WidgetBuilder::new().on_column(1))
+                    .build(ctx)
+                    .to_base()
             }
             TileSetPropertyType::F32 => {
-                NumericUpDownBuilder::<f32>::new(WidgetBuilder::new().on_column(1)).build(ctx)
+                NumericUpDownBuilder::<f32>::new(WidgetBuilder::new().on_column(1))
+                    .build(ctx)
+                    .to_base()
             }
-            TileSetPropertyType::String => {
-                TextBoxBuilder::new(WidgetBuilder::new().on_column(1)).build(ctx)
-            }
+            TileSetPropertyType::String => TextBoxBuilder::new(WidgetBuilder::new().on_column(1))
+                .build(ctx)
+                .to_base(),
             TileSetPropertyType::NineSlice => {
-                NumericUpDownBuilder::<i8>::new(WidgetBuilder::new().on_column(1)).build(ctx)
+                NumericUpDownBuilder::<i8>::new(WidgetBuilder::new().on_column(1))
+                    .build(ctx)
+                    .to_base()
             }
         };
         let index = prop_layer
@@ -166,7 +172,8 @@ impl TilePropertyEditor {
         .add_column(Column::auto())
         .add_column(Column::stretch())
         .add_row(Row::auto())
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         let is_nine = matches!(prop_layer.prop_type, TileSetPropertyType::NineSlice);
         let (nine, nine_buttons) = if is_nine {
             let (nine, nine_buttons) = build_nine(create_nine_specs(value, prop_layer), ctx);
@@ -177,6 +184,7 @@ impl TilePropertyEditor {
         let handle = if is_nine {
             StackPanelBuilder::new(WidgetBuilder::new().with_child(pair).with_child(nine))
                 .build(ctx)
+                .to_base()
         } else {
             pair
         };
@@ -203,22 +211,13 @@ impl TilePropertyEditor {
     /// state of the layer.
     fn apply_property_update(&mut self, state: &TileEditorState, ui: &mut UserInterface) {
         let layer = state.find_property(self.property_id).unwrap();
-        ui.send_message(TextMessage::text(
-            self.name_field,
-            MessageDirection::ToWidget,
-            layer.name.to_string(),
-        ));
+        ui.send(self.name_field, TextMessage::Text(layer.name.to_string()));
         let list = make_named_value_list_items(layer, &mut ui.build_ctx());
-        ui.send_message(DropdownListMessage::items(
+        ui.send_sync(self.list, DropdownListMessage::Items(list));
+        ui.send(
             self.list,
-            MessageDirection::ToWidget,
-            list,
-        ));
-        ui.send_message(WidgetMessage::visibility(
-            self.list,
-            MessageDirection::ToWidget,
-            !layer.named_values.is_empty(),
-        ));
+            WidgetMessage::Visibility(!layer.named_values.is_empty()),
+        );
         self.sync_list_index(state, ui);
     }
     /// Scan the currently selected tiles to find the value that this editor should display.
@@ -242,55 +241,26 @@ impl TilePropertyEditor {
     fn sync_value_to_field(&mut self, state: &TileEditorState, ui: &mut UserInterface) {
         match &self.value {
             &TileSetPropertyOptionValue::I32(Some(v)) => {
-                send_sync_message(
-                    ui,
-                    NumericUpDownMessage::value(self.value_field, MessageDirection::ToWidget, v),
-                );
+                ui.send_sync(self.value_field, NumericUpDownMessage::Value(v));
             }
             TileSetPropertyOptionValue::I32(None) => {
-                send_sync_message(
-                    ui,
-                    NumericUpDownMessage::value(self.value_field, MessageDirection::ToWidget, 0),
-                );
+                ui.send_sync(self.value_field, NumericUpDownMessage::Value(0));
             }
             &TileSetPropertyOptionValue::F32(Some(v)) => {
-                send_sync_message(
-                    ui,
-                    NumericUpDownMessage::value(self.value_field, MessageDirection::ToWidget, v),
-                );
+                ui.send_sync(self.value_field, NumericUpDownMessage::Value(v));
             }
             TileSetPropertyOptionValue::F32(None) => {
-                send_sync_message(
-                    ui,
-                    NumericUpDownMessage::value(self.value_field, MessageDirection::ToWidget, 0.0),
-                );
+                ui.send_sync(self.value_field, NumericUpDownMessage::Value(0.0));
             }
             TileSetPropertyOptionValue::String(Some(v)) => {
-                send_sync_message(
-                    ui,
-                    TextMessage::text(self.value_field, MessageDirection::ToWidget, v.to_string()),
-                );
+                ui.send_sync(self.value_field, TextMessage::Text(v.to_string()));
             }
             TileSetPropertyOptionValue::String(None) => {
-                send_sync_message(
-                    ui,
-                    TextMessage::text(
-                        self.value_field,
-                        MessageDirection::ToWidget,
-                        String::default(),
-                    ),
-                );
+                ui.send_sync(self.value_field, TextMessage::Text(String::default()));
             }
             TileSetPropertyOptionValue::NineSlice(_) => {
                 if let DrawValue::I8(v) = self.draw_value {
-                    send_sync_message(
-                        ui,
-                        NumericUpDownMessage::value(
-                            self.value_field,
-                            MessageDirection::ToWidget,
-                            v,
-                        ),
-                    );
+                    ui.send_sync(self.value_field, NumericUpDownMessage::Value(v));
                 }
                 if let Some(layer) = state.find_property(self.property_id) {
                     let specs = create_nine_specs(&self.value, layer);
@@ -314,10 +284,7 @@ impl TilePropertyEditor {
         }
         .map(|x| x + 1)
         .unwrap_or(0);
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(self.list, MessageDirection::ToWidget, Some(index)),
-        );
+        ui.send_sync(self.list, DropdownListMessage::Selection(Some(index)));
     }
     /// Update the value using an index from the dropdown list.
     fn set_value_from_list(
@@ -377,7 +344,7 @@ impl TilePropertyEditor {
     /// One of the nine buttons has been clicked, so set the corresponding element of the value.
     fn handle_nine_click(
         &mut self,
-        handle: Handle<UiNode>,
+        handle: Handle<Button>,
         state: &TileEditorState,
         ui: &mut UserInterface,
         sender: &MessageSender,
@@ -495,7 +462,7 @@ impl TileEditor for TilePropertyEditor {
     fn handle(&self) -> Handle<UiNode> {
         self.handle
     }
-    fn draw_button(&self) -> Handle<UiNode> {
+    fn draw_button(&self) -> Handle<Button> {
         self.draw_button
     }
     fn slice_mode(&self) -> bool {
@@ -613,11 +580,17 @@ impl TileEditor for TilePropertyEditor {
         tile_book: &TileBook,
         sender: &MessageSender,
     ) {
-        if message.flags == MSG_SYNC_FLAG || message.direction() == MessageDirection::ToWidget {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
         if let Some(ButtonMessage::Click) = message.data() {
-            self.handle_nine_click(message.destination(), state, ui, sender, tile_book);
+            self.handle_nine_click(
+                message.destination().to_variant(),
+                state,
+                ui,
+                sender,
+                tile_book,
+            );
         } else if let Some(TextMessage::Text(v)) = message.data() {
             if message.destination() == self.value_field {
                 self.set_value_from_text(v.into());
@@ -638,7 +611,7 @@ impl TileEditor for TilePropertyEditor {
                 self.set_value_from_f32(v, state, ui);
                 self.send_value(state, sender, tile_book);
             }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+        } else if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
             if message.destination() == self.list {
                 self.set_value_from_list(*index, state, ui, sender, tile_book);
             }
@@ -704,7 +677,7 @@ impl NineButtonSpec {
 const DRAW_BUTTON_WIDTH: f32 = 20.0;
 const DRAW_BUTTON_HEIGHT: f32 = 20.0;
 
-fn make_draw_button(tab_index: Option<usize>, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_draw_button(tab_index: Option<usize>, ctx: &mut BuildContext) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .with_tab_index(tab_index)
@@ -768,40 +741,24 @@ fn create_nine_specs(
 }
 
 /// Send UI messages to update the one of nine buttons to match the given [`NineButtonSpec`].
-fn apply_specs_to_nine(specs: &NineButtonSpec, handle: Handle<UiNode>, ui: &mut UserInterface) {
-    let button = ui.try_get_of_type::<Button>(handle).unwrap();
+fn apply_specs_to_nine(specs: &NineButtonSpec, handle: Handle<Button>, ui: &mut UserInterface) {
+    let button = &ui[handle];
     let text = *button.content.clone();
     let decorator = *button.decorator.clone();
-    ui.send_message(TextMessage::text(
+    ui.send(text, TextMessage::Text(specs.name.clone()));
+    ui.send(
         text,
-        MessageDirection::ToWidget,
-        specs.name.clone(),
-    ));
-    ui.send_message(WidgetMessage::foreground(
-        text,
-        MessageDirection::ToWidget,
-        specs.foreground_brush().into(),
-    ));
-    ui.send_message(DecoratorMessage::selected_brush(
+        WidgetMessage::Foreground(specs.foreground_brush().into()),
+    );
+    ui.send_many(
         decorator,
-        MessageDirection::ToWidget,
-        specs.selected_brush().into(),
-    ));
-    ui.send_message(DecoratorMessage::normal_brush(
-        decorator,
-        MessageDirection::ToWidget,
-        specs.normal_brush().into(),
-    ));
-    ui.send_message(DecoratorMessage::pressed_brush(
-        decorator,
-        MessageDirection::ToWidget,
-        specs.pressed_brush().into(),
-    ));
-    ui.send_message(DecoratorMessage::hover_brush(
-        decorator,
-        MessageDirection::ToWidget,
-        specs.hover_brush().into(),
-    ));
+        [
+            DecoratorMessage::SelectedBrush(specs.selected_brush().into()),
+            DecoratorMessage::NormalBrush(specs.normal_brush().into()),
+            DecoratorMessage::PressedBrush(specs.pressed_brush().into()),
+            DecoratorMessage::HoverBrush(specs.hover_brush().into()),
+        ],
+    );
 }
 
 /// Use [`ButtonBuilder`] to create a buttons to represent one of the nine buttons
@@ -812,7 +769,7 @@ fn build_nine_button(
     y: usize,
     tab_index: Option<usize>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_column(x)
@@ -843,8 +800,8 @@ fn build_nine_button(
 fn build_nine(
     specs: [NineButtonSpec; 9],
     ctx: &mut BuildContext,
-) -> (Handle<UiNode>, Box<[Handle<UiNode>; 9]>) {
-    let mut buttons: Box<[Handle<UiNode>; 9]> = [Handle::NONE; 9].into();
+) -> (Handle<Grid>, Box<[Handle<Button>; 9]>) {
+    let mut buttons: Box<[Handle<Button>; 9]> = [Handle::NONE; 9].into();
     let mut tab_index = 0;
     for y in 0..3 {
         for x in 0..3 {
@@ -853,13 +810,14 @@ fn build_nine(
             tab_index += 1;
         }
     }
-    let nine = GridBuilder::new(WidgetBuilder::new().with_children(buttons.iter().copied()))
-        .add_column(Column::stretch())
-        .add_column(Column::stretch())
-        .add_column(Column::stretch())
-        .add_row(Row::auto())
-        .add_row(Row::auto())
-        .add_row(Row::auto())
-        .build(ctx);
+    let nine =
+        GridBuilder::new(WidgetBuilder::new().with_children(buttons.iter().map(|h| h.to_base())))
+            .add_column(Column::stretch())
+            .add_column(Column::stretch())
+            .add_column(Column::stretch())
+            .add_row(Row::auto())
+            .add_row(Row::auto())
+            .add_row(Row::auto())
+            .build(ctx);
     (nine, buttons)
 }

@@ -19,10 +19,7 @@
 // SOFTWARE.
 
 use crate::{
-    core::{
-        num_traits, pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*,
-    },
-    define_constructor,
+    core::{num_traits, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     grid::{Column, GridBuilder, Row},
     message::{MessageDirection, UiMessage},
     numeric::{NumericType, NumericUpDownBuilder, NumericUpDownMessage},
@@ -31,6 +28,9 @@ use crate::{
 };
 use fyrox_core::algebra::SMatrix;
 
+use crate::message::MessageData;
+use crate::numeric::NumericUpDown;
+use fyrox_core::pool::HandlesVecExtension;
 use std::ops::{Deref, DerefMut};
 
 fn make_numeric_input<T: NumericType>(
@@ -43,7 +43,7 @@ fn make_numeric_input<T: NumericType>(
     step: T,
     editable: bool,
     precision: usize,
-) -> Handle<UiNode> {
+) -> Handle<NumericUpDown<T>> {
     NumericUpDownBuilder::new(
         WidgetBuilder::new()
             .on_row(row)
@@ -71,22 +71,19 @@ where
 {
     Value(SMatrix<T, R, C>),
 }
+impl<const R: usize, const C: usize, T: NumericType> MessageData for MatrixEditorMessage<R, C, T> {}
 
-impl<const R: usize, const C: usize, T> MatrixEditorMessage<R, C, T>
-where
-    T: NumericType,
-{
-    define_constructor!(MatrixEditorMessage:Value => fn value(SMatrix<T, R, C>), layout: false);
-}
-
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "9f05427a-5862-4574-bb21-ebaf52aa8c72"
+)]
 pub struct MatrixEditor<const R: usize, const C: usize, T>
 where
     T: NumericType,
 {
     pub widget: Widget,
-    pub fields: Vec<Handle<UiNode>>,
+    pub fields: Vec<Handle<NumericUpDown<T>>>,
     #[reflect(hidden)]
     #[visit(skip)]
     pub value: SMatrix<T, R, C>,
@@ -137,23 +134,6 @@ where
     }
 }
 
-impl<const R: usize, const C: usize, T: NumericType> TypeUuidProvider for MatrixEditor<R, C, T> {
-    fn type_uuid() -> Uuid {
-        let r_id = Uuid::from_u64_pair(R as u64, R as u64);
-        let c_id = Uuid::from_u64_pair(C as u64, C as u64);
-        combine_uuids(
-            c_id,
-            combine_uuids(
-                r_id,
-                combine_uuids(
-                    uuid!("9f05427a-5862-4574-bb21-ebaf52aa8c72"),
-                    T::type_uuid(),
-                ),
-            ),
-        )
-    }
-}
-
 impl<const R: usize, const C: usize, T> Control for MatrixEditor<R, C, T>
 where
     T: NumericType,
@@ -168,41 +148,31 @@ where
                     if message.destination() == *field {
                         let mut new_value = self.value;
                         new_value[i] = value;
-                        ui.send_message(MatrixEditorMessage::value(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                            new_value,
-                        ));
+                        ui.send(self.handle(), MatrixEditorMessage::Value(new_value));
                     }
                 }
             }
         } else if let Some(&MatrixEditorMessage::Value(new_value)) =
-            message.data::<MatrixEditorMessage<R, C, T>>()
+            message.data_for::<MatrixEditorMessage<R, C, T>>(self.handle)
         {
-            if message.direction() == MessageDirection::ToWidget {
-                let mut changed = false;
+            let mut changed = false;
 
-                for i in 0..self.fields.len() {
-                    let editor = self.fields[i];
-                    let current = &mut self.value[i];
-                    let min = self.min[i];
-                    let max = self.max[i];
-                    let new = num_traits::clamp(new_value[i], min, max);
+            for i in 0..self.fields.len() {
+                let editor = self.fields[i];
+                let current = &mut self.value[i];
+                let min = self.min[i];
+                let max = self.max[i];
+                let new = num_traits::clamp(new_value[i], min, max);
 
-                    if *current != new {
-                        *current = new;
-                        ui.send_message(NumericUpDownMessage::value(
-                            editor,
-                            MessageDirection::ToWidget,
-                            new,
-                        ));
-                        changed = true;
-                    }
+                if *current != new {
+                    *current = new;
+                    ui.send(editor, NumericUpDownMessage::Value(new));
+                    changed = true;
                 }
+            }
 
-                if changed {
-                    ui.send_message(message.reverse());
-                }
+            if changed {
+                ui.try_send_response(message);
             }
         }
     }
@@ -267,7 +237,7 @@ where
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<MatrixEditor<R, C, T>> {
         let mut fields = Vec::new();
         let mut children = Vec::new();
 
@@ -289,7 +259,7 @@ where
             }
         }
 
-        let grid = GridBuilder::new(WidgetBuilder::new().with_children(children))
+        let grid = GridBuilder::new(WidgetBuilder::new().with_children(children.to_base()))
             .add_rows(vec![Row::stretch(); R])
             .add_columns(vec![Column::stretch(); C])
             .build(ctx);
@@ -303,7 +273,7 @@ where
             step: self.step,
         };
 
-        ctx.add_node(UiNode::new(node))
+        ctx.add(node)
     }
 }
 

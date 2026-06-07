@@ -18,14 +18,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::SceneGraphNode;
+use crate::fyrox::graph::NodeWrapper;
 use crate::fyrox::{
     asset::manager::ResourceManager,
     core::{
         futures::executor::block_on, make_pretty_type_name, make_relative_path, pool::ErasedHandle,
-        pool::Handle, reflect::Reflect,
+        pool::Handle,
     },
-    graph::{BaseSceneGraph, SceneGraph},
+    graph::SceneGraph,
     gui::{
         border::Border, button::Button, canvas::Canvas, check_box::CheckBox,
         file_browser::FileBrowser, grid::Grid, image::Image, inspector::Inspector,
@@ -34,18 +34,19 @@ use crate::fyrox::{
         UserInterfaceResourceExtension,
     },
 };
+use crate::world::SceneItemIcon;
 use crate::{
     command::{Command, CommandGroup},
-    load_image,
     message::MessageSender,
     scene::{commands::ChangeSelectionCommand, Selection},
+    scene_item_icon,
     ui_scene::{
         commands::graph::{AddUiPrefabCommand, LinkWidgetsCommand, SetWidgetChildPosition},
         selection::UiSelection,
     },
     world::{item::DropAnchor, WorldViewerDataProvider},
 };
-use fyrox::resource::texture::TextureResource;
+use fyrox::core::color::Color;
 use std::{borrow::Cow, path::Path, path::PathBuf};
 
 pub struct UiSceneWorldViewerDataProvider<'a> {
@@ -67,14 +68,14 @@ impl WorldViewerDataProvider for UiSceneWorldViewerDataProvider<'_> {
 
     fn children_of(&self, node: ErasedHandle) -> Vec<ErasedHandle> {
         self.ui
-            .try_get(node.into())
+            .try_get_node(node.into())
             .map(|n| n.children.iter().map(|c| (*c).into()).collect::<Vec<_>>())
             .unwrap_or_default()
     }
 
     fn child_count_of(&self, node: ErasedHandle) -> usize {
         self.ui
-            .try_get(node.into())
+            .try_get_node(node.into())
             .map(|n| n.children.len())
             .unwrap_or_default()
     }
@@ -90,75 +91,80 @@ impl WorldViewerDataProvider for UiSceneWorldViewerDataProvider<'_> {
     }
 
     fn is_node_has_child(&self, node: ErasedHandle, child: ErasedHandle) -> bool {
-        self.ui
-            .try_get(node.into())
-            .is_some_and(|n| n.children().iter().any(|c| *c == child.into()))
+        self.ui.try_get_node(node.into()).ok().is_some_and(|n| {
+            n.children()
+                .iter()
+                .any(|c| *c == Handle::<UiNode>::from(child))
+        })
     }
 
     fn parent_of(&self, node: ErasedHandle) -> ErasedHandle {
         self.ui
-            .try_get(node.into())
+            .try_get_node(node.into())
             .map(|n| n.parent().into())
             .unwrap_or_default()
     }
 
     fn name_of(&self, node: ErasedHandle) -> Option<Cow<str>> {
-        self.ui.try_get(node.into()).map(|n| {
+        self.ui.try_get_node(node.into()).ok().map(|n| {
             Cow::Owned(format!(
                 "{} [{}]",
                 n.name(),
-                make_pretty_type_name(Reflect::type_name(n))
+                make_pretty_type_name(n.inner_ref().type_info_ref().type_name)
             ))
         })
     }
 
     fn is_valid_handle(&self, node: ErasedHandle) -> bool {
-        self.ui.try_get(node.into()).is_some()
+        self.ui.try_get_node(node.into()).is_ok()
     }
 
-    fn icon_of(&self, node: ErasedHandle) -> Option<TextureResource> {
-        let node: &UiNode = self.ui.try_get(node.into()).unwrap();
+    fn icon_of(&self, node: ErasedHandle) -> Option<SceneItemIcon> {
+        let node: &UiNode = self.ui.try_get_node(node.into()).unwrap();
 
         // all icons are able to be used freely
         // todo: add more icons
 
         // Containers
         if node.cast::<Canvas>().is_some() {
-            load_image!("../../resources/canvas-icon.png")
+            scene_item_icon!("../../resources/canvas-icon.png", Color::hex("#FFC312"))
         } else if node.cast::<Screen>().is_some() {
-            load_image!("../../resources/screen-icon.png")
+            scene_item_icon!("../../resources/screen-icon.png", Color::hex("#F79F1F"))
         } else if node.cast::<Grid>().is_some() {
-            load_image!("../../resources/grid-icon.png")
+            scene_item_icon!("../../resources/grid-icon.png", Color::hex("#EE5A24"))
         } else if node.cast::<StackPanel>().is_some() {
-            load_image!("../../resources/stackPanel-icon.png")
+            scene_item_icon!("../../resources/stackPanel-icon.png", Color::hex("#EA2027"))
         } else if node.cast::<Window>().is_some() {
-            load_image!("../../resources/window-icon.png")
+            scene_item_icon!("../../resources/window-icon.png", Color::hex("#C4E538"))
         } else if node.cast::<MessageBox>().is_some() {
-            load_image!("../../resources/messageBox-icon.png")
+            scene_item_icon!("../../resources/messageBox-icon.png", Color::hex("#A3CB38"))
         } else if node.cast::<Menu>().is_some() {
-            load_image!("../../resources/menu-icon.png")
+            scene_item_icon!("../../resources/menu-icon.png", Color::hex("#009432"))
         } else if node.cast::<Popup>().is_some() {
-            load_image!("../../resources/popup-icon.png")
+            scene_item_icon!("../../resources/popup-icon.png", Color::hex("#006266"))
         }
         // Visual
         else if node.cast::<Text>().is_some() {
-            load_image!("../../resources/text-icon.png")
+            scene_item_icon!("../../resources/text-icon.png", Color::hex("#12CBC4"))
         } else if node.cast::<Image>().is_some() {
-            load_image!("../../resources/image-icon.png")
+            scene_item_icon!("../../resources/image-icon.png", Color::hex("#1289A7"))
         } else if node.cast::<Border>().is_some() {
-            load_image!("../../resources/border-icon.png")
+            scene_item_icon!("../../resources/border-icon.png", Color::hex("#0652DD"))
         }
         // Controls
         else if node.cast::<Button>().is_some() {
-            load_image!("../../resources/button-icon.png")
+            scene_item_icon!("../../resources/button-icon.png", Color::hex("#FDA7DF"))
         } else if node.cast::<CheckBox>().is_some() {
-            load_image!("../../resources/checkbox-icon.png")
+            scene_item_icon!("../../resources/checkbox-icon.png", Color::hex("#D980FA"))
         } else if node.cast::<ListView>().is_some() {
-            load_image!("../../resources/list-icon.png")
+            scene_item_icon!("../../resources/list-icon.png", Color::hex("#9980FA"))
         } else if node.cast::<FileBrowser>().is_some() {
-            load_image!("../../resources/fileBrowser-icon.png")
+            scene_item_icon!(
+                "../../resources/fileBrowser-icon.png",
+                Color::hex("#5758BB")
+            )
         } else if node.cast::<Inspector>().is_some() {
-            load_image!("../../resources/inspector-icon.png")
+            scene_item_icon!("../../resources/inspector-icon.png", Color::hex("#ED4C67"))
         } else {
             None
         }
@@ -166,7 +172,8 @@ impl WorldViewerDataProvider for UiSceneWorldViewerDataProvider<'_> {
 
     fn is_instance(&self, node: ErasedHandle) -> bool {
         self.ui
-            .try_get(node.into())
+            .try_get_node(node.into())
+            .ok()
             .is_some_and(|n| n.resource().is_some())
     }
 
@@ -211,7 +218,7 @@ impl WorldViewerDataProvider for UiSceneWorldViewerDataProvider<'_> {
                             if let Some((parents_parent, position)) =
                                 self.ui.relative_position(parent, index_offset)
                             {
-                                if let Some(node) = self.ui.try_get(widget_handle) {
+                                if let Ok(node) = self.ui.try_get_node(widget_handle) {
                                     if node.parent() != parents_parent {
                                         commands.push(LinkWidgetsCommand::new(
                                             widget_handle,

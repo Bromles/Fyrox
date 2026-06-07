@@ -18,49 +18,57 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::BaseSceneGraph;
-use crate::fyrox::{
-    core::{
-        algebra::{Matrix4, UnitQuaternion, Vector2, Vector3},
-        color::Color,
-        math::Matrix4Ext,
-        pool::Handle,
-    },
-    scene::{
-        base::BaseBuilder,
-        graph::Graph,
-        mesh::{
-            surface::{SurfaceBuilder, SurfaceData, SurfaceResource},
-            MeshBuilder, RenderPath,
-        },
-        node::Node,
-        pivot::PivotBuilder,
-        transform::{Transform, TransformBuilder},
-        Scene,
-    },
-};
 use crate::{
-    interaction::plane::PlaneKind,
+    fyrox::{
+        core::{
+            algebra::{Matrix4, UnitQuaternion, Vector2, Vector3},
+            color::Color,
+            math::Matrix4Ext,
+            pool::Handle,
+        },
+        graph::SceneGraph,
+        scene::{
+            base::BaseBuilder,
+            graph::Graph,
+            mesh::{
+                surface::{SurfaceBuilder, SurfaceData, SurfaceResource},
+                MeshBuilder, RenderPath,
+            },
+            node::Node,
+            pivot::PivotBuilder,
+            transform::{Transform, TransformBuilder},
+            Scene,
+        },
+    },
+    interaction::{gizmo::utils, plane::PlaneKind},
     make_color_material,
     scene::{GameScene, Selection},
-    set_mesh_diffuse_color, Engine,
+    set_mesh_diffuse_color,
+    settings::Settings,
+    Engine,
 };
+use fyrox::core::reflect::prelude::*;
+use fyrox::scene::camera::Camera;
+use fyrox::scene::mesh::Mesh;
+use fyrox::scene::pivot::Pivot;
 
+#[derive(Reflect, Debug, Clone)]
+#[reflect(type_uuid = "060abe31-ce96-4696-aa5d-e44e9639df0e")]
 pub struct MoveGizmo {
-    pub origin: Handle<Node>,
-    smart_dot: Handle<Node>,
-    x_arrow: Handle<Node>,
-    y_arrow: Handle<Node>,
-    z_arrow: Handle<Node>,
-    x_axis: Handle<Node>,
-    y_axis: Handle<Node>,
-    z_axis: Handle<Node>,
-    xy_plane: Handle<Node>,
-    yz_plane: Handle<Node>,
-    zx_plane: Handle<Node>,
+    pub origin: Handle<Pivot>,
+    smart_dot: Handle<Mesh>,
+    x_arrow: Handle<Mesh>,
+    y_arrow: Handle<Mesh>,
+    z_arrow: Handle<Mesh>,
+    x_axis: Handle<Mesh>,
+    y_axis: Handle<Mesh>,
+    z_axis: Handle<Mesh>,
+    xy_plane: Handle<Mesh>,
+    yz_plane: Handle<Mesh>,
+    zx_plane: Handle<Mesh>,
 }
 
-fn make_smart_dot(graph: &mut Graph) -> Handle<Node> {
+fn make_smart_dot(graph: &mut Graph) -> Handle<Mesh> {
     let scale = 0.075;
     MeshBuilder::new(
         BaseBuilder::new()
@@ -86,7 +94,7 @@ fn make_move_axis(
     rotation: UnitQuaternion<f32>,
     color: Color,
     name_prefix: &str,
-) -> (Handle<Node>, Handle<Node>) {
+) -> (Handle<Mesh>, Handle<Mesh>) {
     const ARROW_LENGTH: f32 = 0.5;
     const ARROW_THICKNESS: f32 = 0.015;
 
@@ -94,7 +102,7 @@ fn make_move_axis(
     let axis = MeshBuilder::new(
         BaseBuilder::new()
             .with_cast_shadows(false)
-            .with_children(&[{
+            .with_child({
                 arrow = MeshBuilder::new(
                     BaseBuilder::new()
                         .with_cast_shadows(false)
@@ -113,7 +121,7 @@ fn make_move_axis(
                 .build()])
                 .build(graph);
                 arrow
-            }])
+            })
             .with_name(name_prefix.to_owned() + "Axis")
             .with_local_transform(
                 TransformBuilder::new()
@@ -143,7 +151,7 @@ fn create_quad_plane(
     transform: Matrix4<f32>,
     color: Color,
     name: &str,
-) -> Handle<Node> {
+) -> Handle<Mesh> {
     let scale = 0.2;
     MeshBuilder::new(
         BaseBuilder::new()
@@ -242,16 +250,16 @@ impl MoveGizmo {
     }
 
     pub fn reset_state(&self, graph: &mut Graph) {
-        set_mesh_diffuse_color(graph[self.x_axis].as_mesh_mut(), Color::RED);
-        set_mesh_diffuse_color(graph[self.x_arrow].as_mesh_mut(), Color::RED);
-        set_mesh_diffuse_color(graph[self.y_axis].as_mesh_mut(), Color::GREEN);
-        set_mesh_diffuse_color(graph[self.y_arrow].as_mesh_mut(), Color::GREEN);
-        set_mesh_diffuse_color(graph[self.z_axis].as_mesh_mut(), Color::BLUE);
-        set_mesh_diffuse_color(graph[self.z_arrow].as_mesh_mut(), Color::BLUE);
-        set_mesh_diffuse_color(graph[self.zx_plane].as_mesh_mut(), Color::GREEN);
-        set_mesh_diffuse_color(graph[self.yz_plane].as_mesh_mut(), Color::RED);
-        set_mesh_diffuse_color(graph[self.xy_plane].as_mesh_mut(), Color::BLUE);
-        set_mesh_diffuse_color(graph[self.smart_dot].as_mesh_mut(), Color::WHITE);
+        set_mesh_diffuse_color(&mut graph[self.x_axis], Color::RED);
+        set_mesh_diffuse_color(&mut graph[self.x_arrow], Color::RED);
+        set_mesh_diffuse_color(&mut graph[self.y_axis], Color::GREEN);
+        set_mesh_diffuse_color(&mut graph[self.y_arrow], Color::GREEN);
+        set_mesh_diffuse_color(&mut graph[self.z_axis], Color::BLUE);
+        set_mesh_diffuse_color(&mut graph[self.z_arrow], Color::BLUE);
+        set_mesh_diffuse_color(&mut graph[self.zx_plane], Color::GREEN);
+        set_mesh_diffuse_color(&mut graph[self.yz_plane], Color::RED);
+        set_mesh_diffuse_color(&mut graph[self.xy_plane], Color::BLUE);
+        set_mesh_diffuse_color(&mut graph[self.smart_dot], Color::WHITE);
     }
 
     pub fn apply_mode(&self, mode: Option<PlaneKind>, graph: &mut Graph) {
@@ -262,28 +270,28 @@ impl MoveGizmo {
             let yellow = Color::opaque(255, 255, 0);
             match mode {
                 PlaneKind::SMART => {
-                    set_mesh_diffuse_color(graph[self.smart_dot].as_mesh_mut(), yellow);
+                    set_mesh_diffuse_color(&mut graph[self.smart_dot], yellow);
                 }
                 PlaneKind::X => {
-                    set_mesh_diffuse_color(graph[self.x_axis].as_mesh_mut(), yellow);
-                    set_mesh_diffuse_color(graph[self.x_arrow].as_mesh_mut(), yellow);
+                    set_mesh_diffuse_color(&mut graph[self.x_axis], yellow);
+                    set_mesh_diffuse_color(&mut graph[self.x_arrow], yellow);
                 }
                 PlaneKind::Y => {
-                    set_mesh_diffuse_color(graph[self.y_axis].as_mesh_mut(), yellow);
-                    set_mesh_diffuse_color(graph[self.y_arrow].as_mesh_mut(), yellow);
+                    set_mesh_diffuse_color(&mut graph[self.y_axis], yellow);
+                    set_mesh_diffuse_color(&mut graph[self.y_arrow], yellow);
                 }
                 PlaneKind::Z => {
-                    set_mesh_diffuse_color(graph[self.z_axis].as_mesh_mut(), yellow);
-                    set_mesh_diffuse_color(graph[self.z_arrow].as_mesh_mut(), yellow);
+                    set_mesh_diffuse_color(&mut graph[self.z_axis], yellow);
+                    set_mesh_diffuse_color(&mut graph[self.z_arrow], yellow);
                 }
                 PlaneKind::XY => {
-                    set_mesh_diffuse_color(graph[self.xy_plane].as_mesh_mut(), yellow);
+                    set_mesh_diffuse_color(&mut graph[self.xy_plane], yellow);
                 }
                 PlaneKind::YZ => {
-                    set_mesh_diffuse_color(graph[self.yz_plane].as_mesh_mut(), yellow);
+                    set_mesh_diffuse_color(&mut graph[self.yz_plane], yellow);
                 }
                 PlaneKind::ZX => {
-                    set_mesh_diffuse_color(graph[self.zx_plane].as_mesh_mut(), yellow);
+                    set_mesh_diffuse_color(&mut graph[self.zx_plane], yellow);
                 }
             }
         }
@@ -320,7 +328,7 @@ impl MoveGizmo {
     pub fn calculate_offset(
         &self,
         graph: &Graph,
-        camera: Handle<Node>,
+        camera: Handle<Camera>,
         mouse_offset: Vector2<f32>,
         mouse_position: Vector2<f32>,
         frame_size: Vector2<f32>,
@@ -329,7 +337,7 @@ impl MoveGizmo {
         let node_global_transform = graph[self.origin].global_transform();
         let node_local_transform = graph[self.origin].local_transform().matrix();
 
-        let camera = &graph[camera].as_camera();
+        let camera = &graph[camera];
         let inv_node_transform = node_global_transform
             .try_inverse()
             .unwrap_or_else(Matrix4::identity);
@@ -367,18 +375,14 @@ impl MoveGizmo {
         node.local_transform_mut().set_position(position);
     }
 
-    pub fn sync_transform(&self, scene: &mut Scene, selection: &Selection, scale: Vector3<f32>) {
-        let graph = &mut scene.graph;
-        if let Some(selection) = selection.as_graph() {
-            if let Some((rotation, position)) = selection.global_rotation_position(graph) {
-                let node = &mut graph[self.origin];
-                node.set_visibility(true);
-                node.local_transform_mut()
-                    .set_rotation(rotation)
-                    .set_position(position)
-                    .set_scale(scale);
-            }
-        }
+    pub fn sync_with_selection(
+        &self,
+        graph: &mut Graph,
+        camera: Handle<Camera>,
+        settings: &Settings,
+        selection: &Selection,
+    ) {
+        utils::sync_gizmo_with_selection(self.origin.to_base(), graph, camera, settings, selection)
     }
 
     pub fn set_visible(&self, graph: &mut Graph, visible: bool) {

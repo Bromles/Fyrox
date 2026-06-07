@@ -25,6 +25,9 @@
 use core::f32;
 
 use brush::{BrushMacroData, TileMapBrushResource};
+use fyrox::gui::border::Border;
+use fyrox::gui::button::Button;
+use fyrox::gui::text_box::TextBox;
 use fyrox::gui::{
     button::ButtonMessage,
     grid::*,
@@ -36,10 +39,7 @@ use fyrox::gui::{
     utils::{make_arrow, ArrowDirection},
     HorizontalAlignment, VerticalAlignment,
 };
-
 use fyrox::scene::tilemap::*;
-
-use crate::{send_sync_message, MSG_SYNC_FLAG};
 
 use super::*;
 
@@ -49,17 +49,17 @@ const MISSING_MACRO: &str = "UNKNOWN MACRO";
 /// stored within the brush. Macro instances can be created, deleted, renamed
 /// and their settings can be modified.
 pub struct MacroTab {
-    handle: Handle<UiNode>,
+    handle: Handle<Grid>,
     macros: BrushMacroListRef,
     current_macro_id: Option<Uuid>,
-    macro_panel: Handle<UiNode>,
-    list: Handle<UiNode>,
-    up_button: Handle<UiNode>,
-    down_button: Handle<UiNode>,
-    remove_button: Handle<UiNode>,
+    macro_panel: Handle<Border>,
+    list: Handle<ListView>,
+    up_button: Handle<Button>,
+    down_button: Handle<Button>,
+    remove_button: Handle<Button>,
     add_buttons: Box<[Handle<UiNode>]>,
-    data_panel: Handle<UiNode>,
-    name_field: Handle<UiNode>,
+    data_panel: Handle<Grid>,
+    name_field: Handle<TextBox>,
 }
 
 fn make_arrow_button(
@@ -67,7 +67,7 @@ fn make_arrow_button(
     dir: ArrowDirection,
     column: usize,
     row: usize,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     let arrow = make_arrow(ctx, dir, 16.0);
     ButtonBuilder::new(
         WidgetBuilder::new()
@@ -86,7 +86,7 @@ fn make_button(
     ctx: &mut BuildContext,
     column: usize,
     row: usize,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_column(column)
@@ -140,6 +140,7 @@ pub fn make_list_item(
             .with_pad_by_corner_radius(false),
     )
     .build(ctx)
+    .to_base()
 }
 
 fn make_instance_items(
@@ -161,7 +162,7 @@ fn make_instance_items(
         .collect()
 }
 
-fn make_add_button(title: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_add_button(title: &str, ctx: &mut BuildContext) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .with_height(24.0)
@@ -174,7 +175,7 @@ fn make_add_button(title: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
 fn make_add_buttons(ctx: &mut BuildContext, macros: &BrushMacroList) -> Box<[Handle<UiNode>]> {
     macros
         .iter()
-        .map(|m| make_add_button(m.name(), ctx))
+        .map(|m| make_add_button(m.name(), ctx).to_base())
         .collect()
 }
 
@@ -331,15 +332,11 @@ impl MacroTab {
         }
     }
     pub fn handle(&self) -> Handle<UiNode> {
-        self.handle
+        self.handle.to_base()
     }
     pub fn sync_to_model(&mut self, brush: TileMapBrushResource, ui: &mut UserInterface) {
         let items = make_instance_items(&mut ui.build_ctx(), brush.clone(), &self.macros.lock());
-        ui.send_message(ListViewMessage::items(
-            self.list,
-            MessageDirection::ToWidget,
-            items,
-        ));
+        ui.send(self.list, ListViewMessage::Items(items));
         self.sync_data(brush, ui);
     }
     fn sync_data(&mut self, brush: TileMapBrushResource, ui: &mut UserInterface) {
@@ -348,15 +345,11 @@ impl MacroTab {
         let brush_macro = sel_index.and_then(|i| brush_guard.macros.get(i));
         let name = brush_macro.map(|m| m.name.clone()).unwrap_or_default();
         let macro_id = brush_macro.map(|m| m.macro_id);
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             self.data_panel,
-            MessageDirection::ToWidget,
-            brush_macro.is_some(),
-        ));
-        send_sync_message(
-            ui,
-            TextMessage::text(self.name_field, MessageDirection::ToWidget, name),
+            WidgetMessage::Enabled(brush_macro.is_some()),
         );
+        ui.send_sync(self.name_field, TextMessage::Text(name));
         if macro_id == self.current_macro_id {
             if let Some(brush_macro) = brush_macro {
                 let macro_id = brush_macro.macro_id;
@@ -384,11 +377,10 @@ impl MacroTab {
                 &mut macro_list,
                 instance,
             );
-            ui.send_message(WidgetMessage::replace_children(
+            ui.send(
                 self.macro_panel,
-                MessageDirection::ToWidget,
-                editor.into_iter().collect(),
-            ));
+                WidgetMessage::ReplaceChildren(editor.into_iter().collect()),
+            );
         }
     }
     pub fn handle_ui_message(
@@ -397,7 +389,7 @@ impl MacroTab {
         message: &UiMessage,
         editor: &mut Editor,
     ) {
-        if message.direction() == MessageDirection::ToWidget || message.flags == MSG_SYNC_FLAG {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
         if let Some(sel_index) = self.selection_index(editor.engine.user_interfaces.first_mut()) {
@@ -421,7 +413,7 @@ impl MacroTab {
         }
         let ui = editor.engine.user_interfaces.first_mut();
         let sender = &editor.message_sender;
-        if let Some(ListViewMessage::SelectionChanged(_)) = message.data() {
+        if let Some(ListViewMessage::Selection(_)) = message.data() {
             if message.destination() == self.list {
                 self.sync_data(brush.clone(), ui);
             }
@@ -446,11 +438,7 @@ impl MacroTab {
         }
     }
     fn selection_index(&self, ui: &UserInterface) -> Option<usize> {
-        ui.node(self.list)
-            .cast::<ListView>()?
-            .selection
-            .last()
-            .copied()
+        ui.try_get(self.list).ok()?.selection.last().copied()
     }
     fn update_name(
         &self,
@@ -467,10 +455,7 @@ impl MacroTab {
         else {
             return;
         };
-        ui.send_message(WidgetMessage::focus(
-            self.name_field,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.name_field, WidgetMessage::Focus);
         sender.do_command(SetMacroNameCommand {
             brush: resource.clone(),
             index: sel_index,
@@ -494,11 +479,7 @@ impl MacroTab {
         if sel_index == new_index {
             return;
         }
-        ui.send_message(ListViewMessage::selection(
-            self.list,
-            MessageDirection::ToWidget,
-            vec![new_index],
-        ));
+        ui.send(self.list, ListViewMessage::Selection(vec![new_index]));
         sender.do_command(MoveMacroCommand {
             brush: resource.clone(),
             start: sel_index,
@@ -528,11 +509,7 @@ impl MacroTab {
             name: String::default(),
             settings: data,
         });
-        ui.send_message(ListViewMessage::selection(
-            self.list,
-            MessageDirection::ToWidget,
-            vec![index],
-        ));
+        ui.send(self.list, ListViewMessage::Selection(vec![index]));
         sender.do_command(AddMacroCommand {
             brush: resource.clone(),
             index,

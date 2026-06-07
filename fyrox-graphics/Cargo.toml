@@ -1,6 +1,6 @@
 [package]
 name = "fyrox-graphics"
-version = "1.0.0-rc.1"
+version = "2.0.0-rc.1"
 edition = "2021"
 license = "MIT"
 description = "Graphics API abstraction for Fyrox Game Engine"
@@ -10,11 +10,11 @@ include = ["/src/**/*", "/Cargo.toml", "/LICENSE", "/README.md"]
 homepage = "https://fyrox.rs"
 documentation = "https://docs.rs/fyrox-graphics"
 repository = "https://github.com/FyroxEngine/Fyrox"
-rust-version = "1.86"
+rust-version = "1.87"
 
 [dependencies]
-fyrox-core = { path = "../fyrox-core", version = "1.0.0-rc.1", features = ["serde"] }
+fyrox-core = { path = "../fyrox-core", version = "2.0.0-rc.1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-strum = "0.26.1"
-strum_macros = "0.26.1"
-bytemuck = { version = "1.16.1", features = ["derive"] }
+strum = "0.27"
+strum_macros = "0.27"
+bytemuck = { version = "1.23.2", features = ["derive"] }

@@ -21,20 +21,20 @@
 //! Build context is used to decouple explicit UI state modification. See [`BuildContext`] docs for
 //! more info.
 
-use crate::style::resource::StyleResource;
 use crate::{
-    core::pool::Handle, font::FontResource, message::UiMessage, RestrictionEntry, UiNode,
-    UserInterface,
+    core::pool::Handle, font::FontResource, message::UiMessage, style::resource::StyleResource,
+    Control, RestrictionEntry, UiNode, UserInterface,
 };
-use fyrox_graph::BaseSceneGraph;
+use fyrox_core::pool::{ObjectOrVariant, PoolError};
+use fyrox_graph::SceneGraph;
 use std::{
     ops::{Index, IndexMut},
     sync::mpsc::Sender,
 };
 
 /// Build context is used to decouple explicit UI state modification. Its main use is in the various widget
-/// builders. Internally, it is just a mutable reference to the UI state. UI can be modified (add nodes, clone,
-/// link, etc.) via build context. This is needed to explicitly highlight that it used to modify the UI
+/// builders. Internally, it is just a mutable reference to the UI state. The UI can be modified (add nodes, clone,
+/// link, etc.) via build context. This is needed to explicitly highlight that it is used to modify the UI
 /// state. It is **not recommended** to use BuildContext for mutable access to widgets at runtime! _Use message
 /// passing_ to modify widgets at runtime, otherwise you will easily break invariant (inner state) of widgets.
 /// The only place where it's allowed to directly mutate widget's state is at build stage (inside `build`
@@ -45,7 +45,7 @@ use std::{
 /// ```rust
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
+/// #     core::{visitor::prelude::*, reflect::prelude::*, },
 /// #     define_widget_deref,
 /// #     message::UiMessage,
 /// #     widget::{Widget, WidgetBuilder},
@@ -55,17 +55,15 @@ use std::{
 /// #     any::{Any, TypeId},
 /// #     ops::{Deref, DerefMut},
 /// # };
-/// # use fyrox_core::uuid_provider;
 /// #
-/// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-/// #[reflect(derived_type = "UiNode")]
+/// #
+/// #[derive(Clone, Visit, Reflect, Debug)]
+/// #[reflect(derived_type = "UiNode", type_uuid = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd")]
 /// struct MyWidget {
 ///     widget: Widget,
 /// }
 /// #
 /// # define_widget_deref!(MyWidget);
-/// #
-/// # uuid_provider!(MyWidget = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd");
 /// #
 /// # impl Control for MyWidget {
 /// #     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -78,12 +76,12 @@ use std::{
 /// }
 ///
 /// impl MyWidgetBuilder {
-///     pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+///     pub fn build(self, ctx: &mut BuildContext) -> Handle<MyWidget> {
 ///         let my_widget = MyWidget {
 ///             widget: self.widget_builder.build(ctx),
 ///         };
 ///
-///         ctx.add_node(UiNode::new(my_widget))
+///         ctx.add(my_widget)
 ///     }
 /// }
 /// ```
@@ -92,17 +90,17 @@ pub struct BuildContext<'a> {
     pub style: StyleResource,
 }
 
-impl Index<Handle<UiNode>> for BuildContext<'_> {
-    type Output = UiNode;
+impl<U: ObjectOrVariant<UiNode>> Index<Handle<U>> for BuildContext<'_> {
+    type Output = U;
 
-    fn index(&self, index: Handle<UiNode>) -> &Self::Output {
-        &self.ui.nodes[index]
+    fn index(&self, index: Handle<U>) -> &U {
+        self.ui.try_get(index).unwrap()
     }
 }
 
-impl IndexMut<Handle<UiNode>> for BuildContext<'_> {
-    fn index_mut(&mut self, index: Handle<UiNode>) -> &mut Self::Output {
-        &mut self.ui.nodes[index]
+impl<U: ObjectOrVariant<UiNode>> IndexMut<Handle<U>> for BuildContext<'_> {
+    fn index_mut(&mut self, index: Handle<U>) -> &mut Self::Output {
+        self.ui.try_get_mut(index).unwrap()
     }
 }
 
@@ -122,8 +120,8 @@ impl BuildContext<'_> {
     }
 
     /// Returns current message sender of the UI, that is used for message passing mechanism. You can
-    /// send messages for your widgets inside your builders, however this has limited use and should
-    /// be avoided in the favor of explicit state modification to not overload message pipeline.
+    /// send messages for your widgets inside your builders, however, this has limited use and should
+    /// be avoided in favor of explicit state modification to not overload message pipeline.
     pub fn sender(&self) -> Sender<UiMessage> {
         self.ui.sender()
     }
@@ -133,9 +131,17 @@ impl BuildContext<'_> {
         self.ui.add_node(node)
     }
 
+    pub fn add<T: Control>(&mut self, node: T) -> Handle<T> {
+        self.ui.add_node(UiNode::new(node)).transmute()
+    }
+
     /// Links the child widget with the parent widget. Child widget's position and size will be restricted by
-    /// the new parent. When a widget is linked to other widget, its coordinates become relative to it parent.
-    pub fn link(&mut self, child: Handle<UiNode>, parent: Handle<UiNode>) {
+    /// the new parent. When a widget is linked to other widget, its coordinates become relative to its parent.
+    pub fn link(
+        &mut self,
+        child: Handle<impl ObjectOrVariant<UiNode>>,
+        parent: Handle<impl ObjectOrVariant<UiNode>>,
+    ) {
         self.ui.link_nodes(child, parent, false)
     }
 
@@ -145,12 +151,12 @@ impl BuildContext<'_> {
     }
 
     /// Tries to fetch the node by its handle. Returns `None` if the handle is invalid.
-    pub fn try_get_node(&self, node: Handle<UiNode>) -> Option<&UiNode> {
-        self.ui.try_get(node)
+    pub fn try_get_node(&self, node: Handle<UiNode>) -> Result<&UiNode, PoolError> {
+        self.ui.try_get_node(node)
     }
 
     /// Tries to fetch the node by its handle. Returns `None` if the handle is invalid.
-    pub fn try_get_node_mut(&mut self, node: Handle<UiNode>) -> Option<&mut UiNode> {
+    pub fn try_get_node_mut(&mut self, node: Handle<UiNode>) -> Result<&mut UiNode, PoolError> {
         self.ui.nodes.try_borrow_mut(node)
     }
 
@@ -179,7 +185,7 @@ impl BuildContext<'_> {
     /// Sends a message during build stage. It has quite limited use, but could be unavoidable in
     /// for cases when you need to do some action that relies on fully performed layout stage. When a
     /// widget is being built, you can't fetch any layout info of it since it wasn't calculated yet.
-    /// In this case all you can do is to "postpone" your action for later moment in current frame
+    /// In this case, all you can do is to "postpone" your action for later moment in the current frame
     /// by sending a message.
     pub fn send_message(&self, message: UiMessage) {
         self.ui.send_message(message);

@@ -18,36 +18,41 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::gui::text::TextMessage;
-use crate::fyrox::{
-    core::{
-        algebra::Vector2,
-        pool::Handle,
-        visitor::{Visit, VisitResult, Visitor},
+use crate::{
+    fyrox::{
+        core::{
+            algebra::Vector2,
+            pool::Handle,
+            visitor::{Visit, VisitResult, Visitor},
+        },
+        gui::{
+            border::BorderBuilder,
+            button::{ButtonBuilder, ButtonMessage},
+            decorator::DecoratorBuilder,
+            file_browser::{FileSelectorBuilder, FileSelectorMessage, PathFilter},
+            formatted_text::WrapMode,
+            grid::{Column, GridBuilder, Row},
+            list_view::{ListViewBuilder, ListViewMessage},
+            message::UiMessage,
+            stack_panel::StackPanelBuilder,
+            text::TextBuilder,
+            text::TextMessage,
+            text_box::TextBoxBuilder,
+            widget::{WidgetBuilder, WidgetMessage},
+            window::WindowAlignment,
+            window::{WindowBuilder, WindowMessage, WindowTitle},
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, VerticalAlignment,
+        },
     },
-    gui::{
-        border::BorderBuilder,
-        button::{ButtonBuilder, ButtonMessage},
-        decorator::DecoratorBuilder,
-        file_browser::{FileSelectorBuilder, FileSelectorMessage, Filter},
-        formatted_text::WrapMode,
-        grid::{Column, GridBuilder, Row},
-        list_view::{ListViewBuilder, ListViewMessage},
-        message::{MessageDirection, UiMessage},
-        stack_panel::StackPanelBuilder,
-        text::TextBuilder,
-        text_box::TextBoxBuilder,
-        widget::{WidgetBuilder, WidgetMessage},
-        window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, VerticalAlignment,
-    },
+    message::MessageSender,
+    Engine, Message,
 };
-use crate::message::MessageSender;
-use crate::{Engine, Message};
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use fyrox::gui::button::Button;
+use fyrox::gui::file_browser::FileSelector;
+use fyrox::gui::list_view::ListView;
+use fyrox::gui::text_box::TextBox;
+use fyrox::gui::window::Window;
+use std::{env, path::PathBuf};
 
 #[derive(Default, Eq, PartialEq, Visit)]
 struct HistoryEntry {
@@ -57,14 +62,14 @@ struct HistoryEntry {
 pub const HISTORY_PATH: &str = "history.bin";
 
 pub struct Configurator {
-    pub window: Handle<UiNode>,
-    work_dir_browser: Handle<UiNode>,
-    select_work_dir: Handle<UiNode>,
-    ok: Handle<UiNode>,
+    pub window: Handle<Window>,
+    work_dir_selector: Handle<FileSelector>,
+    select_work_dir: Handle<Button>,
+    ok: Handle<Button>,
     sender: MessageSender,
     work_dir: PathBuf,
-    tb_work_dir: Handle<UiNode>,
-    lv_history: Handle<UiNode>,
+    tb_work_dir: Handle<TextBox>,
+    lv_history: Handle<ListView>,
     history: Vec<HistoryEntry>,
 }
 
@@ -86,6 +91,7 @@ fn make_history_entry_widget(ctx: &mut BuildContext, entry: &HistoryEntry) -> Ha
             ),
     ))
     .build(ctx)
+    .to_base()
 }
 
 impl Configurator {
@@ -96,14 +102,12 @@ impl Configurator {
 
         let current_path = env::current_dir().unwrap();
 
-        let filter = Filter::new(|p: &Path| p.is_dir());
-
-        let folder_browser = FileSelectorBuilder::new(
+        let work_dir_selector = FileSelectorBuilder::new(
             WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(400.0))
                 .open(false)
                 .with_title(WindowTitle::text("Select Working Directory")),
         )
-        .with_filter(filter)
+        .with_filter(PathFilter::folder())
         .build(ctx);
 
         // Load history.
@@ -255,7 +259,7 @@ impl Configurator {
 
         Self {
             window,
-            work_dir_browser: folder_browser,
+            work_dir_selector,
             select_work_dir,
             ok,
             sender,
@@ -271,11 +275,7 @@ impl Configurator {
         engine
             .user_interfaces
             .first_mut()
-            .send_message(WidgetMessage::enabled(
-                self.ok,
-                MessageDirection::ToWidget,
-                is_valid_scene_path,
-            ));
+            .send(self.ok, WidgetMessage::Enabled(is_valid_scene_path));
     }
 
     pub fn handle_ui_message(&mut self, message: &UiMessage, engine: &mut Engine) {
@@ -286,42 +286,30 @@ impl Configurator {
                 self.history.visit("History", &mut visitor).unwrap();
                 visitor.save_binary_to_file(HISTORY_PATH).unwrap();
             }
-        } else if let Some(ListViewMessage::SelectionChanged(selected_indices)) =
-            message.data::<ListViewMessage>()
+        } else if let Some(ListViewMessage::Selection(selected_indices)) =
+            message.data_from(self.lv_history)
         {
             if let Some(index) = selected_indices.first().cloned() {
-                if message.destination() == self.lv_history
-                    && message.direction() == MessageDirection::FromWidget
-                {
-                    let entry = &self.history[index];
-                    self.work_dir.clone_from(&entry.work_dir);
+                let entry = &self.history[index];
+                self.work_dir.clone_from(&entry.work_dir);
 
-                    engine
-                        .user_interfaces
-                        .first_mut()
-                        .send_message(TextMessage::text(
-                            self.tb_work_dir,
-                            MessageDirection::ToWidget,
-                            self.work_dir.to_string_lossy().to_string(),
-                        ));
+                engine.user_interfaces.first().send(
+                    self.tb_work_dir,
+                    TextMessage::Text(self.work_dir.to_string_lossy().to_string()),
+                );
 
-                    self.validate(engine);
-                }
+                self.validate(engine);
             }
         } else if let Some(FileSelectorMessage::Commit(path)) =
             message.data::<FileSelectorMessage>()
         {
-            if message.destination() == self.work_dir_browser {
+            if message.destination() == self.work_dir_selector {
                 if let Ok(work_dir) = path.clone().canonicalize() {
                     self.work_dir = work_dir;
-                    engine
-                        .user_interfaces
-                        .first_mut()
-                        .send_message(TextMessage::text(
-                            self.tb_work_dir,
-                            MessageDirection::ToWidget,
-                            self.work_dir.to_string_lossy().to_string(),
-                        ));
+                    engine.user_interfaces.first().send(
+                        self.tb_work_dir,
+                        TextMessage::Text(self.work_dir.to_string_lossy().to_string()),
+                    );
 
                     self.validate(engine);
                 }
@@ -345,31 +333,23 @@ impl Configurator {
 
                     engine
                         .user_interfaces
-                        .first_mut()
-                        .send_message(ListViewMessage::add_item(
-                            self.lv_history,
-                            MessageDirection::ToWidget,
-                            widget,
-                        ));
+                        .first()
+                        .send(self.lv_history, ListViewMessage::AddItem(widget));
                 }
 
                 engine
                     .user_interfaces
-                    .first_mut()
-                    .send_message(WindowMessage::close(
-                        self.window,
-                        MessageDirection::ToWidget,
-                    ));
+                    .first()
+                    .send(self.window, WindowMessage::Close);
             } else if message.destination() == self.select_work_dir {
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(WindowMessage::open_modal(
-                        self.work_dir_browser,
-                        MessageDirection::ToWidget,
-                        true,
-                        true,
-                    ));
+                engine.user_interfaces.first().send(
+                    self.work_dir_selector,
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Center,
+                        modal: true,
+                        focus_content: true,
+                    },
+                );
             }
         }
     }

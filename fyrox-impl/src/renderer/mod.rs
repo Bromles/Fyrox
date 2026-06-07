@@ -49,6 +49,7 @@ mod settings;
 mod shadow;
 mod ssao;
 
+use crate::renderer::hdr::HdrRendererArgs;
 use crate::{
     asset::{event::ResourceEvent, manager::ResourceManager},
     core::{
@@ -61,11 +62,17 @@ use crate::{
         sstorage::ImmutableString,
     },
     engine::error::EngineError,
-    gui::draw::DrawingContext,
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, DrawCallStatistics, GpuFrameBuffer},
+        gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
+        server::{GraphicsServer, SharedGraphicsServer},
+        PolygonFace, PolygonFillMode,
+    },
     material::shader::Shader,
     renderer::{
-        bloom::BloomRenderer,
         bundle::{BundleRenderContext, RenderDataBundleStorage, RenderDataBundleStorageOptions},
+        cache::texture::convert_pixel_kind,
         cache::{
             geometry::GeometryCache,
             shader::{
@@ -76,18 +83,12 @@ use crate::{
         },
         convolution::{EnvironmentMapIrradianceConvolution, EnvironmentMapSpecularConvolution},
         debug_renderer::DebugRenderer,
-        framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, DrawCallStatistics, GpuFrameBuffer},
-            gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
-            server::{GraphicsServer, SharedGraphicsServer},
-            PolygonFace, PolygonFillMode,
-        },
         fxaa::FxaaRenderer,
         gbuffer::{GBuffer, GBufferRenderContext},
         hdr::HighDynamicRangeRenderer,
         light::{DeferredLightRenderer, DeferredRendererContext},
         ssao::ScreenSpaceAmbientOcclusionRenderer,
+        ui_renderer::UiRenderInfo,
         ui_renderer::{UiRenderContext, UiRenderer},
         visibility::VisibilityCache,
     },
@@ -96,12 +97,12 @@ use crate::{
 };
 use cache::DynamicSurfaceCache;
 use fxhash::FxHashMap;
-use fyrox_graph::BaseSceneGraph;
-use lazy_static::lazy_static;
+use fyrox_graph::SceneGraph;
 use observer::{Observer, ObserversCollection};
 use resources::RendererResources;
 pub use settings::*;
 pub use stats::*;
+use std::sync::LazyLock;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
@@ -111,13 +112,17 @@ use std::{
 };
 use winit::window::Window;
 
-lazy_static! {
-    static ref GBUFFER_PASS_NAME: ImmutableString = ImmutableString::new("GBuffer");
-    static ref DIRECTIONAL_SHADOW_PASS_NAME: ImmutableString =
-        ImmutableString::new("DirectionalShadow");
-    static ref SPOT_SHADOW_PASS_NAME: ImmutableString = ImmutableString::new("SpotShadow");
-    static ref POINT_SHADOW_PASS_NAME: ImmutableString = ImmutableString::new("PointShadow");
-}
+static GBUFFER_PASS_NAME: LazyLock<ImmutableString> =
+    LazyLock::new(|| ImmutableString::new("GBuffer"));
+
+static DIRECTIONAL_SHADOW_PASS_NAME: LazyLock<ImmutableString> =
+    LazyLock::new(|| ImmutableString::new("DirectionalShadow"));
+
+static SPOT_SHADOW_PASS_NAME: LazyLock<ImmutableString> =
+    LazyLock::new(|| ImmutableString::new("SpotShadow"));
+
+static POINT_SHADOW_PASS_NAME: LazyLock<ImmutableString> =
+    LazyLock::new(|| ImmutableString::new("PointShadow"));
 
 /// Checks whether the provided render pass name is one of the names of built-in shadow render passes.
 pub fn is_shadow_pass(render_pass_name: &str) -> bool {
@@ -213,10 +218,6 @@ pub struct RenderDataContainer {
     /// scene luminance.
     pub hdr_renderer: HighDynamicRangeRenderer,
 
-    /// Bloom contains only overly bright pixels that create light
-    /// bleeding effect (glow effect).
-    pub bloom_renderer: BloomRenderer,
-
     /// Rendering statistics for a container.
     pub statistics: SceneStatistics,
 }
@@ -254,7 +255,7 @@ impl RenderDataContainer {
         // Intermediate scene frame will be rendered in HDR render target.
         let hdr_frame_texture = server.create_2d_render_target(
             "ObserverHdrFrame",
-            PixelKind::RGBA16F,
+            PixelKind::RGB10A2,
             width,
             height,
         )?;
@@ -308,8 +309,7 @@ impl RenderDataContainer {
             )?,
             ssao_renderer: ScreenSpaceAmbientOcclusionRenderer::new(server, width, height)?,
             gbuffer: GBuffer::new(server, width, height)?,
-            hdr_renderer: HighDynamicRangeRenderer::new(server)?,
-            bloom_renderer: BloomRenderer::new(server, width, height)?,
+            hdr_renderer: HighDynamicRangeRenderer::new(width, height, server)?,
             hdr_scene_framebuffer,
             ldr_scene_framebuffer,
             ldr_temp_framebuffer: [
@@ -777,77 +777,95 @@ impl Renderer {
         self.geometry_cache.clear();
     }
 
-    /// Renders given UI into specified render target. This method is especially useful if you need
-    /// to have off-screen UIs (like interactive touch-screen in Doom 3, Dead Space, etc).
-    pub fn render_ui_to_texture(
-        &mut self,
-        render_target: TextureResource,
-        screen_size: Vector2<f32>,
-        drawing_context: &DrawingContext,
-        clear_color: Color,
-        pixel_kind: PixelKind,
-        resource_manager: &ResourceManager,
-    ) -> Result<(), FrameworkError> {
-        let new_width = screen_size.x as usize;
-        let new_height = screen_size.y as usize;
+    /// Renders the given UI into specified render target. This method is especially useful if you need
+    /// to have off-screen UIs. This method will render the specified UI to the given render target.
+    /// If the render target is not specified (set to [`None`]), the UI will be rendered directly on
+    /// screen. Keep in mind that ideally, the resolution of the render target should match the screen
+    /// size of the UI. Otherwise, the rendered image will have some sort of aliasing issues.
+    pub fn render_ui(&mut self, render_info: UiRenderInfo) -> Result<(), FrameworkError> {
+        let _debug_scope = self.server.begin_scope(&format!("UI {:p}", render_info.ui));
 
-        // Create or reuse existing frame buffer.
-        let frame_buffer = match self.ui_frame_buffers.entry(render_target.key()) {
-            Entry::Occupied(entry) => {
-                let frame_buffer = entry.into_mut();
-                let frame = frame_buffer.color_attachments().first().unwrap();
-                let color_texture_kind = frame.texture.kind();
-                if let GpuTextureKind::Rectangle { width, height } = color_texture_kind {
-                    if width != new_width
-                        || height != new_height
-                        || frame.texture.pixel_kind() != pixel_kind
-                    {
-                        *frame_buffer =
-                            make_ui_frame_buffer(screen_size, &*self.server, pixel_kind)?;
+        let (frame_buffer, rt_size) = if let Some(render_target) =
+            render_info.render_target.as_ref()
+        {
+            let (rt_size, rt_pixel_kind) = render_target
+                .data_ref()
+                .as_loaded_ref()
+                .and_then(|rt| {
+                    rt.kind()
+                        .rectangle_size()
+                        .map(|s| (s.cast::<f32>(), convert_pixel_kind(rt.pixel_kind())))
+                })
+                .ok_or_else(|| FrameworkError::Custom("invalid render target state".to_string()))?;
+
+            // Create or reuse existing frame buffer.
+            let frame_buffer = match self.ui_frame_buffers.entry(render_target.key()) {
+                Entry::Occupied(entry) => {
+                    let frame_buffer = entry.into_mut();
+                    let frame = frame_buffer.color_attachments().first().unwrap();
+                    let color_texture_kind = frame.texture.kind();
+                    if let GpuTextureKind::Rectangle { width, height } = color_texture_kind {
+                        if width != rt_size.x as usize
+                            || height != rt_size.y as usize
+                            || frame.texture.pixel_kind() != rt_pixel_kind
+                        {
+                            *frame_buffer =
+                                make_ui_frame_buffer(rt_size, &*self.server, rt_pixel_kind)?;
+                        }
+                    } else {
+                        return Err(FrameworkError::Custom(
+                            "ui can be rendered only in rectangle texture!".to_string(),
+                        ));
                     }
-                } else {
-                    panic!("ui can be rendered only in rectangle texture!")
+                    frame_buffer
                 }
-                frame_buffer
-            }
-            Entry::Vacant(entry) => entry.insert(make_ui_frame_buffer(
-                screen_size,
-                &*self.server,
-                pixel_kind,
-            )?),
+                Entry::Vacant(entry) => {
+                    entry.insert(make_ui_frame_buffer(rt_size, &*self.server, rt_pixel_kind)?)
+                }
+            };
+
+            let viewport = Rect::new(0, 0, rt_size.x as i32, rt_size.y as i32);
+            frame_buffer.clear(viewport, Some(render_info.clear_color), Some(0.0), Some(0));
+
+            (frame_buffer, rt_size)
+        } else {
+            (
+                &mut self.backbuffer,
+                Vector2::new(self.frame_size.0 as f32, self.frame_size.1 as f32),
+            )
         };
-
-        let viewport = Rect::new(0, 0, new_width as i32, new_height as i32);
-
-        frame_buffer.clear(viewport, Some(clear_color), Some(0.0), Some(0));
 
         self.statistics += self.ui_renderer.render(UiRenderContext {
             server: &*self.server,
-            viewport,
+            viewport: Rect::new(0, 0, rt_size.x as i32, rt_size.y as i32),
             frame_buffer,
-            frame_width: screen_size.x,
-            frame_height: screen_size.y,
-            drawing_context,
+            frame_width: rt_size.x,
+            frame_height: rt_size.y,
+            drawing_context: &render_info.ui.drawing_context,
             renderer_resources: &self.renderer_resources,
             texture_cache: &mut self.texture_cache,
             uniform_buffer_cache: &mut self.uniform_buffer_cache,
             render_pass_cache: &mut self.shader_cache,
             uniform_memory_allocator: &mut self.uniform_memory_allocator,
-            resource_manager,
+            resource_manager: render_info.resource_manager,
         })?;
 
-        // Finally register texture in the cache so it will become available as texture in deferred/forward
-        // renderer.
-        self.texture_cache.try_register(
-            &*self.server,
-            &render_target,
-            frame_buffer
-                .color_attachments()
-                .first()
-                .unwrap()
-                .texture
-                .clone(),
-        )
+        if let Some(render_target) = render_info.render_target.as_ref() {
+            // Finally, register texture in the cache so it will become available as texture in
+            // deferred/forward renderer.
+            self.texture_cache.try_register(
+                &*self.server,
+                render_target,
+                frame_buffer
+                    .color_attachments()
+                    .first()
+                    .unwrap()
+                    .texture
+                    .clone(),
+            )?;
+        }
+
+        Ok(())
     }
 
     fn update_texture_cache(&mut self, resource_manager: &ResourceManager, dt: f32) {
@@ -917,13 +935,12 @@ impl Renderer {
         dt: f32,
         resource_manager: &ResourceManager,
         need_recalculate_convolution: bool,
-        is_reflection_probe: bool,
     ) -> Result<&mut RenderDataContainer, FrameworkError> {
         let server = &*self.server;
 
         let scene_render_data = self.scene_data_map.get_mut(&scene_handle).ok_or_else(|| {
             FrameworkError::Custom(format!(
-                "No assocated render data for {scene_handle} scene!"
+                "No associated render data for {scene_handle} scene!"
             ))
         })?;
         let render_data = if let Some(render_target) = observer.render_target.as_ref() {
@@ -954,10 +971,12 @@ impl Renderer {
                 }
             };
 
-            if let Some(face) = observer.cube_map_face {
-                observer_render_data
-                    .ldr_scene_framebuffer
-                    .set_cubemap_face(0, face, 0);
+            if let Some(probe_data) = observer.reflection_probe_data.as_ref() {
+                observer_render_data.ldr_scene_framebuffer.set_cubemap_face(
+                    0,
+                    probe_data.cube_map_face,
+                    0,
+                );
             }
 
             self.texture_cache.try_register(
@@ -988,7 +1007,7 @@ impl Renderer {
             },
             &mut self.dynamic_surface_cache,
         );
-        if is_reflection_probe {
+        if observer.reflection_probe_data.is_some() {
             bundle_storage.environment_map = None;
         }
 
@@ -1037,7 +1056,14 @@ impl Renderer {
                     scene,
                     observer,
                     gbuffer: &mut render_data.gbuffer,
-                    ambient_color: scene.rendering_options.ambient_lighting_color,
+                    ambient_color: match observer.reflection_probe_data.as_ref() {
+                        None => scene.rendering_options.ambient_lighting_color,
+                        Some(probe_data) => probe_data.ambient_lighting_color,
+                    },
+                    environment_lighting_source: match observer.reflection_probe_data.as_ref() {
+                        None => scene.rendering_options.environment_lighting_source,
+                        Some(probe_data) => probe_data.environment_lighting_source,
+                    },
                     render_data_bundle: &bundle_storage,
                     settings: &self.quality_settings,
                     textures: &mut self.texture_cache,
@@ -1063,28 +1089,37 @@ impl Renderer {
 
         let depth = render_data.gbuffer.depth();
 
-        render_data.statistics += bundle_storage.render_to_frame_buffer(
-            server,
-            &mut self.geometry_cache,
-            &mut self.shader_cache,
-            |bundle| bundle.render_path == RenderPath::Forward,
-            |_| true,
-            BundleRenderContext {
-                texture_cache: &mut self.texture_cache,
-                render_pass_name: &ImmutableString::new("Forward"),
-                frame_buffer: &render_data.hdr_scene_framebuffer,
-                viewport: observer.viewport,
-                uniform_memory_allocator: &mut self.uniform_memory_allocator,
-                resource_manager,
-                use_pom: self.quality_settings.use_parallax_mapping,
-                light_position: &Default::default(),
-                renderer_resources: &self.renderer_resources,
-                ambient_light: scene.rendering_options.ambient_lighting_color,
-                scene_depth: Some(depth),
-            },
-        )?;
+        {
+            let _debug_scope = server.begin_scope("ForwardRendering");
+
+            render_data.statistics += bundle_storage.render_to_frame_buffer(
+                server,
+                &mut self.geometry_cache,
+                &mut self.shader_cache,
+                |bundle| bundle.render_path == RenderPath::Forward,
+                |_| true,
+                BundleRenderContext {
+                    texture_cache: &mut self.texture_cache,
+                    render_pass_name: &ImmutableString::new("Forward"),
+                    frame_buffer: &render_data.hdr_scene_framebuffer,
+                    viewport: observer.viewport,
+                    uniform_memory_allocator: &mut self.uniform_memory_allocator,
+                    resource_manager,
+                    use_pom: self.quality_settings.use_parallax_mapping,
+                    light_position: &Default::default(),
+                    renderer_resources: &self.renderer_resources,
+                    ambient_light: scene.rendering_options.ambient_lighting_color,
+                    scene_depth: Some(depth),
+                },
+            )?;
+        }
 
         for render_pass in self.scene_render_passes.iter() {
+            let _debug_scope = server.begin_scope(&format!(
+                "UserRenderPass::on_hdr_render {:p}",
+                render_pass.as_ptr()
+            ));
+
             render_data.statistics +=
                 render_pass
                     .borrow_mut()
@@ -1112,36 +1147,30 @@ impl Renderer {
                     })?;
         }
 
-        // Prepare glow map.
-        render_data.statistics += render_data.bloom_renderer.render(
-            render_data.hdr_scene_frame_texture(),
-            &mut self.uniform_buffer_cache,
-            &self.renderer_resources,
-        )?;
-
         // Convert high dynamic range frame to low dynamic range (sRGB) with tone mapping and gamma correction.
         let mut dest_buf = 0;
         let mut src_buf = 1;
-        render_data.statistics += render_data.hdr_renderer.render(
+        render_data.statistics += render_data.hdr_renderer.render(HdrRendererArgs {
             server,
-            render_data.hdr_scene_frame_texture(),
-            render_data.bloom_renderer.result(),
-            &render_data.ldr_temp_framebuffer[dest_buf],
-            observer.viewport,
-            dt,
-            observer.exposure,
-            observer.color_grading_lut.as_ref(),
-            observer.color_grading_enabled,
-            &mut self.texture_cache,
-            &mut self.uniform_buffer_cache,
-            &self.renderer_resources,
+            hdr_scene_frame: render_data.hdr_scene_frame_texture(),
+            ldr_framebuffer: &render_data.ldr_temp_framebuffer[dest_buf],
+            viewport: observer.viewport,
+            speed: observer.hdr_adaptation_speed * dt,
+            exposure: observer.exposure,
+            color_grading_lut: observer.color_grading_lut.as_ref(),
+            use_color_grading: observer.color_grading_enabled,
+            texture_cache: &mut self.texture_cache,
+            uniform_buffer_cache: &mut self.uniform_buffer_cache,
+            renderer_resources: &self.renderer_resources,
             resource_manager,
-        )?;
+            settings: &self.quality_settings,
+        })?;
         std::mem::swap(&mut dest_buf, &mut src_buf);
 
         // Apply FXAA if needed.
         if self.quality_settings.fxaa {
             render_data.statistics += self.fxaa_renderer.render(
+                server,
                 observer.viewport,
                 render_data.ldr_temp_frame_texture(src_buf),
                 &render_data.ldr_temp_framebuffer[dest_buf],
@@ -1163,6 +1192,7 @@ impl Renderer {
         // Render debug geometry in the LDR frame buffer.
         self.debug_renderer.set_lines(&scene.drawing_context.lines);
         render_data.statistics += self.debug_renderer.render(
+            server,
             &mut self.uniform_buffer_cache,
             observer.viewport,
             &render_data.ldr_scene_framebuffer,
@@ -1171,6 +1201,11 @@ impl Renderer {
         )?;
 
         for render_pass in self.scene_render_passes.iter() {
+            let _debug_scope = server.begin_scope(&format!(
+                "UserRenderPass::on_ldr_render {:p}",
+                render_pass.as_ptr()
+            ));
+
             render_data.statistics +=
                 render_pass
                     .borrow_mut()
@@ -1212,6 +1247,8 @@ impl Renderer {
         resource_manager: &ResourceManager,
     ) -> Result<&SceneRenderData, FrameworkError> {
         let graph = &scene.graph;
+
+        let _debug_scope = self.server.begin_scope(&format!("Scene {:p}", scene));
 
         let backbuffer_width = self.frame_size.0 as f32;
         let backbuffer_height = self.frame_size.1 as f32;
@@ -1288,6 +1325,10 @@ impl Renderer {
         // At first, render the reflection probes to off-screen render target.
         let mut need_recalculate_convolution = false;
         for observer in observers.reflection_probes.iter() {
+            let _debug_scope = self
+                .server
+                .begin_scope(&format!("Reflection Probe {:p}", observer));
+
             self.render_scene_observer(
                 observer,
                 scene_handle,
@@ -1298,13 +1339,14 @@ impl Renderer {
                 // There's no need to recalculate convolution for the environment map more than once
                 // when rendering reflection probes, because it does not use a dynamic environment map.
                 false,
-                true,
             )?;
             need_recalculate_convolution = true;
         }
 
         // Then render everything else.
         for observer in observers.cameras.iter() {
+            let _debug_scope = self.server.begin_scope(&format!("Camera {:p}", observer));
+
             self.render_scene_observer(
                 observer,
                 scene_handle,
@@ -1313,7 +1355,6 @@ impl Renderer {
                 dt,
                 resource_manager,
                 need_recalculate_convolution,
-                false,
             )?;
         }
 
@@ -1345,7 +1386,7 @@ impl Renderer {
         scenes: &SceneContainer,
         elapsed_time: f32,
         resource_manager: &ResourceManager,
-        drawing_contexts: impl Iterator<Item = &'a DrawingContext>,
+        ui_render_info: impl Iterator<Item = UiRenderInfo<'a>>,
     ) -> Result<(), FrameworkError> {
         if self.frame_size.0 == 0 || self.frame_size.1 == 0 {
             return Ok(());
@@ -1386,26 +1427,14 @@ impl Renderer {
             .set_polygon_fill_mode(PolygonFace::FrontAndBack, PolygonFillMode::Fill);
 
         // Render UI on top of everything without gamma correction.
-        for drawing_context in drawing_contexts {
-            self.statistics += self.ui_renderer.render(UiRenderContext {
-                server: &*self.server,
-                viewport: window_viewport,
-                frame_buffer: &self.backbuffer,
-                frame_width: backbuffer_width,
-                frame_height: backbuffer_height,
-                drawing_context,
-                renderer_resources: &self.renderer_resources,
-                texture_cache: &mut self.texture_cache,
-                uniform_buffer_cache: &mut self.uniform_buffer_cache,
-                render_pass_cache: &mut self.shader_cache,
-                uniform_memory_allocator: &mut self.uniform_memory_allocator,
-                resource_manager,
-            })?;
+        for info in ui_render_info {
+            self.render_ui(info)?;
         }
 
         let screen_matrix =
             Matrix4::new_orthographic(0.0, backbuffer_width, backbuffer_height, 0.0, -1.0, 1.0);
         self.screen_space_debug_renderer.render(
+            &*self.server,
             &mut self.uniform_buffer_cache,
             window_viewport,
             &self.backbuffer,
@@ -1425,11 +1454,11 @@ impl Renderer {
         &mut self,
         scenes: &SceneContainer,
         elapsed_time: f32,
-        drawing_contexts: impl Iterator<Item = &'a DrawingContext>,
+        ui_info: impl Iterator<Item = UiRenderInfo<'a>>,
         window: &Window,
         resource_manager: &ResourceManager,
     ) -> Result<(), FrameworkError> {
-        self.render_frame(scenes, elapsed_time, resource_manager, drawing_contexts)?;
+        self.render_frame(scenes, elapsed_time, resource_manager, ui_info)?;
         self.statistics.end_frame();
         window.pre_present_notify();
         self.graphics_server().swap_buffers()?;

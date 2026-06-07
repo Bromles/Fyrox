@@ -44,11 +44,20 @@ Common rules for code contributions:
 When you're writing something for the editor, you can run its standalone version using `fyroxed` package like so:
 
 ```shell
-cargo run --package fyroxed
+cargo run --package fyroxed --profile=editor-standalone
 ```
 
 This way the editor will run without any plugins, and you can test your changes quickly without a need to create a
 project and test there.
+
+Sometimes there's a need to have a scene for testing, loading the same scene everytime is very tedious and boring.
+So the standalone editor has command line arguments that can be used to specify the list of scenes for loading:
+
+```shell
+cargo run --package fyroxed --profile editor-standalone -- --scenes data/unnamed.rgs --project-directory .
+```
+
+This script loads the scene `unnamed.rgs` right after the start with the last editor's camera location.
 
 ## Contributing documentation
 

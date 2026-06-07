@@ -25,14 +25,12 @@ use crate::fyrox::{
         math::Rect,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
-        uuid_provider,
         visitor::prelude::*,
     },
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     gui::{
         brush::Brush,
-        define_constructor, define_widget_deref,
+        define_widget_deref,
         draw::{CommandTexture, Draw, DrawingContext},
         message::{MessageDirection, MouseButton, UiMessage},
         widget::{Widget, WidgetBuilder, WidgetMessage},
@@ -49,24 +47,25 @@ use crate::plugins::absm::{
 };
 use crate::utils::fetch_node_screen_center_ui;
 
-use std::{
-    cell::Cell,
-    ops::{Deref, DerefMut},
-};
+use fyrox::gui::message::MessageData;
+use std::cell::Cell;
 
 #[derive(Debug, Clone, PartialEq, Visit, Reflect, Default)]
+#[reflect(type_uuid = "d5425ec9-e945-4452-af2a-743147518eb6")]
 pub(crate) struct Entry {
     pub node: Handle<UiNode>,
     pub initial_position: Vector2<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Visit, Reflect, Default)]
+#[reflect(type_uuid = "575d4cac-5456-42db-bed1-36c627bc44c0")]
 pub(crate) struct DragContext {
     initial_cursor_position: Vector2<f32>,
     entries: Vec<Entry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Visit, Reflect)]
+#[reflect(type_uuid = "488b0b46-11ed-4eef-b58b-a52f3a71dd84")]
 pub(crate) enum Mode {
     Normal,
     Drag {
@@ -108,18 +107,17 @@ pub(crate) enum AbsmCanvasMessage {
     ForceSyncDependentObjects,
 }
 
-impl AbsmCanvasMessage {
-    define_constructor!(AbsmCanvasMessage:SwitchMode => fn switch_mode(Mode), layout: false);
-    define_constructor!(AbsmCanvasMessage:CommitTransition => fn commit_transition(source_node: Handle<UiNode>, dest_node: Handle<UiNode>), layout: false);
-    define_constructor!(AbsmCanvasMessage:CommitConnection => fn commit_connection(source_socket: Handle<UiNode>, dest_socket: Handle<UiNode>), layout: false);
-    define_constructor!(AbsmCanvasMessage:CommitDrag => fn commit_drag(entries: Vec<Entry>), layout: false);
-    define_constructor!(AbsmCanvasMessage:CommitTransitionToAllNodes => fn commit_transition_to_all_nodes(source_node: Handle<UiNode>, dest_nodes: Vec<Handle<UiNode>>), layout: false);
-    define_constructor!(AbsmCanvasMessage:SelectionChanged => fn selection_changed(Vec<Handle<UiNode>>), layout: false);
-    define_constructor!(AbsmCanvasMessage:ForceSyncDependentObjects => fn force_sync_dependent_objects(), layout: true);
+impl MessageData for AbsmCanvasMessage {
+    fn need_perform_layout(&self) -> bool {
+        matches!(self, Self::ForceSyncDependentObjects)
+    }
 }
 
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "100b1c33-d017-4fe6-95e7-e1daf310ef27"
+)]
 pub struct AbsmCanvas {
     widget: Widget,
     selection: Vec<Handle<UiNode>>,
@@ -148,11 +146,7 @@ impl AbsmCanvas {
         let transform =
             Matrix3::new_translation(&-self.view_position) * Matrix3::new_scaling(self.zoom);
 
-        ui.send_message(WidgetMessage::layout_transform(
-            self.handle(),
-            MessageDirection::ToWidget,
-            transform,
-        ));
+        ui.send(self.handle(), WidgetMessage::LayoutTransform(transform));
     }
 
     fn make_drag_context(&self, ui: &UserInterface) -> DragContext {
@@ -174,25 +168,20 @@ impl AbsmCanvas {
             for &child in self
                 .children()
                 .iter()
-                .filter(|n| ui.node(**n).query_component::<Selectable>().is_some())
+                .filter(|n| ui.node(**n).self_or_field_ref::<Selectable>().is_some())
             {
-                ui.send_message(
-                    SelectableMessage::select(
-                        child,
-                        MessageDirection::ToWidget,
-                        new_selection.contains(&child),
-                    )
-                    .with_handled(true),
+                ui.send_handled(
+                    child,
+                    SelectableMessage::Select(new_selection.contains(&child)),
                 );
             }
 
             self.selection = new_selection.to_vec();
 
-            ui.send_message(AbsmCanvasMessage::selection_changed(
+            ui.post(
                 self.handle(),
-                MessageDirection::FromWidget,
-                self.selection.clone(),
-            ));
+                AbsmCanvasMessage::SelectionChanged(self.selection.clone()),
+            );
 
             // Make sure to update dragging context if we're in Drag mode.
             if let Mode::Drag { .. } = self.mode {
@@ -209,20 +198,21 @@ impl AbsmCanvas {
         ui: &UserInterface,
     ) -> Handle<UiNode>
     where
-        T: 'static,
+        T: Reflect,
     {
         if ui
-            .try_get(node_handle)
-            .is_some_and(|n| n.has_component::<T>())
+            .try_get_node(node_handle)
+            .ok()
+            .is_some_and(|n| n.is_or_has_field::<T>())
         {
             return node_handle;
         }
 
         if node_handle == self.handle() {
-            self.find_by_criteria_up(ui, |n| n.has_component::<T>())
+            self.find_by_criteria_up(ui, |n| n.is_or_has_field::<T>())
         } else {
             ui.node(node_handle)
-                .find_by_criteria_up(ui, |n| n.has_component::<T>())
+                .find_by_criteria_up(ui, |n| n.is_or_has_field::<T>())
         }
     }
 
@@ -231,26 +221,21 @@ impl AbsmCanvas {
         for connection in self
             .children()
             .iter()
-            .filter_map(|c| ui.node(*c).query_component::<Connection>())
+            .filter_map(|c| ui.node(*c).self_or_field_ref::<Connection>())
         {
             if connection.source_node == moved_node || force {
                 let source_pos = self
                     .screen_to_local(fetch_node_screen_center_ui(connection.segment.source, ui));
-                ui.send_message(SegmentMessage::source_position(
+                ui.send(
                     connection.handle(),
-                    MessageDirection::ToWidget,
-                    source_pos,
-                ));
+                    SegmentMessage::SourcePosition(source_pos),
+                );
             }
 
             if connection.dest_node == moved_node || force {
                 let dest_pos =
                     self.screen_to_local(fetch_node_screen_center_ui(connection.segment.dest, ui));
-                ui.send_message(SegmentMessage::dest_position(
-                    connection.handle(),
-                    MessageDirection::ToWidget,
-                    dest_pos,
-                ));
+                ui.send(connection.handle(), SegmentMessage::DestPosition(dest_pos));
             }
         }
     }
@@ -261,7 +246,7 @@ impl AbsmCanvas {
         for transition in self
             .children()
             .iter()
-            .filter_map(|c| ui.node(*c).query_component::<TransitionView>())
+            .filter_map(|c| ui.node(*c).self_or_field_ref::<TransitionView>())
         {
             if force
                 || moved_node == transition.segment.source
@@ -273,7 +258,7 @@ impl AbsmCanvas {
                     .iter()
                     .filter_map(|c| {
                         ui.node(*c)
-                            .query_component::<TransitionView>()
+                            .self_or_field_ref::<TransitionView>()
                             .and_then(|t| {
                                 if t.segment.source == transition.segment.source
                                     && t.segment.dest == transition.segment.dest
@@ -289,9 +274,9 @@ impl AbsmCanvas {
                     .enumerate()
                 {
                     if transition_handle == transition.handle() {
-                        if let (Some(source_state), Some(dest_state)) = (
-                            ui.try_get(transition.segment.source),
-                            ui.try_get(transition.segment.dest),
+                        if let (Ok(source_state), Ok(dest_state)) = (
+                            ui.try_get_node(transition.segment.source),
+                            ui.try_get_node(transition.segment.dest),
                         ) {
                             let source_pos = source_state.center();
                             let dest_pos = dest_state.center();
@@ -301,17 +286,15 @@ impl AbsmCanvas {
                                 .normalize()
                                 .scale(15.0 * i as f32);
 
-                            ui.send_message(SegmentMessage::source_position(
+                            ui.send(
                                 transition.handle(),
-                                MessageDirection::ToWidget,
-                                source_pos + offset,
-                            ));
+                                SegmentMessage::SourcePosition(source_pos + offset),
+                            );
 
-                            ui.send_message(SegmentMessage::dest_position(
+                            ui.send(
                                 transition.handle(),
-                                MessageDirection::ToWidget,
-                                dest_pos + offset,
-                            ));
+                                SegmentMessage::DestPosition(dest_pos + offset),
+                            );
                         }
                     }
                 }
@@ -324,8 +307,6 @@ impl AbsmCanvas {
         self.sync_connections_ends(Handle::NONE, ui, true);
     }
 }
-
-uuid_provider!(AbsmCanvas = "100b1c33-d017-4fe6-95e7-e1daf310ef27");
 
 impl Control for AbsmCanvas {
     fn draw(&self, ctx: &mut DrawingContext) {
@@ -447,12 +428,13 @@ impl Control for AbsmCanvas {
                     Mode::CreateTransition { source, .. } => {
                         if dest_node_handle.is_some() {
                             // Commit creation.
-                            ui.send_message(AbsmCanvasMessage::commit_transition(
+                            ui.post(
                                 self.handle(),
-                                MessageDirection::FromWidget,
-                                source,
-                                dest_node_handle,
-                            ));
+                                AbsmCanvasMessage::CommitTransition {
+                                    source_node: source,
+                                    dest_node: dest_node_handle,
+                                },
+                            );
                         }
 
                         self.mode = Mode::Normal;
@@ -479,11 +461,12 @@ impl Control for AbsmCanvas {
                 match self.mode {
                     Mode::Drag { ref drag_context } => {
                         if self.screen_to_local(*pos) != drag_context.initial_cursor_position {
-                            ui.send_message(AbsmCanvasMessage::commit_drag(
+                            ui.post(
                                 self.handle(),
-                                MessageDirection::FromWidget,
-                                drag_context.entries.clone(),
-                            ));
+                                AbsmCanvasMessage::CommitDrag {
+                                    entries: drag_context.entries.clone(),
+                                },
+                            );
                         }
 
                         self.mode = Mode::Normal;
@@ -494,11 +477,11 @@ impl Control for AbsmCanvas {
 
                         if dest_socket_handle.is_some() {
                             let source_socket_ref =
-                                ui.node(source).query_component::<Socket>().unwrap();
+                                ui.node(source).self_or_field_ref::<Socket>().unwrap();
 
                             let dest_socket_ref = ui
                                 .node(dest_socket_handle)
-                                .query_component::<Socket>()
+                                .self_or_field_ref::<Socket>()
                                 .unwrap();
 
                             // Do not allow to create connections between sockets of the same node.
@@ -514,12 +497,13 @@ impl Control for AbsmCanvas {
                                     SocketDirection::Output => (dest_socket_handle, source),
                                 };
 
-                                ui.send_message(AbsmCanvasMessage::commit_connection(
+                                ui.post(
                                     self.handle(),
-                                    MessageDirection::FromWidget,
-                                    child,
-                                    parent,
-                                ));
+                                    AbsmCanvasMessage::CommitConnection {
+                                        source_socket: child,
+                                        dest_socket: parent,
+                                    },
+                                );
                             }
                         }
 
@@ -545,11 +529,7 @@ impl Control for AbsmCanvas {
                         let new_position = entry.initial_position
                             + (local_cursor_pos - drag_context.initial_cursor_position);
 
-                        ui.send_message(WidgetMessage::desired_position(
-                            entry.node,
-                            MessageDirection::ToWidget,
-                            new_position,
-                        ));
+                        ui.send(entry.node, WidgetMessage::DesiredPosition(new_position));
                     }
                 }
                 Mode::CreateTransition {
@@ -574,45 +554,43 @@ impl Control for AbsmCanvas {
             self.view_position -= (new_cursor_pos - cursor_pos).scale(self.zoom);
 
             self.update_transform(ui);
-        } else if let Some(msg) = message.data::<AbsmCanvasMessage>() {
-            if message.direction() == MessageDirection::ToWidget
-                && message.destination() == self.handle()
-            {
-                match msg {
-                    AbsmCanvasMessage::SwitchMode(mode) => {
-                        // TODO: Check if other mode is active.
-                        self.mode = mode.clone();
-                    }
-                    AbsmCanvasMessage::SelectionChanged(new_selection) => {
-                        self.set_selection(new_selection, ui);
-                    }
-                    AbsmCanvasMessage::ForceSyncDependentObjects => {
-                        self.force_sync_dependent_objects(ui);
-                    }
-                    _ => (),
+        } else if let Some(msg) = message.data_for::<AbsmCanvasMessage>(self.handle) {
+            match msg {
+                AbsmCanvasMessage::SwitchMode(mode) => {
+                    // TODO: Check if other mode is active.
+                    self.mode = mode.clone();
+                    self.invalidate_visual();
                 }
+                AbsmCanvasMessage::SelectionChanged(new_selection) => {
+                    self.set_selection(new_selection, ui);
+                    self.invalidate_visual();
+                }
+                AbsmCanvasMessage::ForceSyncDependentObjects => {
+                    self.force_sync_dependent_objects(ui);
+                    self.invalidate_visual();
+                }
+                _ => (),
             }
         } else if let Some(SocketMessage::StartDragging) = message.data() {
             if message.direction() == MessageDirection::FromWidget {
                 let socket_ref = ui
                     .node(message.destination())
-                    .query_component::<Socket>()
+                    .self_or_field_ref::<Socket>()
                     .unwrap();
 
-                ui.send_message(AbsmCanvasMessage::switch_mode(
+                ui.send(
                     self.handle(),
-                    MessageDirection::ToWidget,
-                    Mode::CreateConnection {
+                    AbsmCanvasMessage::SwitchMode(Mode::CreateConnection {
                         source: message.destination(),
                         source_pos: self.screen_to_local(socket_ref.screen_position()),
                         dest_pos: self.screen_to_local(ui.cursor_position()),
-                    },
-                ))
+                    }),
+                )
             }
         } else if let Some(WidgetMessage::DesiredPosition(_)) = message.data() {
             if ui
                 .node(message.destination())
-                .has_component::<AbsmBaseNode>()
+                .is_or_has_field::<AbsmBaseNode>()
             {
                 let moved_node = message.destination();
                 self.sync_connections_ends(moved_node, ui, false);
@@ -639,7 +617,7 @@ impl AbsmCanvasBuilder {
         Self { widget_builder }
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<AbsmCanvas> {
         let canvas = AbsmCanvas {
             widget: self
                 .widget_builder
@@ -656,7 +634,7 @@ impl AbsmCanvasBuilder {
             lmb_released_node: Default::default(),
         };
 
-        ctx.add_node(UiNode::new(canvas))
+        ctx.add(canvas)
     }
 }
 

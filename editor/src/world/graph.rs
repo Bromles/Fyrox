@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::world::SceneItemIcon;
 use crate::{
     command::{Command, CommandGroup},
     fyrox::{
@@ -28,11 +29,10 @@ use crate::{
             make_relative_path,
             pool::{ErasedHandle, Handle},
         },
-        graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+        graph::{NodeWrapper, SceneGraph},
         resource::model::{Model, ModelResourceExtension},
         scene::{node::Node, Scene},
     },
-    load_image,
     message::MessageSender,
     scene::{
         commands::{
@@ -42,9 +42,10 @@ use crate::{
         },
         GameScene, Selection,
     },
+    scene_item_icon,
     world::{item::DropAnchor, selection::GraphSelection, WorldViewerDataProvider},
 };
-use fyrox::resource::texture::TextureResource;
+use fyrox::core::color::Color;
 use std::{borrow::Cow, path::Path, path::PathBuf};
 
 pub struct EditorSceneWrapper<'a> {
@@ -69,7 +70,7 @@ impl WorldViewerDataProvider for EditorSceneWrapper<'_> {
     fn children_of(&self, node: ErasedHandle) -> Vec<ErasedHandle> {
         self.scene
             .graph
-            .try_get(node.into())
+            .try_get_node(node.into())
             .map(|n| {
                 n.children()
                     .iter()
@@ -82,7 +83,7 @@ impl WorldViewerDataProvider for EditorSceneWrapper<'_> {
     fn child_count_of(&self, node: ErasedHandle) -> usize {
         self.scene
             .graph
-            .try_get(node.into())
+            .try_get_node(node.into())
             .map_or(0, |node| node.children().len())
     }
 
@@ -100,14 +101,15 @@ impl WorldViewerDataProvider for EditorSceneWrapper<'_> {
     fn is_node_has_child(&self, node: ErasedHandle, child: ErasedHandle) -> bool {
         self.scene
             .graph
-            .try_get(node.into())
+            .try_get_node(node.into())
+            .ok()
             .is_some_and(|node| node.children().contains(&child.into()))
     }
 
     fn parent_of(&self, node: ErasedHandle) -> ErasedHandle {
         self.scene
             .graph
-            .try_get(node.into())
+            .try_get_node(node.into())
             .map(|node| node.parent().into())
             .unwrap_or_default()
     }
@@ -115,35 +117,37 @@ impl WorldViewerDataProvider for EditorSceneWrapper<'_> {
     fn name_of(&self, node: ErasedHandle) -> Option<Cow<str>> {
         self.scene
             .graph
-            .try_get(node.into())
+            .try_get_node(node.into())
+            .ok()
             .map(|n| Cow::Borrowed(n.name()))
     }
 
     fn is_valid_handle(&self, node: ErasedHandle) -> bool {
-        self.scene.graph.is_valid_handle(node.into())
+        self.scene.graph.is_valid_handle(Handle::<Node>::from(node))
     }
 
-    fn icon_of(&self, node: ErasedHandle) -> Option<TextureResource> {
-        let node = self.scene.graph.try_get(node.into()).unwrap();
+    fn icon_of(&self, node: ErasedHandle) -> Option<SceneItemIcon> {
+        let node = self.scene.graph.try_get_node(node.into()).unwrap();
         if node.is_point_light() || node.is_directional_light() || node.is_spot_light() {
-            load_image!("../../resources/light.png")
+            scene_item_icon!("../../resources/light.png", Color::hex("#FFC312"))
         } else if node.is_joint() || node.is_joint2d() {
-            load_image!("../../resources/joint.png")
+            scene_item_icon!("../../resources/joint.png", Color::hex("#A3CB38"))
         } else if node.is_rigid_body() || node.is_rigid_body2d() {
-            load_image!("../../resources/rigid_body.png")
+            scene_item_icon!("../../resources/rigid_body.png", Color::hex("#009432"))
         } else if node.is_collider() || node.is_collider2d() {
-            load_image!("../../resources/collider.png")
+            scene_item_icon!("../../resources/collider.png", Color::hex("#D980FA"))
         } else if node.is_sound() {
-            load_image!("../../resources/sound_source.png")
+            scene_item_icon!("../../resources/sound_source.png", Color::hex("#ED4C67"))
         } else {
-            load_image!("../../resources/cube.png")
+            scene_item_icon!("../../resources/cube.png", Color::SILVER)
         }
     }
 
     fn is_instance(&self, node: ErasedHandle) -> bool {
         self.scene
             .graph
-            .try_get(node.into())
+            .try_get_node(node.into())
+            .ok()
             .is_some_and(|n| n.resource().is_some())
     }
 
@@ -188,7 +192,7 @@ impl WorldViewerDataProvider for EditorSceneWrapper<'_> {
                             if let Some((parents_parent, position)) =
                                 self.scene.graph.relative_position(parent, index_offset)
                             {
-                                if let Some(node) = self.scene.graph.try_get(node_handle) {
+                                if let Ok(node) = self.scene.graph.try_get_node(node_handle) {
                                     if node.parent() != parents_parent {
                                         commands.push(LinkNodesCommand::new(
                                             node_handle,

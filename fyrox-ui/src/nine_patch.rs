@@ -22,23 +22,22 @@ use crate::{
     brush::Brush,
     core::{
         algebra::Vector2, color::Color, math::Rect, pool::Handle, reflect::prelude::*,
-        some_or_return, type_traits::prelude::*, variable::InheritableVariable,
-        visitor::prelude::*,
+        some_or_return, variable::InheritableVariable, visitor::prelude::*,
     },
-    define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
-    message::{compare_and_set, MessageDirection, UiMessage},
+    message::{compare_and_set, UiMessage},
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
 };
 
+use crate::message::MessageData;
 use fyrox_graph::{
     constructor::{ConstructorProvider, GraphNodeConstructor},
-    BaseSceneGraph,
+    SceneGraph,
 };
 use fyrox_material::MaterialResource;
 use fyrox_texture::{TextureKind, TextureResource};
-use std::ops::{Deref, DerefMut};
+use std::ops::DerefMut;
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 /// Stretch mode for the middle sections of [`NinePatch`] widget.
@@ -55,9 +54,8 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
     AsRefStr,
     EnumString,
     VariantNames,
-    TypeUuidProvider,
 )]
-#[type_uuid(id = "c5bb0a5c-6581-45f7-899c-78aa1da8b659")]
+#[reflect(type_uuid = "c5bb0a5c-6581-45f7-899c-78aa1da8b659")]
 pub enum StretchMode {
     /// Stretches middle sections of the widget. Could lead to distorted image.
     #[default]
@@ -77,41 +75,12 @@ pub enum NinePatchMessage {
     Texture(Option<TextureResource>),
     DrawCenter(bool),
 }
-
-impl NinePatchMessage {
-    define_constructor!(
-        /// Creates [`NinePatchMessage::LeftMargin`] message.
-        NinePatchMessage:LeftMargin => fn left_margin(u32), layout: false
-    );
-    define_constructor!(
-        /// Creates [`NinePatchMessage::RightMargin`] message.
-        NinePatchMessage:RightMargin => fn right_margin(u32), layout: false
-    );
-    define_constructor!(
-        /// Creates [`NinePatchMessage::TopMargin`] message.
-        NinePatchMessage:TopMargin => fn top_margin(u32), layout: false
-    );
-    define_constructor!(
-        /// Creates [`NinePatchMessage::BottomMargin`] message.
-        NinePatchMessage:BottomMargin => fn bottom_margin(u32), layout: false
-    );
-    define_constructor!(
-        /// Creates [`NinePatchMessage::TextureRegion`] message.
-        NinePatchMessage:TextureRegion => fn texture_region(Rect<u32>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`NinePatchMessage::Texture`] message.
-        NinePatchMessage:Texture => fn texture(Option<TextureResource>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`NinePatchMessage::DrawCenter`] message.
-        NinePatchMessage:DrawCenter => fn draw_center(bool), layout: false
-    );
-}
+impl MessageData for NinePatchMessage {}
 
 /// A texture slice that defines a region in a texture and margins that will be used to split the
 /// section in nine pieces.
 #[derive(Default, Clone, Visit, Reflect, Debug, PartialEq)]
+#[reflect(type_uuid = "e1ea4fee-f138-47d2-9770-c088b6c7d86e")]
 pub struct TextureSlice {
     /// Texture of the slice. This field is used only for editing purposes in the UI. Can be [`None`]
     /// if no editing is needed.
@@ -172,8 +141,9 @@ impl TextureSlice {
 /// #     UiNode, UserInterface,
 /// # };
 /// # use fyrox_texture::TextureResource;
+/// # use fyrox_ui::nine_patch::NinePatch;
 /// #
-/// fn create_nine_patch(texture: TextureResource, ui: &mut UserInterface) -> Handle<UiNode> {
+/// fn create_nine_patch(texture: TextureResource, ui: &mut UserInterface) -> Handle<NinePatch> {
 ///     NinePatchBuilder::new(WidgetBuilder::new())
 ///         // Specify margins for each side in pixels.
 ///         .with_left_margin(50)
@@ -187,8 +157,8 @@ impl TextureSlice {
 ///         .build(&mut ui.build_ctx())
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider, TypeUuidProvider)]
-#[type_uuid(id = "c345033e-8c10-4186-b101-43f73b85981d")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "c345033e-8c10-4186-b101-43f73b85981d")]
 #[reflect(derived_type = "UiNode")]
 pub struct NinePatch {
     pub widget: Widget,
@@ -217,6 +187,7 @@ impl ConstructorProvider<UiNode, UserInterface> for NinePatch {
                         .with_height(200.0),
                 )
                 .build(&mut ui.build_ctx())
+                .to_base()
                 .into()
             })
             .with_group("Visual")
@@ -554,33 +525,36 @@ impl Control for NinePatch {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(msg) = message.data::<NinePatchMessage>() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                let slice = &mut self.texture_slice;
-                match msg {
-                    NinePatchMessage::LeftMargin(margin) => {
-                        compare_and_set(slice.left_margin.deref_mut(), margin, message, ui);
-                    }
-                    NinePatchMessage::RightMargin(margin) => {
-                        compare_and_set(slice.right_margin.deref_mut(), margin, message, ui);
-                    }
-                    NinePatchMessage::TopMargin(margin) => {
-                        compare_and_set(slice.top_margin.deref_mut(), margin, message, ui);
-                    }
-                    NinePatchMessage::BottomMargin(margin) => {
-                        compare_and_set(slice.bottom_margin.deref_mut(), margin, message, ui);
-                    }
-                    NinePatchMessage::TextureRegion(region) => {
-                        compare_and_set(slice.texture_region.deref_mut(), region, message, ui);
-                    }
-                    NinePatchMessage::Texture(texture) => {
-                        compare_and_set(&mut slice.texture_source, texture, message, ui);
-                    }
-                    NinePatchMessage::DrawCenter(draw_center) => {
-                        compare_and_set(self.draw_center.deref_mut(), draw_center, message, ui);
-                    }
+        if let Some(msg) = message.data_for::<NinePatchMessage>(self.handle) {
+            let slice = &mut self.texture_slice;
+            match msg {
+                NinePatchMessage::LeftMargin(margin) => {
+                    compare_and_set(slice.left_margin.deref_mut(), margin, message, ui);
+                    self.invalidate_visual();
+                }
+                NinePatchMessage::RightMargin(margin) => {
+                    compare_and_set(slice.right_margin.deref_mut(), margin, message, ui);
+                    self.invalidate_visual();
+                }
+                NinePatchMessage::TopMargin(margin) => {
+                    compare_and_set(slice.top_margin.deref_mut(), margin, message, ui);
+                    self.invalidate_visual();
+                }
+                NinePatchMessage::BottomMargin(margin) => {
+                    compare_and_set(slice.bottom_margin.deref_mut(), margin, message, ui);
+                    self.invalidate_visual();
+                }
+                NinePatchMessage::TextureRegion(region) => {
+                    compare_and_set(slice.texture_region.deref_mut(), region, message, ui);
+                    self.invalidate_visual();
+                }
+                NinePatchMessage::Texture(texture) => {
+                    compare_and_set(&mut slice.texture_source, texture, message, ui);
+                    self.invalidate_visual();
+                }
+                NinePatchMessage::DrawCenter(draw_center) => {
+                    compare_and_set(self.draw_center.deref_mut(), draw_center, message, ui);
+                    self.invalidate_visual();
                 }
             }
         }
@@ -655,12 +629,12 @@ impl NinePatchBuilder {
         self
     }
 
-    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<NinePatch> {
         if self.widget_builder.background.is_none() {
             self.widget_builder.background = Some(Brush::Solid(Color::WHITE).into())
         }
 
-        ctx.add_node(UiNode::new(NinePatch {
+        ctx.add(NinePatch {
             widget: self.widget_builder.build(ctx),
             texture_slice: TextureSlice {
                 texture_source: self.texture.clone(),
@@ -673,7 +647,7 @@ impl NinePatchBuilder {
             draw_center: self.draw_center.into(),
             texture: self.texture.into(),
             stretch_mode: self.stretch_mode.into(),
-        }))
+        })
     }
 }
 

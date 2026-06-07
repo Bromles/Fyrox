@@ -23,11 +23,10 @@ use crate::{
         core::{
             algebra::Vector2,
             pool::Handle,
+            reflect::prelude::*,
             uuid::{uuid, Uuid},
-            TypeUuidProvider,
         },
-        graph::BaseSceneGraph,
-        gui::{message::MessageDirection, widget::WidgetMessage, BuildContext, UiNode},
+        gui::BuildContext,
         scene::node::Node,
     },
     interaction::{make_interaction_mode_button, InteractionMode},
@@ -37,10 +36,16 @@ use crate::{
     world::selection::GraphSelection,
     Engine,
 };
+use fyrox::gui::border::Border;
+use fyrox::gui::button::Button;
+use fyrox::gui::image::Image;
+use fyrox::gui::widget::WidgetMessage;
 
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable, type_uuid = "bab9ce8c-d679-4c49-beb9-f5a8482e0678")]
 pub struct SelectInteractionMode {
-    preview: Handle<UiNode>,
-    selection_frame: Handle<UiNode>,
+    preview: Handle<Image>,
+    selection_frame: Handle<Border>,
     message_sender: MessageSender,
     stack: Vec<Handle<Node>>,
     click_pos: Vector2<f32>,
@@ -48,8 +53,8 @@ pub struct SelectInteractionMode {
 
 impl SelectInteractionMode {
     pub fn new(
-        preview: Handle<UiNode>,
-        selection_frame: Handle<UiNode>,
+        preview: Handle<Image>,
+        selection_frame: Handle<Border>,
         message_sender: MessageSender,
     ) -> Self {
         Self {
@@ -59,12 +64,6 @@ impl SelectInteractionMode {
             stack: Vec::new(),
             click_pos: Vector2::default(),
         }
-    }
-}
-
-impl TypeUuidProvider for SelectInteractionMode {
-    fn type_uuid() -> Uuid {
-        uuid!("bab9ce8c-d679-4c49-beb9-f5a8482e0678")
     }
 }
 
@@ -79,27 +78,15 @@ impl InteractionMode for SelectInteractionMode {
         _settings: &Settings,
     ) {
         self.click_pos = mouse_pos;
-        let ui = &mut engine.user_interfaces.first_mut();
-        ui.send_message(WidgetMessage::visibility(
+        engine.user_interfaces.first().send_many(
             self.selection_frame,
-            MessageDirection::ToWidget,
-            true,
-        ));
-        ui.send_message(WidgetMessage::desired_position(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            mouse_pos,
-        ));
-        ui.send_message(WidgetMessage::width(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            0.0,
-        ));
-        ui.send_message(WidgetMessage::height(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            0.0,
-        ));
+            [
+                WidgetMessage::Visibility(true),
+                WidgetMessage::DesiredPosition(mouse_pos),
+                WidgetMessage::Width(0.0),
+                WidgetMessage::Height(0.0),
+            ],
+        );
     }
 
     fn on_left_mouse_button_up(
@@ -116,17 +103,11 @@ impl InteractionMode for SelectInteractionMode {
         };
 
         let scene = &engine.scenes[game_scene.scene];
-        let camera = scene.graph[game_scene.camera_controller.camera].as_camera();
-        let preview_screen_bounds = engine
-            .user_interfaces
-            .first_mut()
-            .node(self.preview)
-            .screen_bounds();
-        let frame_screen_bounds = engine
-            .user_interfaces
-            .first_mut()
-            .node(self.selection_frame)
-            .screen_bounds();
+        let camera = &scene.graph[game_scene.camera_controller.camera];
+        let preview_screen_bounds =
+            engine.user_interfaces.first_mut()[self.preview].screen_bounds();
+        let frame_screen_bounds =
+            engine.user_interfaces.first_mut()[self.selection_frame].screen_bounds();
         let frame_relative_bounds = frame_screen_bounds.translate(-preview_screen_bounds.position);
         self.stack.clear();
         self.stack.push(scene.graph.get_root());
@@ -161,12 +142,8 @@ impl InteractionMode for SelectInteractionMode {
         }
         engine
             .user_interfaces
-            .first_mut()
-            .send_message(WidgetMessage::visibility(
-                self.selection_frame,
-                MessageDirection::ToWidget,
-                false,
-            ));
+            .first()
+            .send(self.selection_frame, WidgetMessage::Visibility(false));
     }
 
     fn on_mouse_move(
@@ -195,21 +172,14 @@ impl InteractionMode for SelectInteractionMode {
                 self.click_pos.y
             },
         );
-        ui.send_message(WidgetMessage::desired_position(
+        ui.send_many(
             self.selection_frame,
-            MessageDirection::ToWidget,
-            position,
-        ));
-        ui.send_message(WidgetMessage::width(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            width.abs(),
-        ));
-        ui.send_message(WidgetMessage::height(
-            self.selection_frame,
-            MessageDirection::ToWidget,
-            height.abs(),
-        ));
+            [
+                WidgetMessage::DesiredPosition(position),
+                WidgetMessage::Width(width.abs()),
+                WidgetMessage::Height(height.abs()),
+            ],
+        );
     }
 
     fn update(
@@ -221,7 +191,7 @@ impl InteractionMode for SelectInteractionMode {
     ) {
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         let select_mode_tooltip = "Select Object(s) - Shortcut: [1]\n\nSelection interaction mode \
         allows you to select an object by a single left mouse button click or multiple objects using either \
         frame selection (click and drag) or by holding Ctrl+Click";
@@ -235,6 +205,6 @@ impl InteractionMode for SelectInteractionMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        Self::type_info().type_uuid
     }
 }

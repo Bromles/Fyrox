@@ -28,9 +28,8 @@ use crate::asset::state::LoadError;
 use crate::core::algebra::{Matrix4, Unit};
 use crate::core::log::Log;
 use crate::core::pool::Handle;
-use crate::core::TypeUuidProvider;
-use crate::graph::BaseSceneGraph;
 use crate::graph::NodeMapping;
+use crate::graph::SceneGraph;
 use crate::gui::core::io::FileError;
 use crate::material::MaterialResource;
 use crate::resource::model::{MaterialSearchOptions, Model, ModelImportOptions};
@@ -47,19 +46,21 @@ use crate::scene::Scene;
 use gltf::json;
 use gltf::Document;
 use gltf::Gltf;
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
 mod animation;
 mod iter;
-mod material;
+pub mod material;
 mod node_names;
 mod simplify;
 mod surface;
 mod uri;
 
 use animation::import_animations;
+use fyrox_core::reflect::Reflect;
 use fyrox_resource::untyped::ResourceKind;
 use material::*;
 pub use surface::SurfaceDataError;
@@ -85,6 +86,27 @@ enum GltfLoadError {
     Material(GltfMaterialError),
     Surface(SurfaceDataError),
     JSON(json::Error),
+}
+
+impl std::error::Error for GltfLoadError {}
+
+impl Display for GltfLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GltfLoadError::InvalidIndex => f.write_str("Invalid index"),
+            GltfLoadError::InvalidPath => f.write_str("Invalid path"),
+            GltfLoadError::UnsupportedURI(uri) => write!(f, "Unsupported URL {uri:?}"),
+            GltfLoadError::MissingEmbeddedBin => f.write_str("Missing embedded bin"),
+            GltfLoadError::Gltf(error) => Display::fmt(error, f),
+            GltfLoadError::Texture(error) => Display::fmt(error, f),
+            GltfLoadError::File(error) => Display::fmt(error, f),
+            GltfLoadError::Base64(error) => Display::fmt(error, f),
+            GltfLoadError::Load(error) => Display::fmt(error, f),
+            GltfLoadError::Material(error) => Display::fmt(error, f),
+            GltfLoadError::Surface(error) => Display::fmt(error, f),
+            GltfLoadError::JSON(error) => Display::fmt(error, f),
+        }
+    }
 }
 
 impl From<json::Error> for GltfLoadError {
@@ -273,8 +295,8 @@ impl loader::ResourceLoader for GltfLoader {
         &["gltf", "glb"]
     }
 
-    fn data_type_uuid(&self) -> crate::core::type_traits::prelude::Uuid {
-        Model::type_uuid()
+    fn data_type_uuid(&self) -> Uuid {
+        <Model as Reflect>::type_info().type_uuid
     }
 
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> loader::BoxedLoaderFuture {
@@ -627,7 +649,7 @@ fn build_node_family(
             // We have a never-seen-before inv_bind_pose, so create a child for that inv_bind_pose.
             let skin_index = pair.skin_index;
             let base_builder = BaseBuilder::new()
-                .with_name(format!("{}:{}", name, skin_index))
+                .with_name(format!("{name}:{skin_index}"))
                 .with_inv_bind_pose_transform(pair.bone.inv_bind_pose);
             let handle: Handle<Node> = graph.add_node(PivotBuilder::new(base_builder).build_node());
             bone_children.push(SkinNodePair {

@@ -37,11 +37,12 @@ use crate::{
     renderer::{render_source_default, Renderer},
     source::{SoundSource, Status},
 };
+use fyrox_core::pool::PoolError;
 use fyrox_core::{
     pool::{Handle, Pool},
     reflect::prelude::*,
-    uuid_provider,
     visitor::prelude::*,
+    SafeLock,
 };
 use std::{
     sync::{Arc, Mutex, MutexGuard},
@@ -49,13 +50,12 @@ use std::{
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
-/// Sample rate for output device.
-/// TODO: Make this configurable, for now its set to most commonly used sample rate of 44100 Hz.
-pub const SAMPLE_RATE: u32 = 44100;
-
 /// Distance model defines how volume of sound will decay when distance to listener changes.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Reflect, Visit, AsRefStr, EnumString, VariantNames)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Reflect, Visit, Default, AsRefStr, EnumString, VariantNames,
+)]
 #[repr(u32)]
+#[reflect(type_uuid = "957f3b00-3f89-438c-b1b7-e841e8d75ba9")]
 pub enum DistanceModel {
     /// No distance attenuation at all.
     None = 0,
@@ -72,6 +72,7 @@ pub enum DistanceModel {
     /// # Notes
     ///
     /// This is default distance model of context.
+    #[default]
     InverseDistance = 1,
 
     /// Distance will decay using following formula:
@@ -98,14 +99,6 @@ pub enum DistanceModel {
     ExponentDistance = 3,
 }
 
-uuid_provider!(DistanceModel = "957f3b00-3f89-438c-b1b7-e841e8d75ba9");
-
-impl Default for DistanceModel {
-    fn default() -> Self {
-        Self::InverseDistance
-    }
-}
-
 /// See module docs.
 #[derive(Clone, Default, Debug, Visit)]
 pub struct SoundContext {
@@ -130,6 +123,7 @@ pub struct SerializationOptions {
 
 /// Internal state of context.
 #[derive(Default, Debug, Clone, Reflect)]
+#[reflect(type_uuid = "10f5a7ce-efe4-4bcc-aabc-c399e8fd1a3c")]
 pub struct State {
     sources: Pool<SoundSource>,
     listener: Listener,
@@ -188,12 +182,6 @@ impl State {
         self.distance_model
     }
 
-    /// Normalizes given frequency using context's sampling rate. Normalized frequency then can be used
-    /// to create filters.
-    pub fn normalize_frequency(&self, f: f32) -> f32 {
-        f / SAMPLE_RATE as f32
-    }
-
     /// Returns amount of time context spent on rendering all sound sources.
     pub fn full_render_duration(&self) -> Duration {
         self.render_duration
@@ -250,7 +238,10 @@ impl State {
     }
 
     /// Returns mutable reference to sound source at given handle. If handle is invalid, this method will panic.
-    pub fn try_get_source_mut(&mut self, handle: Handle<SoundSource>) -> Option<&mut SoundSource> {
+    pub fn try_get_source_mut(
+        &mut self,
+        handle: Handle<SoundSource>,
+    ) -> Result<&mut SoundSource, PoolError> {
         self.sources.try_borrow_mut(handle)
     }
 
@@ -274,7 +265,7 @@ impl State {
         &mut self.bus_graph
     }
 
-    pub(crate) fn render(&mut self, output_device_buffer: &mut [(f32, f32)]) {
+    pub(crate) fn render(&mut self, sample_rate: u32, output_device_buffer: &mut [(f32, f32)]) {
         let last_time = fyrox_core::instant::Instant::now();
 
         if !self.paused {
@@ -293,7 +284,7 @@ impl State {
             {
                 if let Some(bus_input_buffer) = self.bus_graph.try_get_bus_input_buffer(&source.bus)
                 {
-                    source.render(output_device_buffer.len());
+                    source.render(sample_rate, output_device_buffer.len());
 
                     match self.renderer {
                         Renderer::Default => {
@@ -307,6 +298,7 @@ impl State {
                         }
                         Renderer::HrtfRenderer(ref mut hrtf_renderer) => {
                             hrtf_renderer.render_source(
+                                sample_rate,
                                 source,
                                 &self.listener,
                                 self.distance_model,
@@ -317,7 +309,7 @@ impl State {
                 }
             }
 
-            self.bus_graph.end_render(output_device_buffer);
+            self.bus_graph.end_render(sample_rate, output_device_buffer);
         }
 
         self.render_duration = fyrox_core::instant::Instant::now() - last_time;
@@ -370,7 +362,7 @@ impl SoundContext {
     /// You'll get a deadlock, so general rule here is to not store result of this method
     /// anywhere.
     pub fn state(&self) -> MutexGuard<'_, State> {
-        self.state.as_ref().unwrap().lock().unwrap()
+        self.state.as_ref().unwrap().safe_lock().unwrap()
     }
 
     /// Creates deep copy instead of shallow which is done by clone().

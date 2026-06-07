@@ -21,14 +21,13 @@
 //! Resource loader. It manages resource loading.
 
 use crate::{
-    core::{uuid::Uuid, TypeUuidProvider},
-    io::ResourceIo,
-    options::BaseImportOptions,
-    state::LoadError,
-    ResourceData, TypedResourceData,
+    core::uuid::Uuid, io::ResourceIo, options::BaseImportOptions, state::LoadError, ResourceData,
+    TypedResourceData,
 };
 use fyrox_core::io::FileError;
 use fyrox_core::platform::TargetPlatform;
+use fyrox_core::reflect::Reflect;
+use fyrox_core::visitor::{Format, Visitor};
 use std::{
     any::Any,
     future::Future,
@@ -49,11 +48,64 @@ pub trait BaseResourceLoader: Any + Send {}
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: Any + Send> BaseResourceLoader for T {}
 
+fn convert_ascii_to_binary<F>(
+    src_path: PathBuf,
+    dest_path: PathBuf,
+    is_native_extension: F,
+    _platform: TargetPlatform,
+    io: Arc<dyn ResourceIo>,
+) -> Pin<Box<dyn Future<Output = Result<(), FileError>>>>
+where
+    F: Fn(&str) -> bool,
+{
+    if src_path
+        .extension()
+        .and_then(|src_ext| src_ext.to_str())
+        .is_some_and(is_native_extension)
+    {
+        Box::pin(async move {
+            let data = io.load_file(&src_path).await?;
+            match Visitor::detect_format_from_slice(&data) {
+                Format::Unknown => Err(FileError::Custom("Unknown format!".to_string())),
+                Format::Binary => {
+                    // Copy the binary format as-is.
+                    Ok(io.copy_file(&src_path, &dest_path).await?)
+                }
+                Format::Ascii => {
+                    // Resave the ascii format as binary.
+                    let visitor = Visitor::load_from_memory(&data).map_err(|err| {
+                        FileError::Custom(format!(
+                            "Unable to load {}. Reason: {err}",
+                            src_path.display()
+                        ))
+                    })?;
+                    visitor.save_binary_to_file(dest_path).map_err(|err| {
+                        FileError::Custom(format!(
+                            "Unable to save {}. Reason: {err}",
+                            src_path.display()
+                        ))
+                    })?;
+                    Ok(())
+                }
+            }
+        })
+    } else {
+        Box::pin(async move { io.copy_file(&src_path, &dest_path).await })
+    }
+}
+
 /// Trait for resource loading.
 pub trait ResourceLoader: BaseResourceLoader {
     /// Returns a list of file extensions supported by the loader. Resource manager will use this list
     /// to pick the correct resource loader when the user requests a resource.
     fn extensions(&self) -> &[&str];
+
+    /// Returns `true` if the given extension corresponds to a resource in the native file format.
+    /// The default implementation returns `false`, which assumes that the extension corresponds
+    /// to a foreign file format.
+    fn is_native_extension(&self, #[allow(unused_variables)] ext: &str) -> bool {
+        false
+    }
 
     /// Checks if the given extension is supported by this loader. Comparison is case-insensitive.
     fn supports_extension(&self, ext: &str) -> bool {
@@ -80,7 +132,13 @@ pub trait ResourceLoader: BaseResourceLoader {
         #[allow(unused_variables)] platform: TargetPlatform,
         io: Arc<dyn ResourceIo>,
     ) -> Pin<Box<dyn Future<Output = Result<(), FileError>>>> {
-        Box::pin(async move { io.copy_file(&src_path, &dest_path).await })
+        convert_ascii_to_binary(
+            src_path,
+            dest_path,
+            |ext| self.is_native_extension(ext),
+            platform,
+            io,
+        )
     }
 
     /// Tries to load import settings for a resource.
@@ -224,6 +282,14 @@ impl ResourceLoadersContainer {
         }
     }
 
+    /// Tries to fina a loader for the specified data type uuid.
+    pub fn loader_for_data_type(&self, data_type_uuid: Uuid) -> Option<&dyn ResourceLoader> {
+        self.loaders
+            .iter()
+            .find(|loader| loader.data_type_uuid() == data_type_uuid)
+            .map(|l| &**l)
+    }
+
     /// Checks if there's a resource loader for the given path and the data type produced by the
     /// loader matches the given type `T`.
     pub fn is_extension_matches_type<T>(&self, path: &Path) -> bool
@@ -235,7 +301,7 @@ impl ResourceLoadersContainer {
                 .iter()
                 .find(|loader| loader.supports_extension(&extension.to_string_lossy()))
                 .is_some_and(|loader| {
-                    loader.data_type_uuid() == <T as TypeUuidProvider>::type_uuid()
+                    loader.data_type_uuid() == <T as Reflect>::type_info().type_uuid
                 })
         })
     }

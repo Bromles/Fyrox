@@ -25,42 +25,30 @@
 #![allow(clippy::reversed_empty_ranges)]
 
 use crate::{
-    core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
-    define_constructor,
-    message::{MessageDirection, UiMessage},
+    core::{algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, visitor::prelude::*},
+    message::UiMessage,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, Orientation, UiNode, UserInterface,
 };
 
+use crate::message::MessageData;
 use core::f32;
-use fyrox_core::uuid_provider;
+
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut, Range},
-};
+use fyrox_graph::SceneGraph;
+use std::{cell::RefCell, ops::Range};
 
 /// A set of possible [`WrapPanel`] widget messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WrapPanelMessage {
-    /// The message is used to change orientation of the wrap panel.
+    /// The message is used to change the orientation of the wrap panel.
     Orientation(Orientation),
 }
-
-impl WrapPanelMessage {
-    define_constructor!(
-        /// Creates [`WrapPanelMessage::Orientation`] message.
-        WrapPanelMessage:Orientation => fn orientation(Orientation), layout: false
-    );
-}
+impl MessageData for WrapPanelMessage {}
 
 /// Wrap panel is used to stack children widgets either in vertical or horizontal direction with overflow - every widget
-/// that does not have enough space on current line, will automatically be placed on the next line (either vertical or
+/// that does not have enough space on the current line, will automatically be placed on the next line (either vertical or
 /// horizontal, depending on the orientation).
 ///
 /// ## How to create
@@ -72,8 +60,9 @@ impl WrapPanelMessage {
 /// #     core::pool::Handle,
 /// #     widget::WidgetBuilder, wrap_panel::WrapPanelBuilder, BuildContext, Orientation, UiNode,
 /// # };
+/// # use fyrox_ui::wrap_panel::WrapPanel;
 /// #
-/// fn create_wrap_panel(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_wrap_panel(ctx: &mut BuildContext) -> Handle<WrapPanel> {
 ///     WrapPanelBuilder::new(WidgetBuilder::new())
 ///         .with_orientation(Orientation::Horizontal)
 ///         .build(ctx)
@@ -87,8 +76,11 @@ impl WrapPanelMessage {
 ///
 /// Wrap panel can stack your widgets either in vertical or horizontal direction. Use `.with_orientation` while building
 /// the panel to switch orientation to desired.
-#[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "f488ab8e-8f8b-473c-a450-5ac33f1afb39"
+)]
 pub struct WrapPanel {
     /// Base widget of the wrap panel.
     pub widget: Widget,
@@ -106,6 +98,7 @@ impl ConstructorProvider<UiNode, UserInterface> for WrapPanel {
             .with_variant("Wrap Panel", |ui| {
                 WrapPanelBuilder::new(WidgetBuilder::new().with_name("Wrap Panel"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -131,8 +124,6 @@ impl Default for Line {
         }
     }
 }
-
-uuid_provider!(WrapPanel = "f488ab8e-8f8b-473c-a450-5ac33f1afb39");
 
 impl Control for WrapPanel {
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
@@ -273,13 +264,10 @@ impl Control for WrapPanel {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if message.destination() == self.handle && message.direction() == MessageDirection::ToWidget
-        {
-            if let Some(WrapPanelMessage::Orientation(orientation)) = message.data() {
-                if *orientation != *self.orientation {
-                    self.orientation.set_value_and_mark_modified(*orientation);
-                    self.invalidate_layout();
-                }
+        if let Some(WrapPanelMessage::Orientation(orientation)) = message.data_for(self.handle) {
+            if *orientation != *self.orientation {
+                self.orientation.set_value_and_mark_modified(*orientation);
+                self.invalidate_layout();
             }
         }
     }
@@ -307,19 +295,22 @@ impl WrapPanelBuilder {
     }
 
     /// Finishes wrap panel building and returns its instance.
-    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
-        let stack_panel = WrapPanel {
+    pub fn build_wrap_panel(self, ctx: &BuildContext) -> WrapPanel {
+        WrapPanel {
             widget: self.widget_builder.build(ctx),
             orientation: self.orientation.unwrap_or(Orientation::Vertical).into(),
             lines: Default::default(),
-        };
+        }
+    }
 
-        UiNode::new(stack_panel)
+    /// Finishes wrap panel building and returns its instance.
+    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
+        UiNode::new(self.build_wrap_panel(ctx))
     }
 
     /// Finishes wrap panel building, adds it to the user interface and returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(self.build_node(ctx))
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<WrapPanel> {
+        ctx.add(self.build_wrap_panel(ctx))
     }
 }
 

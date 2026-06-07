@@ -24,8 +24,8 @@ use crate::{
         fxhash::FxHashMap,
         graph::constructor::{VariantConstructor, VariantResult},
         gui::{
-            constructor::WidgetConstructorContainer, menu::MenuItemMessage,
-            message::MessageDirection, message::UiMessage, BuildContext, UiNode, UserInterface,
+            constructor::WidgetConstructorContainer, menu::MenuItemMessage, message::UiMessage,
+            BuildContext, UiNode, UserInterface,
         },
     },
     menu::create_menu_item,
@@ -33,14 +33,17 @@ use crate::{
     scene::Selection,
     ui_scene::{commands::graph::AddWidgetCommand, UiScene},
 };
-use fyrox::gui::menu::SortingPredicate;
+use fyrox::core::uuid::{uuid, Uuid};
+use fyrox::gui::menu::{MenuItem, SortingPredicate};
 
 pub struct UiMenu {
-    pub menu: Handle<UiNode>,
-    constructor_views: FxHashMap<Handle<UiNode>, VariantConstructor<UiNode, UserInterface>>,
+    pub menu: Handle<MenuItem>,
+    constructor_views: FxHashMap<Handle<MenuItem>, VariantConstructor<UiNode, UserInterface>>,
 }
 
 impl UiMenu {
+    pub const MENU: Uuid = uuid!("3a3f7035-529e-4d79-a413-a4d887d5e32e");
+
     pub fn new(
         constructors: &WidgetConstructorContainer,
         name: &str,
@@ -52,33 +55,29 @@ impl UiMenu {
         let constructors = constructors.map();
         for constructor in constructors.values() {
             for variant in constructor.variants.iter() {
-                let item = create_menu_item(&variant.name, vec![], ctx);
+                let item = create_menu_item(&variant.name, Uuid::new_v4(), vec![], ctx);
                 constructor_views.insert(item, variant.constructor.clone());
                 if constructor.group.is_empty() {
                     root_items.push(item);
                 } else {
                     let group = *groups.entry(constructor.group).or_insert_with(|| {
-                        let group = create_menu_item(constructor.group, vec![], ctx);
+                        let group =
+                            create_menu_item(constructor.group, Uuid::new_v4(), vec![], ctx);
                         root_items.push(group);
                         group
                     });
-                    ctx.inner().send_message(MenuItemMessage::add_item(
-                        group,
-                        MessageDirection::ToWidget,
-                        item,
-                    ));
+                    ctx.inner().send(group, MenuItemMessage::AddItem(item));
                 }
             }
         }
 
-        let menu = create_menu_item(name, root_items.clone(), ctx);
+        let menu = create_menu_item(name, Self::MENU, root_items.clone(), ctx);
 
         for root_item in root_items.iter().chain(&[menu]) {
-            ctx.inner().send_message(MenuItemMessage::sort(
+            ctx.inner().send(
                 *root_item,
-                MessageDirection::ToWidget,
-                SortingPredicate::sort_by_text(),
-            ))
+                MenuItemMessage::Sort(SortingPredicate::sort_by_text()),
+            )
         }
 
         Self {
@@ -95,7 +94,10 @@ impl UiMenu {
         selection: &Selection,
     ) {
         if let Some(MenuItemMessage::Click) = message.data::<MenuItemMessage>() {
-            if let Some(constructor) = self.constructor_views.get_mut(&message.destination()) {
+            if let Some(constructor) = self
+                .constructor_views
+                .get_mut(&message.destination().to_variant())
+            {
                 if let VariantResult::Handle(ui_node_handle) = constructor(&mut scene.ui) {
                     let sub_graph = scene.ui.take_reserve_sub_graph(ui_node_handle);
                     let parent = if let Some(selection) = selection.as_ui() {

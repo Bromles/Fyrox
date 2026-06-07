@@ -20,21 +20,21 @@
 
 use crate::{
     border::BorderBuilder,
-    core::{pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
     decorator::{DecoratorBuilder, DecoratorMessage},
-    define_constructor,
     message::{MessageDirection, UiMessage},
     style::{resource::StyleResourceExt, Style},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
+use fyrox_core::pool::ObjectOrVariant;
 
+use crate::message::MessageData;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
-#[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
 #[reflect(derived_type = "UiNode")]
-#[type_uuid(id = "8d8f114d-7fc6-4d7e-8f57-cd4e39958c36")]
+#[reflect(type_uuid = "8d8f114d-7fc6-4d7e-8f57-cd4e39958c36")]
 pub struct ToggleButton {
     pub widget: Widget,
     pub decorator: Handle<UiNode>,
@@ -48,15 +48,7 @@ pub enum ToggleButtonMessage {
     Toggled(bool),
     Content(Handle<UiNode>),
 }
-
-impl ToggleButtonMessage {
-    define_constructor!(
-        ToggleButtonMessage:Toggled => fn toggled(bool), layout: false
-    );
-    define_constructor!(
-        ToggleButtonMessage:Content => fn content(Handle<UiNode>), layout: false
-    );
-}
+impl MessageData for ToggleButtonMessage {}
 
 impl ToggleButton {
     /// A name of style property, that defines corner radius of a toggle button.
@@ -78,6 +70,7 @@ impl ConstructorProvider<UiNode, UserInterface> for ToggleButton {
             .with_variant("ToggleButton", |ui| {
                 ToggleButtonBuilder::new(WidgetBuilder::new().with_name("ToggleButton"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -99,51 +92,28 @@ impl Control for ToggleButton {
                     WidgetMessage::MouseDown { .. } => {
                         ui.capture_mouse(self.handle());
                     }
-                    WidgetMessage::MouseUp { .. } => {
-                        if ui.captured_node() == self.handle() {
-                            let new_state = !self.is_toggled;
+                    WidgetMessage::MouseUp { .. } if ui.captured_node() == self.handle() => {
+                        let new_state = !self.is_toggled;
 
-                            ui.send_message(ToggleButtonMessage::toggled(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                new_state,
-                            ));
+                        ui.send(self.handle(), ToggleButtonMessage::Toggled(new_state));
 
-                            ui.release_mouse_capture();
-                        }
+                        ui.release_mouse_capture();
                     }
                     _ => {}
                 }
             }
-        } else if let Some(msg) = message.data::<ToggleButtonMessage>() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    ToggleButtonMessage::Toggled(value) => {
-                        if self.is_toggled != *value {
-                            self.is_toggled = *value;
-
-                            ui.send_message(DecoratorMessage::select(
-                                self.decorator,
-                                MessageDirection::ToWidget,
-                                self.is_toggled,
-                            ));
-
-                            ui.send_message(message.reverse());
-                        }
+        } else if let Some(msg) = message.data_for::<ToggleButtonMessage>(self.handle()) {
+            match msg {
+                ToggleButtonMessage::Toggled(value) => {
+                    if self.is_toggled != *value {
+                        self.is_toggled = *value;
+                        ui.send(self.decorator, DecoratorMessage::Select(self.is_toggled));
+                        ui.try_send_response(message);
                     }
-                    ToggleButtonMessage::Content(content) => {
-                        ui.send_message(WidgetMessage::remove(
-                            self.content,
-                            MessageDirection::ToWidget,
-                        ));
-                        ui.send_message(WidgetMessage::link(
-                            *content,
-                            MessageDirection::ToWidget,
-                            self.decorator,
-                        ));
-                    }
+                }
+                ToggleButtonMessage::Content(content) => {
+                    ui.send(self.content, WidgetMessage::Remove);
+                    ui.send(*content, WidgetMessage::LinkWith(self.decorator));
                 }
             }
         }
@@ -170,12 +140,12 @@ impl ToggleButtonBuilder {
         self
     }
 
-    pub fn with_content(mut self, content: Handle<UiNode>) -> Self {
-        self.content = content;
+    pub fn with_content(mut self, content: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = content.to_base();
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<ToggleButton> {
         let decorator = DecoratorBuilder::new(
             BorderBuilder::new(WidgetBuilder::new().with_child(self.content))
                 .with_corner_radius(ctx.style.property(ToggleButton::CORNER_RADIUS))
@@ -185,7 +155,8 @@ impl ToggleButtonBuilder {
         .with_pressable(true)
         .with_selected_brush(ctx.style.property(Style::BRUSH_BRIGHT_BLUE))
         .with_selected(self.is_toggled)
-        .build(ctx);
+        .build(ctx)
+        .to_base();
 
         let canvas = ToggleButton {
             widget: self.widget_builder.with_child(decorator).build(ctx),
@@ -193,7 +164,7 @@ impl ToggleButtonBuilder {
             is_toggled: self.is_toggled,
             content: self.content,
         };
-        ctx.add_node(UiNode::new(canvas))
+        ctx.add(canvas)
     }
 }
 

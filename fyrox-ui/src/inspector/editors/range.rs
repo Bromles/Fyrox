@@ -24,7 +24,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     numeric::NumericType,
@@ -57,11 +57,11 @@ impl<T: NumericType> PropertyEditorDefinition for RangePropertyEditorDefinition<
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Range<T>>()?;
 
-        Ok(PropertyEditorInstance::Simple {
-            editor: RangeEditorBuilder::new(WidgetBuilder::new())
+        Ok(PropertyEditorInstance::simple(
+            RangeEditorBuilder::new(WidgetBuilder::new())
                 .with_value(value.clone())
                 .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -70,10 +70,9 @@ impl<T: NumericType> PropertyEditorDefinition for RangePropertyEditorDefinition<
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Range<T>>()?;
 
-        Ok(Some(RangeEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            RangeEditorMessage::Value(value.clone()),
         )))
     }
 
@@ -85,7 +84,7 @@ impl<T: NumericType> PropertyEditorDefinition for RangePropertyEditorDefinition<
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }

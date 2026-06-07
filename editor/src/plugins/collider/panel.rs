@@ -21,16 +21,16 @@
 use crate::{
     command::{Command, CommandGroup, SetPropertyCommand},
     fyrox::{
-        core::{algebra::Vector3, pool::Handle, reflect::Reflect, TypeUuidProvider},
+        core::{algebra::Vector3, pool::Handle, reflect::Reflect},
         engine::Engine,
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
         gui::{
             button::{ButtonBuilder, ButtonMessage},
-            message::{MessageDirection, UiMessage},
+            message::UiMessage,
             stack_panel::StackPanelBuilder,
             utils::make_simple_tooltip,
             widget::{WidgetBuilder, WidgetMessage},
-            BuildContext, HorizontalAlignment, Orientation, UiNode, UserInterface,
+            BuildContext, HorizontalAlignment, Orientation, UserInterface,
         },
         scene::{
             collider::{Collider, ColliderShape},
@@ -42,11 +42,13 @@ use crate::{
     scene::{commands::GameSceneContext, GameScene, Selection},
     Message,
 };
+use fyrox::gui::button::Button;
+use fyrox::gui::stack_panel::StackPanel;
 
 pub struct ColliderControlPanel {
-    pub root_widget: Handle<UiNode>,
-    fit: Handle<UiNode>,
-    edit: Handle<UiNode>,
+    pub root_widget: Handle<StackPanel>,
+    fit: Handle<Button>,
+    edit: Handle<Button>,
 }
 
 fn set_property<T: Reflect>(
@@ -62,7 +64,9 @@ fn set_property<T: Reflect>(
             ctx.get_mut::<GameSceneContext>()
                 .scene
                 .graph
-                .node_mut(selected_collider)
+                .try_get_node_mut(selected_collider)
+                .ok()
+                .map(|n| n as &mut dyn Reflect)
         },
     )));
 }
@@ -114,10 +118,7 @@ impl ColliderControlPanel {
     }
 
     pub fn destroy(self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::remove(
-            self.root_widget,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.root_widget, WidgetMessage::Remove);
     }
 
     pub fn handle_ui_message(
@@ -142,7 +143,7 @@ impl ColliderControlPanel {
             let mut commands = Vec::new();
 
             for collider in selection.nodes() {
-                let Some(collider_ref) = scene.graph.try_get_of_type::<Collider>(*collider) else {
+                let Ok(collider_ref) = scene.graph.try_get_of_type::<Collider>(*collider) else {
                     continue;
                 };
 
@@ -198,7 +199,7 @@ impl ColliderControlPanel {
                     ColliderShape::Capsule(_) => {
                         let local_center = scene
                             .graph
-                            .try_get(collider_ref.parent())
+                            .try_get_node(collider_ref.parent())
                             .map(|p| p.global_transform())
                             .unwrap_or_default()
                             .try_inverse()
@@ -236,7 +237,7 @@ impl ColliderControlPanel {
             }
         } else if message.destination() == self.edit {
             sender.send(Message::SetInteractionMode(
-                ColliderShapeInteractionMode::type_uuid(),
+                ColliderShapeInteractionMode::type_info().type_uuid,
             ));
         }
     }

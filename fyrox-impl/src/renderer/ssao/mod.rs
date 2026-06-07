@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::resources::RendererResources;
 use crate::{
     core::{
         algebra::{Matrix3, Matrix4, Vector2, Vector3},
@@ -26,20 +25,21 @@ use crate::{
         math::{lerpf, Rect},
         sstorage::ImmutableString,
     },
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, GpuFrameBuffer},
+        gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
+        server::GraphicsServer,
+    },
     rand::Rng,
     renderer::{
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
         },
-        framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, GpuFrameBuffer},
-            gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
-            server::GraphicsServer,
-        },
         gbuffer::GBuffer,
         make_viewport_matrix,
+        resources::RendererResources,
         ssao::blur::Blur,
         RenderPassStatistics,
     },
@@ -139,12 +139,15 @@ impl ScreenSpaceAmbientOcclusionRenderer {
 
     pub(crate) fn render(
         &self,
+        server: &dyn GraphicsServer,
         gbuffer: &GBuffer,
         projection_matrix: Matrix4<f32>,
         view_matrix: Matrix3<f32>,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("SSAO");
+
         let mut stats = RenderPassStatistics::default();
 
         let viewport = Rect::new(0, 0, self.width, self.height);
@@ -206,9 +209,12 @@ impl ScreenSpaceAmbientOcclusionRenderer {
             None,
         )?;
 
-        stats += self
-            .blur
-            .render(self.raw_ao_map(), uniform_buffer_cache, renderer_resources)?;
+        stats += self.blur.render(
+            server,
+            self.raw_ao_map(),
+            uniform_buffer_cache,
+            renderer_resources,
+        )?;
 
         Ok(stats)
     }

@@ -23,25 +23,19 @@
 
 #![warn(missing_docs)]
 
-use crate::style::resource::StyleResourceExt;
-use crate::style::{Style, StyledProperty};
-use crate::widget::WidgetBuilder;
 use crate::{
     border::{Border, BorderBuilder},
     brush::Brush,
     core::{
-        algebra::Vector2, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
+        algebra::Vector2, pool::Handle, reflect::prelude::*, variable::InheritableVariable,
         visitor::prelude::*,
     },
-    define_constructor,
     draw::DrawingContext,
-    message::{MessageDirection, UiMessage},
-    widget::{Widget, WidgetMessage},
+    message::{MessageData, UiMessage},
+    style::{resource::StyleResourceExt, Style, StyledProperty},
+    widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, UiNode, UserInterface,
 };
-
-use fyrox_core::uuid_provider;
-use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut};
 
@@ -59,29 +53,7 @@ pub enum DecoratorMessage {
     /// Sets a new brush for `Selected` state.
     SelectedBrush(StyledProperty<Brush>),
 }
-
-impl DecoratorMessage {
-    define_constructor!(
-        /// Creates a [`DecoratorMessage::Select`] message.
-        DecoratorMessage:Select => fn select(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates a [`DecoratorMessage::HoverBrush`] message.
-        DecoratorMessage:HoverBrush => fn hover_brush(StyledProperty<Brush>), layout: false
-    );
-    define_constructor!(
-        /// Creates a [`DecoratorMessage::NormalBrush`] message.
-        DecoratorMessage:NormalBrush => fn normal_brush(StyledProperty<Brush>), layout: false
-    );
-    define_constructor!(
-        /// Creates a [`DecoratorMessage::PressedBrush`] message.
-        DecoratorMessage:PressedBrush => fn pressed_brush(StyledProperty<Brush>), layout: false
-    );
-    define_constructor!(
-        /// Creates a [`DecoratorMessage::SelectedBrush`] message.
-        DecoratorMessage:SelectedBrush => fn selected_brush(StyledProperty<Brush>), layout: false
-    );
-}
+impl MessageData for DecoratorMessage {}
 
 /// A visual element that is used to highlight standard states of interactive widgets. It has "pressed", "hover",
 /// "selected", "normal" appearances (only one can be active at a time):
@@ -91,7 +63,7 @@ impl DecoratorMessage {
 /// - `Hovered` - mouse is over decorator.
 /// - `Normal` - not selected, pressed, hovered.
 ///
-/// This element is widely used to provide some generic visual behaviour for various widgets. For example it used
+/// This element is widely used to provide some generic visual behavior for various widgets. For example, it used
 /// to decorate buttons - it has use of three of these states. When it is clicked - the decorator will be in `Pressed`
 /// state, when hovered by a cursor - `Hovered`, otherwise it stays in `Normal` state.
 ///
@@ -106,17 +78,21 @@ impl DecoratorMessage {
 /// #     widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
-/// fn create_decorator(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::decorator::Decorator;
+///
+/// fn create_decorator(ctx: &mut BuildContext) -> Handle<Decorator> {
 ///     DecoratorBuilder::new(BorderBuilder::new(WidgetBuilder::new()))
 ///         .with_hover_brush(Brush::Solid(Color::opaque(0, 255, 0)).into())
 ///         .build(ctx)
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "bb4b60aa-c657-4ed6-8db6-d7f374397c73"
+)]
 pub struct Decorator {
     /// Base widget of the decorator.
-    #[component(include)]
     pub border: Border,
     /// Current brush used for `Normal` state.
     pub normal_brush: InheritableVariable<StyledProperty<Brush>>,
@@ -140,6 +116,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Decorator {
                     WidgetBuilder::new().with_name("Decorator"),
                 ))
                 .build(&mut ui.build_ctx())
+                .to_base()
                 .into()
             })
             .with_group("Visual")
@@ -159,8 +136,6 @@ impl DerefMut for Decorator {
         &mut self.border
     }
 }
-
-uuid_provider!(Decorator = "bb4b60aa-c657-4ed6-8db6-d7f374397c73");
 
 impl Control for Decorator {
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
@@ -188,35 +163,32 @@ impl Control for Decorator {
                     if *self.is_selected != value {
                         self.is_selected.set_value_and_mark_modified(value);
 
-                        ui.send_message(WidgetMessage::background(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            if *self.is_selected {
+                            WidgetMessage::Background(if *self.is_selected {
                                 (*self.selected_brush).clone()
                             } else {
                                 (*self.normal_brush).clone()
-                            },
-                        ));
+                            }),
+                        );
                     }
                 }
                 DecoratorMessage::HoverBrush(brush) => {
                     self.hover_brush.set_value_and_mark_modified(brush.clone());
                     if self.has_descendant(ui.picked_node, ui) {
-                        ui.send_message(WidgetMessage::background(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            (*self.hover_brush).clone(),
-                        ));
+                            WidgetMessage::Background((*self.hover_brush).clone()),
+                        );
                     }
                 }
                 DecoratorMessage::NormalBrush(brush) => {
                     self.normal_brush.set_value_and_mark_modified(brush.clone());
                     if !*self.is_selected && !self.has_descendant(ui.picked_node, ui) {
-                        ui.send_message(WidgetMessage::background(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            (*self.normal_brush).clone(),
-                        ));
+                            WidgetMessage::Background((*self.normal_brush).clone()),
+                        );
                     }
                 }
                 DecoratorMessage::PressedBrush(brush) => {
@@ -227,11 +199,10 @@ impl Control for Decorator {
                     self.selected_brush
                         .set_value_and_mark_modified(brush.clone());
                     if *self.is_selected {
-                        ui.send_message(WidgetMessage::background(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            (*self.selected_brush).clone(),
-                        ));
+                            WidgetMessage::Background((*self.selected_brush).clone()),
+                        );
                     }
                 }
             }
@@ -241,48 +212,50 @@ impl Control for Decorator {
             {
                 match msg {
                     WidgetMessage::MouseLeave => {
-                        ui.send_message(WidgetMessage::background(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            if *self.is_selected {
+                            WidgetMessage::Background(if *self.is_selected {
                                 (*self.selected_brush).clone()
                             } else {
                                 (*self.normal_brush).clone()
-                            },
-                        ));
+                            }),
+                        );
                     }
                     WidgetMessage::MouseEnter => {
-                        ui.send_message(WidgetMessage::background(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            if *self.is_selected {
+                            WidgetMessage::Background(if *self.is_selected {
                                 (*self.selected_brush).clone()
                             } else {
                                 (*self.hover_brush).clone()
-                            },
-                        ));
+                            }),
+                        );
                     }
                     WidgetMessage::MouseDown { .. } if *self.is_pressable => {
-                        ui.send_message(WidgetMessage::background(
+                        ui.send(
                             self.handle(),
-                            MessageDirection::ToWidget,
-                            (*self.pressed_brush).clone(),
-                        ));
+                            WidgetMessage::Background((*self.pressed_brush).clone()),
+                        );
                     }
                     WidgetMessage::MouseUp { .. } => {
                         if *self.is_selected {
-                            ui.send_message(WidgetMessage::background(
+                            ui.send(
                                 self.handle(),
-                                MessageDirection::ToWidget,
-                                (*self.selected_brush).clone(),
-                            ));
+                                WidgetMessage::Background((*self.selected_brush).clone()),
+                            );
                         } else {
-                            ui.send_message(WidgetMessage::background(
+                            ui.send(
                                 self.handle(),
-                                MessageDirection::ToWidget,
-                                (*self.normal_brush).clone(),
-                            ));
+                                WidgetMessage::Background((*self.normal_brush).clone()),
+                            );
                         }
+                    }
+                    WidgetMessage::ResetVisual => {
+                        self.is_selected.set_value_and_mark_modified(false);
+                        ui.send(
+                            self.handle(),
+                            WidgetMessage::Background((*self.normal_brush).clone()),
+                        );
                     }
                     _ => {}
                 }
@@ -361,8 +334,28 @@ impl DecoratorBuilder {
         self
     }
 
+    /// Sets new brushes for the decorator from the `ok` style (red by default).
+    pub fn with_ok_style(mut self, ctx: &mut BuildContext) -> Self {
+        self.border_builder.widget_builder.foreground =
+            Some(ctx.style.property(Style::BRUSH_DARKER));
+        self.normal_brush = Some(ctx.style.property::<Brush>(Style::BRUSH_OK_NORMAL));
+        self.hover_brush = Some(ctx.style.property::<Brush>(Style::BRUSH_OK_HOVER));
+        self.pressed_brush = Some(ctx.style.property::<Brush>(Style::BRUSH_OK_PRESSED));
+        self
+    }
+
+    /// Sets new brushes for the decorator from the `cancel` style (red by default).
+    pub fn with_cancel_style(mut self, ctx: &mut BuildContext) -> Self {
+        self.border_builder.widget_builder.foreground =
+            Some(ctx.style.property(Style::BRUSH_DARKER));
+        self.normal_brush = Some(ctx.style.property::<Brush>(Style::BRUSH_CANCEL_NORMAL));
+        self.hover_brush = Some(ctx.style.property::<Brush>(Style::BRUSH_CANCEL_HOVER));
+        self.pressed_brush = Some(ctx.style.property::<Brush>(Style::BRUSH_CANCEL_PRESSED));
+        self
+    }
+
     /// Finishes decorator instance building.
-    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<Decorator> {
         let normal_brush = self
             .normal_brush
             .unwrap_or_else(|| ctx.style.property::<Brush>(Style::BRUSH_LIGHT));
@@ -389,7 +382,7 @@ impl DecoratorBuilder {
             *border.background = normal_brush.clone();
         }
 
-        let node = UiNode::new(Decorator {
+        let node = Decorator {
             border,
             normal_brush: normal_brush.into(),
             hover_brush: hover_brush.into(),
@@ -397,8 +390,8 @@ impl DecoratorBuilder {
             selected_brush: selected_brush.into(),
             is_selected: self.selected.into(),
             is_pressable: self.pressable.into(),
-        });
-        ctx.add_node(node)
+        };
+        ctx.add(node)
     }
 }
 

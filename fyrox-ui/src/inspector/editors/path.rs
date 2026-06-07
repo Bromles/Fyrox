@@ -24,7 +24,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     path::{PathEditorBuilder, PathEditorMessage},
@@ -46,15 +46,15 @@ impl PropertyEditorDefinition for PathPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<PathBuf>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: PathEditorBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            PathEditorBuilder::new(
                 WidgetBuilder::new()
                     .with_margin(Thickness::top_bottom(1.0))
                     .with_vertical_alignment(VerticalAlignment::Center),
             )
             .with_path(value.clone())
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -62,10 +62,9 @@ impl PropertyEditorDefinition for PathPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<PathBuf>()?;
-        Ok(Some(PathEditorMessage::path(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            PathEditorMessage::Path(value.clone()),
         )))
     }
 
@@ -75,7 +74,7 @@ impl PropertyEditorDefinition for PathPropertyEditorDefinition {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }

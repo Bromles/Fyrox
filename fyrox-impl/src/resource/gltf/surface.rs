@@ -41,6 +41,7 @@ use crate::{
     scene::mesh::buffer::{VertexAttributeUsage, VertexReadTrait},
 };
 
+use std::fmt::Display;
 use std::num::TryFromIntError;
 
 /// This type represents any error that may occur while importing mesh data from glTF.
@@ -51,10 +52,6 @@ pub enum SurfaceDataError {
     CountMismatch,
     /// The mesh vertex data in the glTF files does not include position vectors.
     MissingPosition,
-    /// The mesh vertex data in the glTF files does not include normal vectors.
-    MissingNormal,
-    /// The mesh vertex data in the glTF files does not include UV coordinates.
-    MissingTexCoords,
     /// The mesh vertex data in the glTF files does not include bone weight values.
     MissingBoneWeight,
     /// The mesh vertex data in the glTF files does not include bone index values.
@@ -83,6 +80,28 @@ pub enum SurfaceDataError {
     Fetch(buffer::VertexFetchError),
 }
 
+impl std::error::Error for SurfaceDataError {}
+
+impl Display for SurfaceDataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SurfaceDataError::CountMismatch => f.write_str("Count mismatch"),
+            SurfaceDataError::MissingPosition => f.write_str("Missing position"),
+            SurfaceDataError::MissingBoneWeight => f.write_str("Missing bone weight"),
+            SurfaceDataError::MissingBoneIndex => f.write_str("Missing bone index"),
+            SurfaceDataError::InvalidBoneIndex => f.write_str("Invalid bone index"),
+            SurfaceDataError::InvalidMode => f.write_str("Invalid mode"),
+            SurfaceDataError::InvalidIndex => f.write_str("Invalid index"),
+            SurfaceDataError::Int(error) => Display::fmt(error, f),
+            SurfaceDataError::InvalidVertexCount(geometry_type, count) => {
+                write!(f, "Cannot have {count} vertices {geometry_type}.")
+            }
+            SurfaceDataError::Validation(error) => Display::fmt(error, f),
+            SurfaceDataError::Fetch(error) => Display::fmt(error, f),
+        }
+    }
+}
+
 impl From<ValidationError> for SurfaceDataError {
     fn from(error: ValidationError) -> Self {
         SurfaceDataError::Validation(error)
@@ -106,6 +125,16 @@ pub enum GeometryType {
     Triangles,
     TriangleStrip,
     TriangleFan,
+}
+
+impl Display for GeometryType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GeometryType::Triangles => f.write_str("triangles"),
+            GeometryType::TriangleStrip => f.write_str("triangle strip"),
+            GeometryType::TriangleFan => f.write_str("triangle fan"),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -462,19 +491,22 @@ impl GltfVertexConvert for StaticVertex {
         let pos_iter = reader
             .read_positions()
             .ok_or(SurfaceDataError::MissingPosition)?;
-        let mut norm_iter = reader
-            .read_normals()
-            .ok_or(SurfaceDataError::MissingNormal)?;
+        let mut norm_iter = reader.read_normals();
         let mut tang_iter = reader.read_tangents();
-        let mut uv_iter = reader
-            .read_tex_coords(0)
-            .ok_or(SurfaceDataError::MissingTexCoords)?
-            .into_f32();
+        let mut uv_iter = reader.read_tex_coords(0).map(|i| i.into_f32());
         let mut result: Vec<StaticVertex> = Vec::with_capacity(pos_iter.len());
         for pos in pos_iter {
             let pos: Vector3<f32> = Vector3::from(pos);
-            let norm: Option<Vector3<f32>> = norm_iter.next().map(Vector3::from);
-            let uv: Option<Vector2<f32>> = uv_iter.next().map(Vector2::from);
+            let norm: Option<Vector3<f32>> = if let Some(iter) = norm_iter.as_mut() {
+                iter.next().map(Vector3::from)
+            } else {
+                Some(Vector3::new(0.0, 1.0, 0.0))
+            };
+            let uv: Option<Vector2<f32>> = if let Some(iter) = uv_iter.as_mut() {
+                iter.next().map(Vector2::from)
+            } else {
+                Some(Vector2::repeat(0.0))
+            };
             let tang: Option<Vector4<f32>> = if let Some(iter) = tang_iter.as_mut() {
                 iter.next().map(Vector4::from)
             } else {
@@ -504,14 +536,9 @@ impl GltfVertexConvert for AnimatedVertex {
         let pos_iter = reader
             .read_positions()
             .ok_or(SurfaceDataError::MissingPosition)?;
-        let mut norm_iter = reader
-            .read_normals()
-            .ok_or(SurfaceDataError::MissingNormal)?;
+        let mut norm_iter = reader.read_normals();
         let mut tang_iter = reader.read_tangents();
-        let mut uv_iter = reader
-            .read_tex_coords(0)
-            .ok_or(SurfaceDataError::MissingTexCoords)?
-            .into_f32();
+        let mut uv_iter = reader.read_tex_coords(0).map(|i| i.into_f32());
         let mut wgt_iter = reader
             .read_weights(0)
             .ok_or(SurfaceDataError::MissingBoneWeight)?
@@ -522,8 +549,16 @@ impl GltfVertexConvert for AnimatedVertex {
         let mut result: Vec<AnimatedVertex> = Vec::with_capacity(pos_iter.len());
         for pos in pos_iter {
             let pos: Vector3<f32> = Vector3::from(pos);
-            let norm: Option<Vector3<f32>> = norm_iter.next().map(Vector3::from);
-            let uv: Option<Vector2<f32>> = uv_iter.next().map(Vector2::from);
+            let norm: Option<Vector3<f32>> = if let Some(iter) = norm_iter.as_mut() {
+                iter.next().map(Vector3::from)
+            } else {
+                Some(Vector3::new(0.0, 1.0, 0.0))
+            };
+            let uv: Option<Vector2<f32>> = if let Some(iter) = uv_iter.as_mut() {
+                iter.next().map(Vector2::from)
+            } else {
+                Some(Vector2::repeat(0.0))
+            };
             let bone_weights: Option<[f32; 4]> = wgt_iter.next();
             let bone_indices: Option<[u8; 4]> = read_valid_index(&mut jnt_iter)?;
             let tang: Option<Vector4<f32>> = if let Some(iter) = tang_iter.as_mut() {

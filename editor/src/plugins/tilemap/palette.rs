@@ -22,47 +22,43 @@
 //! is responsible for displaying a grid of tiles where the user may select tiles,
 //! drag tiles, and use drawing tools upon the tiles.
 
-use fyrox::scene::tilemap::brush::TileMapBrushResource;
-use fyrox::scene::tilemap::tileset::OptionTileSet;
-use fyrox::scene::tilemap::{ResourceTilePosition, RotTileHandle};
-
 use super::{commands::*, *};
-use crate::asset::item::AssetItem;
-use crate::command::{Command, CommandGroup};
-use crate::fyrox::{
-    core::{
-        algebra::{Matrix3, Point2, Vector2},
-        color::Color,
-        math::Rect,
-        pool::Handle,
-        reflect::prelude::*,
-        type_traits::prelude::*,
-        visitor::prelude::*,
-    },
-    fxhash::FxHashMap,
-    fxhash::FxHashSet,
-    graph::BaseSceneGraph,
-    gui::{
-        brush::Brush,
-        define_constructor, define_widget_deref,
-        draw::{CommandTexture, Draw, DrawingContext},
-        formatted_text::{FormattedText, FormattedTextBuilder},
-        message::CursorIcon,
-        message::{KeyCode, MessageDirection, MouseButton, UiMessage},
-        widget::{Widget, WidgetBuilder, WidgetMessage},
-        BuildContext, Control, UiNode, UserInterface,
-    },
-    material::{Material, MaterialResource},
-    resource::texture::TextureKind,
-    scene::tilemap::{
-        tileset::{TileSetPageSource, TileSetRef},
-        OrthoTransformation, TileBook, TilePaletteStage, TileRect, TileRenderData, TileSetUpdate,
-        TileSource, TransTilesUpdate,
+use crate::{
+    asset::item::AssetItem,
+    command::{Command, CommandGroup},
+    fyrox::{
+        core::{
+            algebra::{Matrix3, Point2, Vector2},
+            color::Color,
+            math::Rect,
+            pool::Handle,
+            reflect::prelude::*,
+            visitor::prelude::*,
+            SafeLock,
+        },
+        fxhash::{FxHashMap, FxHashSet},
+        graph::SceneGraph,
+        gui::{
+            brush::Brush,
+            define_widget_deref,
+            draw::{CommandTexture, Draw, DrawingContext},
+            formatted_text::{FormattedText, FormattedTextBuilder},
+            message::CursorIcon,
+            message::{KeyCode, MessageDirection, MouseButton, UiMessage},
+            widget::{Widget, WidgetBuilder, WidgetMessage},
+            BuildContext, Control, UiNode, UserInterface,
+        },
+        material::{Material, MaterialResource},
+        resource::texture::TextureKind,
+        scene::tilemap::{
+            brush::TileMapBrushResource,
+            tileset::{OptionTileSet, TileSetPageSource, TileSetRef},
+            OrthoTransformation, ResourceTilePosition, RotTileHandle, TileBook, TilePaletteStage,
+            TileRect, TileRenderData, TileSetUpdate, TileSource, TransTilesUpdate,
+        },
     },
 };
-
 use std::cell::RefCell;
-use std::ops::{Deref, DerefMut};
 
 /// The tint of the background material that is used for tile atlas pages of tile sets.
 /// This tint makes it possible to visibly distinguish the background material from actual tiles.
@@ -107,36 +103,7 @@ pub enum PaletteMessage {
     /// when de-focusing whatever was previously in focus.
     BeginMotion(Vector2<f32>),
 }
-
-impl PaletteMessage {
-    define_constructor!(
-        /// Display the given page of the given resource.
-        PaletteMessage:SetPage => fn set_page(source: TileBook, page: Option<Vector2<i32>>), layout: false);
-    define_constructor!(
-        /// Center the view on the given grid position.
-        PaletteMessage:Center => fn center(Vector2<i32>), layout: false);
-    define_constructor!(
-        /// Select all tiles/pages in this view.
-        PaletteMessage:SelectAll => fn select_all(), layout: false);
-    define_constructor!(
-        /// Select the given position.
-        PaletteMessage:SelectOne => fn select_one(Vector2<i32>), layout: false);
-    define_constructor!(
-        /// Delete the selected tiles/pages in this view.
-        PaletteMessage:Delete => fn delete(), layout: false);
-    define_constructor!(
-        /// Set the tint of the background material.
-        PaletteMessage:MaterialColor => fn material_color(Color), layout: false);
-    define_constructor!(
-        /// Notify this widget that the editor state has changed.
-        PaletteMessage:SyncToState => fn sync_to_state(), layout: false);
-    define_constructor!(
-        /// Notify that the user has pressed a mouse button.
-        /// This is needed in order to delay the start of mouse operations
-        /// by one frame so that they do not clash with operations that happen
-        /// when de-focusing whatever was previously in focus.
-        PaletteMessage:BeginMotion => fn begin_motion(Vector2<f32>), layout: false);
-}
+impl MessageData for PaletteMessage {}
 
 /// The operation of the current mouse motion.
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -197,8 +164,8 @@ fn calc_slice_coord(position: f32, step: f32) -> usize {
 
 /// Displays a scrollable grid of till cells, with options to allow the tiles
 /// to be selected, dragged, and edits in various ways.
-#[derive(Clone, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "5356a864-c026-4bd7-a4b1-30bacf77d8fa")]
+#[derive(Clone, Visit, Reflect)]
+#[reflect(type_uuid = "5356a864-c026-4bd7-a4b1-30bacf77d8fa")]
 #[reflect(derived_type = "UiNode")]
 pub struct PaletteWidget {
     widget: Widget,
@@ -700,11 +667,7 @@ impl PaletteWidget {
     }
 
     fn send_cursor_icon(&self, icon: Option<CursorIcon>, ui: &mut UserInterface) {
-        ui.send_message(WidgetMessage::cursor(
-            self.handle(),
-            MessageDirection::ToWidget,
-            icon,
-        ));
+        ui.send(self.handle(), WidgetMessage::Cursor(icon));
     }
     fn sync_to_state(&mut self, ui: &mut UserInterface) {
         let state = self.state.lock();
@@ -731,24 +694,25 @@ impl PaletteWidget {
             self.editable
                 && self.kind == TilePaletteStage::Tiles
                 && state.drawing_mode == DrawingMode::Editor
-                && editor.lock().slice_mode()
+                && editor.safe_lock().slice_mode()
         } else {
             false
         };
         self.colliders.clear();
-        if self.kind == TilePaletteStage::Tiles
-            && self.page.is_some()
-            && !state.visible_colliders.is_empty()
-        {
-            let page = self.page.unwrap();
-            self.content
-                .tile_collider_loop(page, |pos, uuid, color, tile_collider| {
-                    if !state.visible_colliders.contains(&uuid) {
-                        return;
-                    }
-                    self.colliders
-                        .push(ColliderHighlight::new(pos, color, tile_collider.clone()));
-                });
+        if let Some(page) = self.page {
+            if self.kind == TilePaletteStage::Tiles && !state.visible_colliders.is_empty() {
+                self.content
+                    .tile_collider_loop(page, |pos, uuid, color, tile_collider| {
+                        if !state.visible_colliders.contains(&uuid) {
+                            return;
+                        }
+                        self.colliders.push(ColliderHighlight::new(
+                            pos,
+                            color,
+                            tile_collider.clone(),
+                        ));
+                    });
+            }
         }
         if self.editable {
             self.overlay.clear();
@@ -763,7 +727,7 @@ impl PaletteWidget {
                 DrawingMode::Editor => {
                     if let Some(editor) = &state.active_editor {
                         if let &Some(page) = &self.page {
-                            editor.lock().highlight(
+                            editor.safe_lock().highlight(
                                 &mut self.highlight,
                                 page,
                                 &self.content,
@@ -830,7 +794,7 @@ impl PaletteWidget {
             "".into()
         };
         self.position_text.set_text(text);
-        self.position_text.build();
+        self.position_text.measure_and_arrange();
     }
 
     fn tile_point_to_grid_pos(&self, pos: Vector2<f32>) -> Vector2<i32> {
@@ -963,12 +927,13 @@ impl PaletteWidget {
     }
     fn send_new_page(&mut self, page: Vector2<i32>, ui: &mut UserInterface) {
         self.page = Some(page);
-        ui.send_message(PaletteMessage::set_page(
+        ui.post(
             self.handle,
-            MessageDirection::FromWidget,
-            self.content.clone(),
-            Some(page),
-        ));
+            PaletteMessage::SetPage {
+                source: self.content.clone(),
+                page: Some(page),
+            },
+        );
     }
     fn drawing_mode(&self) -> DrawingMode {
         if self.editable {
@@ -1363,7 +1328,7 @@ impl PaletteWidget {
             DrawingMode::Editor => {
                 if let Some(editor) = &state.active_editor {
                     if let Some(handle) = TileDefinitionHandle::try_new(page, end) {
-                        let editor = editor.lock();
+                        let editor = editor.safe_lock();
                         editor.draw_tile(
                             handle,
                             sub_pos,
@@ -1929,17 +1894,20 @@ impl Control for PaletteWidget {
                     initial_view_position: self.view_position,
                     click_position: *pos,
                 };
+                self.invalidate_visual();
             } else if *button == MouseButton::Left && !message.handled() {
                 ui.send_message(DelayedMessage::message(
                     MOUSE_CLICK_DELAY_FRAMES,
-                    PaletteMessage::begin_motion(self.handle(), MessageDirection::ToWidget, *pos),
+                    UiMessage::for_widget(self.handle(), PaletteMessage::BeginMotion(*pos)),
                 ));
+                self.invalidate_visual();
             }
         } else if let Some(WidgetMessage::MouseUp { pos, button, .. }) = message.data() {
             ui.release_mouse_capture();
             if *button == MouseButton::Left {
                 let mouse_pos = self.calc_mouse_position(*pos);
                 self.end_motion(self.drawing_mode(), mouse_pos, ui);
+                self.invalidate_visual();
             }
             self.mode = MouseMode::None;
         } else if let Some(WidgetMessage::MouseMove { pos, .. }) = message.data() {
@@ -1954,13 +1922,16 @@ impl Control for PaletteWidget {
             self.slice_position = mouse_pos.subgrid;
             self.set_cursor_position(Some(mouse_pos.grid));
             self.continue_motion(self.drawing_mode(), mouse_pos, ui);
+            self.invalidate_visual();
         } else if let Some(WidgetMessage::MouseLeave) = message.data() {
             self.set_cursor_position(None);
+            self.invalidate_visual();
         } else if let Some(WidgetMessage::MouseWheel { amount, pos }) = message.data() {
             let tile_pos = self.screen_point_to_tile_point(*pos);
             self.zoom = (self.zoom + 0.1 * amount).clamp(0.2, 2.0);
             let new_pos = self.tile_point_to_screen_point(tile_pos);
             self.view_position += pos - new_pos;
+            self.invalidate_visual();
         } else if let Some(WidgetMessage::Drop(dropped)) = message.data() {
             if let Some(item) = ui.node(*dropped).cast::<AssetItem>() {
                 if let Some(material) = item.resource::<Material>() {
@@ -1996,6 +1967,7 @@ impl Control for PaletteWidget {
         } else if let Some(WidgetMessage::KeyDown(key)) = message.data() {
             if *key == KeyCode::Delete && !message.handled() && self.delete_tiles(ui) {
                 message.set_handled(true);
+                self.invalidate_visual();
             }
         }
     }
@@ -2080,8 +2052,8 @@ impl PaletteWidgetBuilder {
     }
 
     /// Build the [`PaletteWidget`].
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(UiNode::new(PaletteWidget {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<PaletteWidget> {
+        ctx.add(PaletteWidget {
             widget: self
                 .widget_builder
                 .with_allow_drop(true)
@@ -2114,7 +2086,7 @@ impl PaletteWidgetBuilder {
             tile_size: Vector2::repeat(32.0),
             mode: MouseMode::None,
             collider_triangles: RefCell::default(),
-        }))
+        })
     }
 }
 

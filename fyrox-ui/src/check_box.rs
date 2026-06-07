@@ -18,8 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Checkbox is a UI widget that have three states - `Checked`, `Unchecked` and `Undefined`. In most cases it is used
-//! only with two values which fits in `bool` type. Third, undefined, state is used for specific situations when your
+//! Checkbox is a UI widget that have three states - `Checked`, `Unchecked` and `Undefined`. In most cases, it is used
+//! only with two values which fit in `bool` type. Third, undefined, state is used for specific situations when your
 //! data have such state. See [`CheckBox`] docs for more info and usage examples.
 
 #![warn(missing_docs)]
@@ -28,49 +28,46 @@ use crate::{
     border::BorderBuilder,
     brush::Brush,
     core::{
-        algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        variable::InheritableVariable, visitor::prelude::*,
+        color::Color,
+        pool::{Handle, ObjectOrVariant},
+        reflect::prelude::*,
+        variable::InheritableVariable,
+        visitor::prelude::*,
     },
-    define_constructor,
     grid::{Column, GridBuilder, Row},
-    message::{KeyCode, MessageDirection, UiMessage},
+    image::ImageBuilder,
+    message::{KeyCode, MessageData, UiMessage},
+    resources,
     style::{resource::StyleResourceExt, Style},
-    vector_image::{Primitive, VectorImageBuilder},
     widget::{Widget, WidgetBuilder, WidgetMessage},
-    BuildContext, Control, HorizontalAlignment, MouseButton, Thickness, UiNode, UserInterface,
-    VerticalAlignment,
+    BuildContext, Control, MouseButton, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
 /// A set of possible check box messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckBoxMessage {
-    /// Emitted when the check box changed its state. Could also be used to modify check box state.
+    /// Emitted when the checkbox changed its state. Could also be used to modify the checkbox state.
     Check(Option<bool>),
 }
+impl MessageData for CheckBoxMessage {}
 
-impl CheckBoxMessage {
-    define_constructor!(
-        /// Creates [`CheckBoxMessage::checked`] message.
-        CheckBoxMessage:Check => fn checked(Option<bool>), layout: false
-    );
-}
-
-/// Checkbox is a UI widget that have three states - `Checked`, `Unchecked` and `Undefined`. In most cases it is used
-/// only with two values which fits in `bool` type. Third, undefined, state is used for specific situations when your
+/// Checkbox is a UI widget that have three states - `Checked`, `Unchecked` and `Undefined`. In most cases, it is used
+/// only with two values which fit in `bool` type. Third, undefined, state is used for specific situations when your
 /// data have such state.
 ///
 /// ## How to create
 ///
-/// To create a checkbox you should do something like this:
+/// To create a checkbox, you should do something like this:
 ///
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
 /// #     check_box::CheckBoxBuilder, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
-/// fn create_checkbox(ui: &mut UserInterface) -> Handle<UiNode> {
+/// # use fyrox_ui::check_box::CheckBox;
+///
+/// fn create_checkbox(ui: &mut UserInterface) -> Handle<CheckBox> {
 ///     CheckBoxBuilder::new(WidgetBuilder::new())
 ///         // A custom value can be set during initialization.
 ///         .checked(Some(true))
@@ -91,7 +88,9 @@ impl CheckBoxMessage {
 /// #     check_box::CheckBoxBuilder, text::TextBuilder, widget::WidgetBuilder, UiNode,
 /// #     UserInterface,
 /// # };
-/// fn create_checkbox(ui: &mut UserInterface) -> Handle<UiNode> {
+/// # use fyrox_ui::check_box::CheckBox;
+///
+/// fn create_checkbox(ui: &mut UserInterface) -> Handle<CheckBox> {
 ///     let ctx = &mut ui.build_ctx();
 ///
 ///     CheckBoxBuilder::new(WidgetBuilder::new())
@@ -138,7 +137,7 @@ impl CheckBoxMessage {
 /// ```
 ///
 /// Keep in mind that checkbox (as any other widget) generates [`WidgetMessage`] instances. You can catch them too and
-/// do a custom handling if you need.
+/// do custom handling if you need.
 ///
 /// ## Theme
 ///
@@ -149,19 +148,19 @@ impl CheckBoxMessage {
 /// 2) [`CheckBoxBuilder::with_check_mark`] - sets the widget that will be used as checked icon.
 /// 3) [`CheckBoxBuilder::with_uncheck_mark`] - sets the widget that will be used as unchecked icon.
 /// 4) [`CheckBoxBuilder::with_undefined_mark`] - sets the widget that will be used as undefined icon.
-#[derive(Default, Clone, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "3a866ba8-7682-4ce7-954a-46360f5837dc")]
+#[derive(Default, Clone, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "3a866ba8-7682-4ce7-954a-46360f5837dc")]
 #[reflect(derived_type = "UiNode")]
 pub struct CheckBox {
-    /// Base widget of the check box.
+    /// Base widget of the checkbox.
     pub widget: Widget,
-    /// Current state of the check box.
+    /// Current state of the checkbox.
     pub checked: InheritableVariable<Option<bool>>,
-    /// Check mark that is used when the state is `Some(true)`.
+    /// Check mark widget that is used when the state is `Some(true)`.
     pub check_mark: InheritableVariable<Handle<UiNode>>,
-    /// Check mark that is used when the state is `Some(false)`.
+    /// Check mark widget that is used when the state is `Some(false)`.
     pub uncheck_mark: InheritableVariable<Handle<UiNode>>,
-    /// Check mark that is used when the state is `None`.
+    /// Check mark widget that is used when the state is `None`.
     pub undefined_mark: InheritableVariable<Handle<UiNode>>,
 }
 
@@ -178,7 +177,7 @@ impl CheckBox {
         Style::default()
             .with(Self::CORNER_RADIUS, 4.0f32)
             .with(Self::BORDER_THICKNESS, Thickness::uniform(1.0))
-            .with(Self::CHECK_MARK_SIZE, 7.0f32)
+            .with(Self::CHECK_MARK_SIZE, 12.0f32)
     }
 }
 
@@ -188,6 +187,7 @@ impl ConstructorProvider<UiNode, UserInterface> for CheckBox {
             .with_variant("CheckBox", |ui| {
                 CheckBoxBuilder::new(WidgetBuilder::new().with_name("CheckBox"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -202,94 +202,64 @@ impl Control for CheckBox {
 
         if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
-                WidgetMessage::MouseDown { button, .. } => {
+                WidgetMessage::MouseDown { button, .. }
                     if *button == MouseButton::Left
                         && (message.destination() == self.handle()
-                            || self.widget.has_descendant(message.destination(), ui))
-                    {
-                        ui.capture_mouse(self.handle());
-                    }
+                            || self.widget.has_descendant(message.destination(), ui)) =>
+                {
+                    ui.capture_mouse(self.handle());
                 }
-                WidgetMessage::MouseUp { button, .. } => {
+                WidgetMessage::MouseUp { button, .. }
                     if *button == MouseButton::Left
                         && (message.destination() == self.handle()
-                            || self.widget.has_descendant(message.destination(), ui))
-                    {
-                        ui.release_mouse_capture();
+                            || self.widget.has_descendant(message.destination(), ui)) =>
+                {
+                    ui.release_mouse_capture();
 
-                        if let Some(value) = *self.checked {
-                            // Invert state if it is defined.
-                            ui.send_message(CheckBoxMessage::checked(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                Some(!value),
-                            ));
-                        } else {
-                            // Switch from undefined state to checked.
-                            ui.send_message(CheckBoxMessage::checked(
-                                self.handle(),
-                                MessageDirection::ToWidget,
-                                Some(true),
-                            ));
-                        }
+                    if let Some(value) = *self.checked {
+                        // Invert state if it is defined.
+                        ui.send(self.handle(), CheckBoxMessage::Check(Some(!value)));
+                    } else {
+                        // Switch from undefined state to checked.
+                        ui.send(self.handle(), CheckBoxMessage::Check(Some(true)));
                     }
                 }
-                WidgetMessage::KeyDown(key_code) => {
-                    if !message.handled() && *key_code == KeyCode::Space {
-                        ui.send_message(CheckBoxMessage::checked(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            self.checked.map(|checked| !checked),
-                        ));
-                        message.set_handled(true);
-                    }
+                WidgetMessage::KeyDown(key_code)
+                    if !message.handled() && *key_code == KeyCode::Space =>
+                {
+                    let checked = self.checked.map(|checked| !checked);
+                    ui.send(self.handle, CheckBoxMessage::Check(checked));
+                    message.set_handled(true);
                 }
                 _ => (),
             }
-        } else if let Some(&CheckBoxMessage::Check(value)) = message.data::<CheckBoxMessage>() {
-            if message.direction() == MessageDirection::ToWidget
-                && message.destination() == self.handle()
-                && *self.checked != value
-            {
+        } else if let Some(&CheckBoxMessage::Check(value)) = message.data_for(self.handle) {
+            if *self.checked != value {
                 self.checked.set_value_and_mark_modified(value);
 
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
 
-                if self.check_mark.is_some() {
-                    match value {
-                        None => {
-                            ui.send_message(WidgetMessage::visibility(
-                                *self.check_mark,
-                                MessageDirection::ToWidget,
-                                false,
-                            ));
-                            ui.send_message(WidgetMessage::visibility(
-                                *self.uncheck_mark,
-                                MessageDirection::ToWidget,
-                                false,
-                            ));
-                            ui.send_message(WidgetMessage::visibility(
-                                *self.undefined_mark,
-                                MessageDirection::ToWidget,
-                                true,
-                            ));
+                match value {
+                    None => {
+                        if self.check_mark.is_some() {
+                            ui.send(*self.check_mark, WidgetMessage::Visibility(false));
                         }
-                        Some(value) => {
-                            ui.send_message(WidgetMessage::visibility(
-                                *self.check_mark,
-                                MessageDirection::ToWidget,
-                                value,
-                            ));
-                            ui.send_message(WidgetMessage::visibility(
-                                *self.uncheck_mark,
-                                MessageDirection::ToWidget,
-                                !value,
-                            ));
-                            ui.send_message(WidgetMessage::visibility(
-                                *self.undefined_mark,
-                                MessageDirection::ToWidget,
-                                false,
-                            ));
+                        if self.uncheck_mark.is_some() {
+                            ui.send(*self.uncheck_mark, WidgetMessage::Visibility(false));
+                        }
+                        if self.undefined_mark.is_some() {
+                            ui.send(*self.undefined_mark, WidgetMessage::Visibility(true));
+                        }
+                    }
+                    Some(value) => {
+                        if self.check_mark.is_some() {
+                            ui.send(*self.check_mark, WidgetMessage::Visibility(value));
+                        }
+                        if self.uncheck_mark.is_some() {
+                            ui.send(*self.uncheck_mark, WidgetMessage::Visibility(!value));
+                        }
+                        if self.undefined_mark.is_some() {
+                            ui.send(*self.undefined_mark, WidgetMessage::Visibility(false));
                         }
                     }
                 }
@@ -323,83 +293,64 @@ impl CheckBoxBuilder {
         }
     }
 
-    /// Sets the desired state of the check box.
+    /// Sets the desired state of the checkbox.
     pub fn checked(mut self, value: Option<bool>) -> Self {
         self.checked = value;
         self
     }
 
     /// Sets the desired check mark when the state is `Some(true)`.
-    pub fn with_check_mark(mut self, check_mark: Handle<UiNode>) -> Self {
-        self.check_mark = Some(check_mark);
+    pub fn with_check_mark(mut self, check_mark: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.check_mark = Some(check_mark.to_base());
         self
     }
 
     /// Sets the desired check mark when the state is `Some(false)`.
-    pub fn with_uncheck_mark(mut self, uncheck_mark: Handle<UiNode>) -> Self {
-        self.uncheck_mark = Some(uncheck_mark);
+    pub fn with_uncheck_mark(mut self, uncheck_mark: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.uncheck_mark = Some(uncheck_mark.to_base());
         self
     }
 
     /// Sets the desired check mark when the state is `None`.
-    pub fn with_undefined_mark(mut self, undefined_mark: Handle<UiNode>) -> Self {
-        self.undefined_mark = Some(undefined_mark);
+    pub fn with_undefined_mark(
+        mut self,
+        undefined_mark: Handle<impl ObjectOrVariant<UiNode>>,
+    ) -> Self {
+        self.undefined_mark = Some(undefined_mark.to_base());
         self
     }
 
-    /// Sets the new content of the check box.
-    pub fn with_content(mut self, content: Handle<UiNode>) -> Self {
-        self.content = content;
+    /// Sets the new content of the checkbox.
+    pub fn with_content(mut self, content: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = content.to_base();
         self
     }
 
     /// Sets the desired background widget that will be used a container for check box contents. By
     /// default, it is a simple border.
-    pub fn with_background(mut self, background: Handle<UiNode>) -> Self {
-        self.background = Some(background);
+    pub fn with_background(mut self, background: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.background = Some(background.to_base());
         self
     }
 
     /// Finishes check box building and adds it to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<CheckBox> {
         let check_mark = self.check_mark.unwrap_or_else(|| {
             let size = *ctx.style.property(CheckBox::CHECK_MARK_SIZE);
-            let half_size = size * 0.5;
-
             BorderBuilder::new(
                 WidgetBuilder::new()
                     .with_background(ctx.style.property(Style::BRUSH_BRIGHT_BLUE))
                     .with_child(
-                        VectorImageBuilder::new(
-                            WidgetBuilder::new()
-                                .with_vertical_alignment(VerticalAlignment::Center)
-                                .with_horizontal_alignment(HorizontalAlignment::Center)
-                                // Give some padding to ensure primitives don't get too cut off
-                                .with_width(size + 1.0)
-                                .with_height(size + 1.0)
-                                .with_foreground(ctx.style.property(Style::BRUSH_TEXT)),
-                        )
-                        .with_primitives({
-                            vec![
-                                Primitive::Line {
-                                    begin: Vector2::new(0.0, half_size),
-                                    end: Vector2::new(half_size, size),
-                                    thickness: 2.0,
-                                },
-                                Primitive::Line {
-                                    begin: Vector2::new(half_size, size),
-                                    end: Vector2::new(size, 0.0),
-                                    thickness: 2.0,
-                                },
-                            ]
-                        })
-                        .build(ctx),
+                        ImageBuilder::new(WidgetBuilder::new().with_width(size).with_height(size))
+                            .with_opt_texture(resources::CHECK.clone())
+                            .build(ctx),
                     ),
             )
             .with_pad_by_corner_radius(false)
             .with_corner_radius(ctx.style.property(CheckBox::CORNER_RADIUS))
             .with_stroke_thickness(Thickness::uniform(0.0).into())
             .build(ctx)
+            .to_base()
         });
         ctx[check_mark].set_visibility(self.checked.unwrap_or(false));
 
@@ -416,6 +367,7 @@ impl CheckBoxBuilder {
             .with_corner_radius(ctx.style.property(CheckBox::CORNER_RADIUS))
             .with_stroke_thickness(Thickness::uniform(0.0).into())
             .build(ctx)
+            .to_base()
         });
         ctx[uncheck_mark].set_visibility(!self.checked.unwrap_or(true));
 
@@ -429,6 +381,7 @@ impl CheckBoxBuilder {
             .with_pad_by_corner_radius(false)
             .with_corner_radius(ctx.style.property(CheckBox::CORNER_RADIUS))
             .build(ctx)
+            .to_base()
         });
         ctx[undefined_mark].set_visibility(self.checked.is_none());
 
@@ -447,15 +400,16 @@ impl CheckBoxBuilder {
             .with_corner_radius(ctx.style.property(CheckBox::CORNER_RADIUS))
             .with_stroke_thickness(ctx.style.property(CheckBox::BORDER_THICKNESS))
             .build(ctx)
+            .to_base()
         });
 
         let background_ref = &mut ctx[background];
         background_ref.set_row(0).set_column(0);
         if background_ref.min_width() < 0.01 {
-            background_ref.set_min_width(16.0);
+            background_ref.set_min_width(18.0);
         }
         if background_ref.min_height() < 0.01 {
-            background_ref.set_min_height(16.0);
+            background_ref.set_min_height(18.0);
         }
 
         ctx.link(check_mark, background);
@@ -469,7 +423,7 @@ impl CheckBoxBuilder {
         )
         .add_row(Row::stretch())
         .add_column(Column::auto())
-        .add_column(Column::auto())
+        .add_column(Column::stretch())
         .build(ctx);
 
         let cb = CheckBox {
@@ -483,15 +437,15 @@ impl CheckBoxBuilder {
             uncheck_mark: uncheck_mark.into(),
             undefined_mark: undefined_mark.into(),
         };
-        ctx.add_node(UiNode::new(cb))
+        ctx.add(cb)
     }
 }
 
 #[cfg(test)]
 mod test {
+    use crate::message::UiMessage;
     use crate::{
         check_box::{CheckBoxBuilder, CheckBoxMessage},
-        message::MessageDirection,
         widget::WidgetBuilder,
         UserInterface,
     };
@@ -508,8 +462,7 @@ mod test {
         assert_eq!(ui.poll_message(), None);
 
         // Check messages
-        let input_message =
-            CheckBoxMessage::checked(check_box, MessageDirection::ToWidget, Some(true));
+        let input_message = UiMessage::for_widget(check_box, CheckBoxMessage::Check(Some(true)));
 
         ui.send_message(input_message.clone());
 

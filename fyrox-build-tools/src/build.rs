@@ -19,15 +19,20 @@
 // SOFTWARE.
 
 use fyrox_core::algebra::{Matrix3, Vector2};
-use fyrox_core::Uuid;
+use fyrox_core::uuid::Uuid;
 use fyrox_resource::untyped::ResourceKind;
+use fyrox_ui::button::Button;
+use fyrox_ui::image::Image;
+use fyrox_ui::scroll_viewer::ScrollViewer;
+use fyrox_ui::text::Text;
+use fyrox_ui::window::{Window, WindowAlignment};
 use fyrox_ui::{
     border::BorderBuilder,
     button::{ButtonBuilder, ButtonMessage},
-    core::{parking_lot::Mutex, pool::Handle},
+    core::{parking_lot::Mutex, pool::Handle, SafeLock},
     grid::{Column, GridBuilder, Row},
     image::ImageBuilder,
-    message::{MessageDirection, UiMessage},
+    message::UiMessage,
     scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
     stack_panel::StackPanelBuilder,
     style::{resource::StyleResourceExt, Style},
@@ -38,7 +43,7 @@ use fyrox_ui::{
     },
     widget::{WidgetBuilder, WidgetMessage},
     window::{WindowBuilder, WindowMessage, WindowTitle},
-    BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+    BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
 };
 use std::{
     io::{BufRead, BufReader, Read},
@@ -50,14 +55,14 @@ use std::{
 };
 
 pub struct BuildWindow {
-    window: Handle<UiNode>,
+    window: Handle<Window>,
     active: Arc<AtomicBool>,
     changed: Arc<AtomicBool>,
     log: Arc<Mutex<String>>,
-    log_text: Handle<UiNode>,
-    stop: Handle<UiNode>,
-    scroll_viewer: Handle<UiNode>,
-    progress_indicator: Handle<UiNode>,
+    log_text: Handle<Text>,
+    stop: Handle<Button>,
+    scroll_viewer: Handle<ScrollViewer>,
+    progress_indicator: Handle<Image>,
     angle: f32,
 }
 
@@ -166,7 +171,7 @@ impl BuildWindow {
                                         stop = ButtonBuilder::new(
                                             WidgetBuilder::new()
                                                 .with_width(100.0)
-                                                .with_margin(Thickness::uniform(1.0)),
+                                                .with_margin(Thickness::uniform(4.0)),
                                         )
                                         .with_text("Stop")
                                         .build(ctx);
@@ -208,12 +213,14 @@ impl BuildWindow {
         Self::spawn_pipe_pump(stderr, &reader_active, &log_changed, &log);
         Self::spawn_pipe_pump(stdout, &reader_active, &log_changed, &log);
 
-        ui.send_message(WindowMessage::open_modal(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
     }
 
     fn spawn_pipe_pump(
@@ -229,7 +236,7 @@ impl BuildWindow {
             let pipe: &mut dyn BufRead = &mut BufReader::new(&mut pipe);
             while reader_active.load(Ordering::SeqCst) {
                 for line in pipe.lines().take(10).flatten() {
-                    let mut log_guard = log.lock();
+                    let mut log_guard = log.safe_lock();
                     log_guard.push_str(&line);
                     log_guard.push('\n');
                     log_changed.store(true, Ordering::SeqCst);
@@ -241,45 +248,35 @@ impl BuildWindow {
     pub fn reset(&mut self, ui: &UserInterface) {
         self.active.store(false, Ordering::SeqCst);
         self.changed.store(false, Ordering::SeqCst);
-        self.log.lock().clear();
-        ui.send_message(TextMessage::text(
-            self.log_text,
-            MessageDirection::ToWidget,
-            Default::default(),
-        ));
+        self.log.safe_lock().clear();
+        ui.send(self.log_text, TextMessage::Text(Default::default()));
     }
 
     pub fn destroy(mut self, ui: &UserInterface) {
         self.reset(ui);
-        ui.send_message(WindowMessage::close(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.window, WindowMessage::Close);
     }
 
     pub fn update(&mut self, ui: &UserInterface, dt: f32) {
         if self.changed.load(Ordering::SeqCst) {
-            ui.send_message(TextMessage::text(
+            ui.send(
                 self.log_text,
-                MessageDirection::ToWidget,
-                self.log.lock().clone(),
-            ));
-            ui.send_message(ScrollViewerMessage::scroll_to_end(
-                self.scroll_viewer,
-                MessageDirection::ToWidget,
-            ));
+                TextMessage::Text(self.log.safe_lock().clone()),
+            );
+            ui.send(self.scroll_viewer, ScrollViewerMessage::ScrollToEnd);
 
             self.changed.store(false, Ordering::SeqCst);
         }
 
         self.angle += 10.0 * dt;
-        ui.send_message(WidgetMessage::render_transform(
+        ui.send(
             self.progress_indicator,
-            MessageDirection::ToWidget,
-            Matrix3::new_translation(&Vector2::new(8.0, 8.0))
-                * Matrix3::new_rotation(self.angle)
-                * Matrix3::new_translation(&Vector2::new(-8.0, -8.0)),
-        ));
+            WidgetMessage::RenderTransform(
+                Matrix3::new_translation(&Vector2::new(8.0, 8.0))
+                    * Matrix3::new_rotation(self.angle)
+                    * Matrix3::new_translation(&Vector2::new(-8.0, -8.0)),
+            ),
+        );
     }
 
     pub fn handle_ui_message(

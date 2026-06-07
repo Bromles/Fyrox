@@ -38,11 +38,13 @@ use std::{
 };
 
 /// An actual type of a property value.
-#[derive(Visit, Reflect, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Visit, Reflect, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[reflect(type_uuid = "8f0e5b25-2fd1-4534-8cbf-ac4844548b47")]
 pub enum ValueType {
     /// `bool`
     Bool,
     /// `f32`
+    #[default]
     F32,
     /// `f64`
     F64,
@@ -189,12 +191,6 @@ impl ValueType {
             ValueType::UnitQuaternionF32 => TypeId::of::<UnitQuaternion<f32>>(),
             ValueType::UnitQuaternionF64 => TypeId::of::<UnitQuaternion<f64>>(),
         }
-    }
-}
-
-impl Default for ValueType {
-    fn default() -> Self {
-        Self::F32
     }
 }
 
@@ -358,6 +354,7 @@ impl TrackValue {
 /// reflection system, while the special cases handles bindings to standard properties (such as position, scaling, or
 /// rotation) for optimization. Reflection is quite slow to be used as the universal property setting mechanism.  
 #[derive(Default, Clone, Visit, Reflect, Debug, PartialEq, Eq)]
+#[reflect(type_uuid = "077d92ac-fa96-4c5e-bdb1-e3e0acc4adc4")]
 pub enum ValueBinding {
     /// A binding to position of a scene node.
     #[default]
@@ -410,28 +407,21 @@ impl BoundValue {
         property_path: &str,
         value_type: ValueType,
     ) {
-        object.as_reflect_mut(&mut |object_ref| {
-            object_ref.resolve_path_mut(property_path, &mut |result| match result {
-                Ok(property) => {
-                    let mut applied = false;
-                    property.as_any_mut(&mut |any| {
-                        applied = self.value.apply_to_any(any, value_type);
-                    });
-                    if applied {
-                        property.as_inheritable_variable_mut(&mut |var| {
-                            if let Some(var) = var {
-                                var.mark_modified();
-                            }
-                        });
+        object.resolve_path_mut(property_path, &mut |result| match result {
+            Ok(property) => {
+                let applied = self.value.apply_to_any(property, value_type);
+                if applied {
+                    if let Some(var) = property.as_inheritable_variable_mut() {
+                        var.mark_modified();
                     }
                 }
-                Err(err) => {
-                    Log::err(format!(
-                        "Failed to set property {property_path}! Reason: {err:?}"
-                    ));
-                }
-            });
-        })
+            }
+            Err(err) => {
+                Log::err(format!(
+                    "Failed to set property {property_path}! Reason: {err:?}"
+                ));
+            }
+        });
     }
 }
 
@@ -474,6 +464,7 @@ mod test {
     use fyrox_core::{reflect::prelude::*, variable::InheritableVariable};
 
     #[derive(Reflect, Debug, Clone, PartialEq)]
+    #[reflect(type_uuid = "a59259ab-11a4-4008-8e25-1097841aa6f2")]
     struct OtherStruct {
         field: u32,
         inheritable_variable: InheritableVariable<u32>,
@@ -489,6 +480,7 @@ mod test {
     }
 
     #[derive(Default, Reflect, Clone, Debug, PartialEq)]
+    #[reflect(type_uuid = "4aa11b23-1f85-42cf-9c38-8928c6752f54")]
     struct MyStruct {
         some_bool: bool,
         some_property: f32,
@@ -543,7 +535,7 @@ mod test {
         assert!(!object.other_struct.inheritable_variable.is_modified());
         inheritable_variable_value.apply_to_object(
             &mut object,
-            "other_struct.inheritable_variable",
+            "other_struct.inheritable_variable.Content",
             ValueType::U32,
         );
         assert_eq!(object.other_struct.field, 123);

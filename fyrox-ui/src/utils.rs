@@ -20,24 +20,25 @@
 
 use crate::{
     border::BorderBuilder,
-    button::ButtonBuilder,
+    button::{Button, ButtonBuilder},
     core::{algebra::Vector2, color::Color, parking_lot::Mutex, pool::Handle},
     decorator::DecoratorBuilder,
     formatted_text::WrapMode,
     grid::{Column, GridBuilder, Row},
-    image::ImageBuilder,
-    style::{resource::StyleResourceExt, Style},
+    image::{Image, ImageBuilder},
+    style::{resource::StyleResourceExt, Style, StyledProperty},
     text::TextBuilder,
-    vector_image::{Primitive, VectorImageBuilder},
+    toggle::{ToggleButton, ToggleButtonBuilder},
+    vector_image::{Primitive, VectorImage, VectorImageBuilder},
     widget::WidgetBuilder,
     Brush, BuildContext, HorizontalAlignment, RcUiNodeHandle, Thickness, UiNode, VerticalAlignment,
 };
-use fyrox_core::Uuid;
 use fyrox_texture::{
     CompressionOptions, TextureImportOptions, TextureMinificationFilter, TextureResource,
     TextureResourceExtension,
 };
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub enum ArrowDirection {
     Top,
@@ -92,7 +93,7 @@ pub fn make_arrow_non_uniform_size(
     orientation: ArrowDirection,
     width: f32,
     height: f32,
-) -> Handle<UiNode> {
+) -> Handle<VectorImage> {
     VectorImageBuilder::new(
         WidgetBuilder::new()
             .with_foreground(ctx.style.property(Style::BRUSH_BRIGHT))
@@ -113,7 +114,7 @@ pub fn make_arrow(
     ctx: &mut BuildContext,
     orientation: ArrowDirection,
     size: f32,
-) -> Handle<UiNode> {
+) -> Handle<VectorImage> {
     make_arrow_non_uniform_size(ctx, orientation, size, size)
 }
 
@@ -132,7 +133,7 @@ pub fn make_cross_primitive(size: f32, thickness: f32) -> Vec<Primitive> {
     ]
 }
 
-pub fn make_cross(ctx: &mut BuildContext, size: f32, thickness: f32) -> Handle<UiNode> {
+pub fn make_cross(ctx: &mut BuildContext, size: f32, thickness: f32) -> Handle<VectorImage> {
     VectorImageBuilder::new(
         WidgetBuilder::new()
             .with_horizontal_alignment(HorizontalAlignment::Center)
@@ -168,46 +169,111 @@ pub fn make_simple_tooltip(ctx: &mut BuildContext, text: &str) -> RcUiNodeHandle
     RcUiNodeHandle::new(handle, ctx.sender())
 }
 
+pub fn make_asset_preview_tooltip(
+    texture: Option<TextureResource>,
+    ctx: &mut BuildContext,
+) -> (RcUiNodeHandle, Handle<Image>) {
+    let size = 120.0;
+    let image_preview;
+    let image_preview_tooltip = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_visibility(false)
+            .with_hit_test_visibility(false)
+            .with_foreground(ctx.style.property(Style::BRUSH_DARKEST))
+            .with_background(Brush::Solid(Color::opaque(230, 230, 230)).into())
+            .with_width(size + 2.0)
+            .with_height(size + 2.0)
+            .with_child({
+                image_preview = ImageBuilder::new(
+                    WidgetBuilder::new()
+                        .on_column(0)
+                        .with_width(size)
+                        .with_height(size)
+                        .with_margin(Thickness::uniform(1.0)),
+                )
+                .with_checkerboard_background(true)
+                .with_opt_texture(texture)
+                .with_sync_with_texture_size(false)
+                .build(ctx);
+                image_preview
+            }),
+    )
+    .build(ctx);
+    (
+        RcUiNodeHandle::new(image_preview_tooltip, ctx.sender()),
+        image_preview,
+    )
+}
+
+fn adjust_decorator(builder: DecoratorBuilder, ctx: &BuildContext) -> DecoratorBuilder {
+    builder
+        .with_normal_brush(ctx.style.property(Style::BRUSH_DARKER))
+        .with_hover_brush(ctx.style.property(Style::BRUSH_DARK))
+        .with_pressed_brush(ctx.style.property(Style::BRUSH_PRIMARY))
+        .with_selected_brush(ctx.style.property(Style::BRUSH_LIGHTER_PRIMARY))
+}
+
+fn text_margin() -> Thickness {
+    Thickness {
+        left: 5.0,
+        top: 2.0,
+        right: 2.0,
+        bottom: 2.0,
+    }
+}
+
 pub fn make_dropdown_list_option_universal<T: Send + 'static>(
     ctx: &mut BuildContext,
     name: &str,
     height: f32,
     user_data: T,
 ) -> Handle<UiNode> {
-    DecoratorBuilder::new(
-        BorderBuilder::new(
-            WidgetBuilder::new()
-                .with_height(height)
-                .with_user_data(Arc::new(Mutex::new(user_data)))
-                .with_child(
-                    TextBuilder::new(WidgetBuilder::new())
-                        .with_vertical_text_alignment(VerticalAlignment::Center)
-                        .with_horizontal_text_alignment(HorizontalAlignment::Center)
-                        .with_text(name)
-                        .build(ctx),
-                ),
-        )
-        .with_corner_radius(4.0f32.into())
-        .with_pad_by_corner_radius(false),
+    adjust_decorator(
+        DecoratorBuilder::new(
+            BorderBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(height)
+                    .with_user_data(Arc::new(Mutex::new(user_data)))
+                    .with_child(
+                        TextBuilder::new(WidgetBuilder::new().with_margin(text_margin()))
+                            .with_vertical_text_alignment(VerticalAlignment::Center)
+                            .with_horizontal_text_alignment(HorizontalAlignment::Left)
+                            .with_text(name)
+                            .build(ctx),
+                    ),
+            )
+            .with_corner_radius(4.0f32.into())
+            .with_pad_by_corner_radius(false),
+        ),
+        ctx,
     )
     .build(ctx)
+    .to_base()
 }
 
 pub fn make_dropdown_list_option(ctx: &mut BuildContext, name: &str) -> Handle<UiNode> {
-    DecoratorBuilder::new(
-        BorderBuilder::new(
-            WidgetBuilder::new().with_child(
-                TextBuilder::new(WidgetBuilder::new())
+    adjust_decorator(
+        DecoratorBuilder::new(
+            BorderBuilder::new(
+                WidgetBuilder::new().with_child(
+                    TextBuilder::new(
+                        WidgetBuilder::new()
+                            .with_margin(text_margin())
+                            .with_vertical_alignment(VerticalAlignment::Center),
+                    )
                     .with_vertical_text_alignment(VerticalAlignment::Center)
-                    .with_horizontal_text_alignment(HorizontalAlignment::Center)
+                    .with_horizontal_text_alignment(HorizontalAlignment::Left)
                     .with_text(name)
                     .build(ctx),
-            ),
-        )
-        .with_corner_radius(4.0f32.into())
-        .with_pad_by_corner_radius(false),
+                ),
+            )
+            .with_corner_radius(4.0f32.into())
+            .with_pad_by_corner_radius(false),
+        ),
+        ctx,
     )
     .build(ctx)
+    .to_base()
 }
 
 pub fn make_dropdown_list_option_with_height(
@@ -215,48 +281,214 @@ pub fn make_dropdown_list_option_with_height(
     name: &str,
     height: f32,
 ) -> Handle<UiNode> {
-    DecoratorBuilder::new(
-        BorderBuilder::new(
-            WidgetBuilder::new().with_height(height).with_child(
-                TextBuilder::new(WidgetBuilder::new())
-                    .with_vertical_text_alignment(VerticalAlignment::Center)
-                    .with_horizontal_text_alignment(HorizontalAlignment::Center)
-                    .with_text(name)
-                    .build(ctx),
-            ),
-        )
-        .with_corner_radius(4.0f32.into())
-        .with_pad_by_corner_radius(false),
+    adjust_decorator(
+        DecoratorBuilder::new(
+            BorderBuilder::new(
+                WidgetBuilder::new().with_height(height).with_child(
+                    TextBuilder::new(WidgetBuilder::new().with_margin(text_margin()))
+                        .with_vertical_text_alignment(VerticalAlignment::Center)
+                        .with_horizontal_text_alignment(HorizontalAlignment::Left)
+                        .with_text(name)
+                        .build(ctx),
+                ),
+            )
+            .with_corner_radius(4.0f32.into())
+            .with_pad_by_corner_radius(false),
+        ),
+        ctx,
     )
     .build(ctx)
+    .to_base()
 }
 
-pub fn make_image_button_with_tooltip(
-    ctx: &mut BuildContext,
+pub struct ImageButtonBuilder<'a> {
     width: f32,
     height: f32,
+    image_width: f32,
+    image_height: f32,
     image: Option<TextureResource>,
-    tooltip: &str,
+    tooltip: &'a str,
     tab_index: Option<usize>,
-) -> Handle<UiNode> {
-    ButtonBuilder::new(
-        WidgetBuilder::new()
-            .with_tab_index(tab_index)
-            .with_tooltip(make_simple_tooltip(ctx, tooltip))
-            .with_margin(Thickness::uniform(1.0)),
-    )
-    .with_content(
-        ImageBuilder::new(
+    image_brush: Option<StyledProperty<Brush>>,
+    column: usize,
+    row: usize,
+    visibility: bool,
+    horizontal_alignment: HorizontalAlignment,
+    vertical_alignment: VerticalAlignment,
+    margin: Thickness,
+    is_toggled: bool,
+}
+
+impl<'a> Default for ImageButtonBuilder<'a> {
+    fn default() -> Self {
+        Self {
+            width: f32::NAN,
+            height: f32::NAN,
+            image_width: 16.0,
+            image_height: 16.0,
+            image: None,
+            tooltip: "",
+            tab_index: None,
+            image_brush: None,
+            column: 0,
+            row: 0,
+            visibility: true,
+            horizontal_alignment: HorizontalAlignment::Stretch,
+            vertical_alignment: VerticalAlignment::Stretch,
+            margin: Thickness::uniform(1.0),
+            is_toggled: false,
+        }
+    }
+}
+
+impl<'a> ImageButtonBuilder<'a> {
+    pub fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub fn with_height(mut self, height: f32) -> Self {
+        self.height = height;
+        self
+    }
+
+    pub fn with_size(mut self, size: f32) -> Self {
+        self.width = size;
+        self.height = size;
+        self
+    }
+
+    pub fn with_image_width(mut self, width: f32) -> Self {
+        self.image_width = width;
+        self
+    }
+
+    pub fn with_image_height(mut self, height: f32) -> Self {
+        self.image_height = height;
+        self
+    }
+
+    pub fn with_image_size(mut self, size: f32) -> Self {
+        self.image_width = size;
+        self.image_height = size;
+        self
+    }
+
+    pub fn with_image(mut self, image: Option<TextureResource>) -> Self {
+        self.image = image;
+        self
+    }
+
+    pub fn with_tooltip(mut self, tooltip: &'a str) -> Self {
+        self.tooltip = tooltip;
+        self
+    }
+
+    pub fn with_tab_index(mut self, tab_index: Option<usize>) -> Self {
+        self.tab_index = tab_index;
+        self
+    }
+
+    pub fn with_image_color(mut self, color: Color) -> Self {
+        self.image_brush = Some(Brush::Solid(color).into());
+        self
+    }
+
+    pub fn on_column(mut self, column: usize) -> Self {
+        self.column = column;
+        self
+    }
+
+    pub fn on_row(mut self, row: usize) -> Self {
+        self.row = row;
+        self
+    }
+
+    pub fn with_visibility(mut self, visibility: bool) -> Self {
+        self.visibility = visibility;
+        self
+    }
+
+    pub fn with_horizontal_alignment(mut self, alignment: HorizontalAlignment) -> Self {
+        self.horizontal_alignment = alignment;
+        self
+    }
+
+    pub fn with_vertical_alignment(mut self, alignment: VerticalAlignment) -> Self {
+        self.vertical_alignment = alignment;
+        self
+    }
+
+    pub fn with_margin(mut self, margin: Thickness) -> Self {
+        self.margin = margin;
+        self
+    }
+
+    pub fn with_is_toggled(mut self, is_toggled: bool) -> Self {
+        self.is_toggled = is_toggled;
+        self
+    }
+
+    pub fn build_button(self, ctx: &mut BuildContext) -> Handle<Button> {
+        ButtonBuilder::new(
             WidgetBuilder::new()
-                .with_background(ctx.style.property(Style::BRUSH_BRIGHTEST))
-                .with_margin(Thickness::uniform(2.0))
-                .with_width(width)
-                .with_height(height),
+                .with_width(self.width)
+                .with_height(self.height)
+                .on_column(self.column)
+                .on_row(self.row)
+                .with_tab_index(self.tab_index)
+                .with_visibility(self.visibility)
+                .with_horizontal_alignment(self.horizontal_alignment)
+                .with_vertical_alignment(self.vertical_alignment)
+                .with_tooltip(make_simple_tooltip(ctx, self.tooltip))
+                .with_margin(self.margin),
         )
-        .with_opt_texture(image)
-        .build(ctx),
-    )
-    .build(ctx)
+        .with_content(
+            ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_background(
+                        self.image_brush
+                            .unwrap_or_else(|| ctx.style.property(Style::BRUSH_BRIGHTEST)),
+                    )
+                    .with_margin(Thickness::uniform(3.0))
+                    .with_width(self.image_width)
+                    .with_height(self.image_height),
+            )
+            .with_opt_texture(self.image)
+            .build(ctx),
+        )
+        .build(ctx)
+    }
+
+    pub fn build_toggle(self, ctx: &mut BuildContext) -> Handle<ToggleButton> {
+        ToggleButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_width(self.width)
+                .with_height(self.height)
+                .with_tab_index(self.tab_index)
+                .with_visibility(self.visibility)
+                .with_horizontal_alignment(self.horizontal_alignment)
+                .with_vertical_alignment(self.vertical_alignment)
+                .with_tooltip(make_simple_tooltip(ctx, self.tooltip))
+                .with_margin(self.margin),
+        )
+        .with_content(
+            ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_background(
+                        self.image_brush
+                            .unwrap_or_else(|| ctx.style.property(Style::BRUSH_BRIGHTEST)),
+                    )
+                    .with_margin(Thickness::uniform(3.0))
+                    .with_width(self.image_width)
+                    .with_height(self.image_height),
+            )
+            .with_opt_texture(self.image)
+            .build(ctx),
+        )
+        .with_toggled(self.is_toggled)
+        .build(ctx)
+    }
 }
 
 pub fn make_text_and_image_button_with_tooltip(
@@ -271,8 +503,8 @@ pub fn make_text_and_image_button_with_tooltip(
     tab_index: Option<usize>,
     color: Color,
     font_size: f32,
-) -> Handle<UiNode> {
-    let margin = 2.0;
+) -> Handle<Button> {
+    let margin = 3.0;
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_row(row)

@@ -22,11 +22,10 @@ use crate::fyrox::core::{algebra::Vector3, reflect::prelude::*};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Reflect)]
+#[reflect(type_uuid = "126ee9c2-3b75-4fcf-ba25-dcb6c3a0d158")]
 pub struct ModelSettings {
-    #[reflect(
-        description = "Initial scale the root of the instance will have after instantiation.\
-        Useful when you have lots of huge models and don't want to rescale them manually."
-    )]
+    /// Initial scale the root of the instance will have after instantiation. Useful when you have
+    /// lots of huge models and don't want to rescale them manually.
     pub instantiation_scale: Vector3<f32>,
 }
 

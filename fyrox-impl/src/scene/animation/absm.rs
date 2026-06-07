@@ -27,7 +27,6 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -41,7 +40,7 @@ use crate::{
     },
 };
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::{BaseSceneGraph, SceneGraph, SceneGraphNode};
+use fyrox_graph::SceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// Scene specific root motion settings.
@@ -136,6 +135,9 @@ impl LayerMaskExt for LayerMask {
     }
 }
 
+type MachineType = InheritableVariable<Machine>;
+type AnimationPlayerHandle = InheritableVariable<Handle<AnimationPlayer>>;
+
 /// Animation blending state machine (ABSM) is a node that takes multiple animations from an animation player and
 /// mixes them in arbitrary way into one animation. Usually, ABSMs are used to animate humanoid characters in games,
 /// by blending multiple states with one or more animations. More info about state machines can be found in
@@ -166,12 +168,12 @@ impl LayerMaskExt for LayerMask {
 /// # use fyrox_graph::SceneGraph;
 ///
 /// fn create_walk_idle_state_machine(
-///     animation_player_handle: Handle<Node>,
+///     animation_player_handle: Handle<AnimationPlayer>,
 ///     graph: &mut Graph,
-/// ) -> Handle<Node> {
+/// ) -> Handle<AnimationBlendingStateMachine> {
 ///     // Find idle and run animations first.
 ///     let animation_player = graph
-///         .try_get_of_type::<AnimationPlayer>(animation_player_handle)
+///         .try_get(animation_player_handle)
 ///         .unwrap();
 ///     let idle_animation = animation_player
 ///         .animations()
@@ -217,14 +219,15 @@ impl LayerMaskExt for LayerMask {
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Visit, Reflect, Clone, Debug, Default, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Visit, Reflect, Clone, Debug, Default)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "4b08c753-2a10-41e3-8fb2-4fd0517e86bc"
+)]
 pub struct AnimationBlendingStateMachine {
     base: Base,
-    #[component(include)]
-    machine: InheritableVariable<Machine>,
-    #[component(include)]
-    animation_player: InheritableVariable<Handle<Node>>,
+    machine: MachineType,
+    animation_player: AnimationPlayerHandle,
 }
 
 impl AnimationBlendingStateMachine {
@@ -245,20 +248,14 @@ impl AnimationBlendingStateMachine {
 
     /// Sets new animation player of the node. The animation player is a source of animations for blending, the state
     /// machine node must have the animation player specified, otherwise it won't have any effect.
-    pub fn set_animation_player(&mut self, animation_player: Handle<Node>) {
+    pub fn set_animation_player(&mut self, animation_player: Handle<AnimationPlayer>) {
         self.animation_player
             .set_value_and_mark_modified(animation_player);
     }
 
     /// Returns an animation player used by the node.
-    pub fn animation_player(&self) -> Handle<Node> {
+    pub fn animation_player(&self) -> Handle<AnimationPlayer> {
         *self.animation_player
-    }
-}
-
-impl TypeUuidProvider for AnimationBlendingStateMachine {
-    fn type_uuid() -> Uuid {
-        uuid!("4b08c753-2a10-41e3-8fb2-4fd0517e86bc")
     }
 }
 
@@ -308,15 +305,11 @@ impl NodeTrait for AnimationBlendingStateMachine {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn update(&mut self, context: &mut UpdateContext) {
-        if let Some(animation_player) = context
-            .nodes
-            .try_borrow_mut(*self.animation_player)
-            .and_then(|n| n.component_mut::<AnimationPlayer>())
-        {
+        if let Ok(animation_player) = context.nodes.try_get_mut(*self.animation_player) {
             // Prevent animation player to apply animation to scene nodes. The animation will
             // do than instead.
             animation_player.set_auto_apply(false);
@@ -331,12 +324,7 @@ impl NodeTrait for AnimationBlendingStateMachine {
     }
 
     fn validate(&self, scene: &Scene) -> Result<(), String> {
-        if scene
-            .graph
-            .try_get(*self.animation_player)
-            .and_then(|n| n.component_ref::<AnimationPlayer>())
-            .is_none()
-        {
+        if scene.graph.try_get(*self.animation_player).is_err() {
             Err(
                 "Animation player is not set or invalid! Animation blending state \
             machine won't operate! Set the animation player handle in the Inspector."
@@ -352,7 +340,7 @@ impl NodeTrait for AnimationBlendingStateMachine {
 pub struct AnimationBlendingStateMachineBuilder {
     base_builder: BaseBuilder,
     machine: Machine,
-    animation_player: Handle<Node>,
+    animation_player: Handle<AnimationPlayer>,
 }
 
 impl AnimationBlendingStateMachineBuilder {
@@ -372,7 +360,7 @@ impl AnimationBlendingStateMachineBuilder {
     }
 
     /// Sets the animation player as a source of animations.
-    pub fn with_animation_player(mut self, animation_player: Handle<Node>) -> Self {
+    pub fn with_animation_player(mut self, animation_player: Handle<AnimationPlayer>) -> Self {
         self.animation_player = animation_player;
         self
     }
@@ -387,7 +375,7 @@ impl AnimationBlendingStateMachineBuilder {
     }
 
     /// Creates new node and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<AnimationBlendingStateMachine> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

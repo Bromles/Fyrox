@@ -21,49 +21,35 @@
 //! UI node is a type-agnostic wrapper for any widget type. See [`UiNode`] docs for more info.
 
 use crate::{
-    core::{
-        pool::Handle, reflect::prelude::*, uuid_provider, variable, visitor::prelude::*,
-        ComponentProvider, NameProvider,
-    },
+    core::{pool::Handle, reflect::prelude::*, variable, visitor::prelude::*, NameProvider},
     widget::Widget,
     Control, ControlAsAny, UserInterface,
 };
 
-use fyrox_graph::SceneGraphNode;
+use fyrox_graph::NodeWrapper;
 use fyrox_resource::{untyped::UntypedResource, Resource};
 use std::{
-    any::{Any, TypeId},
+    any::TypeId,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
 };
+use uuid::Uuid;
 
 pub mod constructor;
 pub mod container;
 
 /// UI node is a type-agnostic wrapper for any widget type. Internally, it is just a trait object
-/// that provides common widget interface. Its main use is to reduce code bloat (no need to type
+/// that provides a common widget interface. Its main use is to reduce code bloat (no need to type
 /// `Box<dyn Control>` everywhere, just `UiNode`) and to provide some useful methods such as type
-/// casting, component querying, etc. You could also be interested in [`Control`] docs, since it
+/// casting, field fetching, etc. You could also be interested in [`Control`] docs, since it
 /// contains all the interesting stuff and detailed description for each method.
-pub struct UiNode(pub Box<dyn Control>);
+#[derive(Reflect)]
+#[reflect(type_uuid = "d9b45ecc-91b0-40ea-a92a-4a7dee4667c9")]
+pub struct UiNode(#[reflect(deref, display_name = "UiNode")] pub Box<dyn Control>);
 
 impl<T: Control> From<T> for UiNode {
     fn from(value: T) -> Self {
         Self(Box::new(value))
-    }
-}
-
-uuid_provider!(UiNode = "d9b45ecc-91b0-40ea-a92a-4a7dee4667c9");
-
-impl ComponentProvider for UiNode {
-    #[inline]
-    fn query_component_ref(&self, type_id: TypeId) -> Option<&dyn Any> {
-        self.0.query_component_ref(type_id)
-    }
-
-    #[inline]
-    fn query_component_mut(&mut self, type_id: TypeId) -> Option<&mut dyn Any> {
-        self.0.query_component_mut(type_id)
     }
 }
 
@@ -74,10 +60,18 @@ impl Clone for UiNode {
     }
 }
 
-impl SceneGraphNode for UiNode {
+impl NodeWrapper for UiNode {
     type Base = Widget;
     type SceneGraph = UserInterface;
     type ResourceData = UserInterface;
+
+    fn inner_ref(&self) -> &dyn Reflect {
+        self.0.deref()
+    }
+
+    fn inner_mut(&mut self) -> &mut dyn Reflect {
+        self.0.deref_mut()
+    }
 
     fn base(&self) -> &Self::Base {
         self.0.deref()
@@ -118,6 +112,10 @@ impl SceneGraphNode for UiNode {
     fn children_mut(&mut self) -> &mut [Handle<Self>] {
         &mut self.children
     }
+
+    fn instance_id(&self) -> Uuid {
+        self.id
+    }
 }
 
 impl NameProvider for UiNode {
@@ -154,7 +152,7 @@ impl UiNode {
     /// # use fyrox_ui::{
     /// #     core::pool::Handle,
     /// #     define_widget_deref,
-    /// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
+    /// #     core::{visitor::prelude::*, reflect::prelude::*, },
     /// #     message::UiMessage,
     /// #     widget::{Widget, WidgetBuilder},
     /// #     BuildContext, Control, UiNode, UserInterface,
@@ -163,17 +161,15 @@ impl UiNode {
     /// #     any::{Any, TypeId},
     /// #     ops::{Deref, DerefMut},
     /// # };
-    /// # use fyrox_core::uuid_provider;
     /// #
-    /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-    /// #[reflect(derived_type = "UiNode")]
+    /// #
+    /// #[derive(Clone, Visit, Reflect, Debug)]
+    /// #[reflect(derived_type = "UiNode", type_uuid = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }
     /// #
     /// # define_widget_deref!(MyWidget);
-    /// #
-    /// # uuid_provider!(MyWidget = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd");
     /// #
     /// # impl Control for MyWidget {
     /// #     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -186,15 +182,12 @@ impl UiNode {
     /// }
     ///
     /// impl MyWidgetBuilder {
-    ///     pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    ///     pub fn build(self, ctx: &mut BuildContext) -> Handle<MyWidget> {
     ///         let my_widget = MyWidget {
     ///             widget: self.widget_builder.build(ctx),
     ///         };
     ///
-    ///         // Wrap your widget in the type-agnostic wrapper so it can be placed in the UI.
-    ///         let node = UiNode::new(my_widget);
-    ///
-    ///         ctx.add_node(node)
+    ///         ctx.add(my_widget)
     ///     }
     /// }
     /// ```
@@ -223,27 +216,23 @@ impl UiNode {
         ControlAsAny::as_any_mut(&mut *self.0).downcast_mut::<T>()
     }
 
-    /// Tries to fetch a component of the given type `T`. At very basis it mimics [`Self::cast`] behaviour, but
-    /// also allows you to fetch components of other types as well. For example, your widget may be built on
-    /// top of existing one (via composition) and you have it as a field inside your widget. In this case, you
-    /// can fetch it by using this method with the appropriate type. See docs for [`fyrox_core::type_traits::ComponentProvider::query_component_ref`]
-    /// for more info.
-    pub fn query_component<T>(&self) -> Option<&T>
+    /// Tries to downcast self to the specified type, or if it is not possible, tries to find a
+    /// field of the specified type.
+    pub fn self_or_field_ref<T>(&self) -> Option<&T>
     where
-        T: 'static,
+        T: Reflect,
     {
-        self.0
-            .query_component_ref(TypeId::of::<T>())
-            .and_then(|c| c.downcast_ref::<T>())
+        (self.0.deref() as &dyn Reflect).self_or_field_ref()
     }
 
-    /// This method checks if the widget has a component of the given type `T`. Internally, it queries the component
-    /// of the given type and checks if it exists.
-    pub fn has_component<T>(&self) -> bool
+    /// Tries to downcast self to the specified type, or if it is not possible, tries to find a
+    /// field of the specified type. Returns `true` if any of the aforementioned actions succeeded,
+    /// `false` - otherwise.
+    pub fn is_or_has_field<T>(&self) -> bool
     where
-        T: 'static,
+        T: Reflect,
     {
-        self.query_component::<T>().is_some()
+        self.self_or_field_ref::<T>().is_some()
     }
 
     pub(crate) fn set_inheritance_data(
@@ -251,7 +240,7 @@ impl UiNode {
         original_handle: Handle<UiNode>,
         model: Resource<UserInterface>,
     ) {
-        // Notify instantiated node about resource it was created from.
+        // Notify instantiated node about the resource it was created from.
         self.resource = Some(model.clone());
 
         // Reset resource instance root flag, this is needed because a node after instantiation cannot
@@ -260,12 +249,10 @@ impl UiNode {
 
         // Reset inheritable properties, so property inheritance system will take properties
         // from parent objects on resolve stage.
-        self.as_reflect_mut(&mut |reflect| {
-            variable::mark_inheritable_properties_non_modified(
-                reflect,
-                &[TypeId::of::<UntypedResource>()],
-            )
-        });
+        variable::mark_inheritable_properties_non_modified(
+            self,
+            &[TypeId::of::<UntypedResource>()],
+        );
 
         // Fill original handles to instances.
         self.original_handle_in_resource = original_handle;
@@ -275,88 +262,5 @@ impl UiNode {
 impl Visit for UiNode {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         self.0.visit(name, visitor)
-    }
-}
-
-impl Reflect for UiNode {
-    fn source_path() -> &'static str {
-        file!()
-    }
-
-    fn derived_types() -> &'static [TypeId] {
-        &[]
-    }
-
-    fn query_derived_types(&self) -> &'static [TypeId] {
-        Self::derived_types()
-    }
-
-    fn type_name(&self) -> &'static str {
-        Reflect::type_name(self.0.deref())
-    }
-
-    fn doc(&self) -> &'static str {
-        self.0.deref().doc()
-    }
-
-    fn assembly_name(&self) -> &'static str {
-        self.0.deref().assembly_name()
-    }
-
-    fn type_assembly_name() -> &'static str {
-        env!("CARGO_PKG_NAME")
-    }
-
-    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
-        self.0.deref().fields_ref(func)
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
-        self.0.deref_mut().fields_mut(func)
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        Reflect::into_any(self.0)
-    }
-
-    fn as_any(&self, func: &mut dyn FnMut(&dyn Any)) {
-        Reflect::as_any(self.0.deref(), func)
-    }
-
-    fn as_any_mut(&mut self, func: &mut dyn FnMut(&mut dyn Any)) {
-        Reflect::as_any_mut(self.0.deref_mut(), func)
-    }
-
-    fn as_reflect(&self, func: &mut dyn FnMut(&dyn Reflect)) {
-        self.0.deref().as_reflect(func)
-    }
-
-    fn as_reflect_mut(&mut self, func: &mut dyn FnMut(&mut dyn Reflect)) {
-        self.0.deref_mut().as_reflect_mut(func)
-    }
-
-    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-        self.0.deref_mut().set(value)
-    }
-
-    fn set_field(
-        &mut self,
-        field: &str,
-        value: Box<dyn Reflect>,
-        func: &mut dyn FnMut(Result<Box<dyn Reflect>, SetFieldError>),
-    ) {
-        self.0.deref_mut().set_field(field, value, func)
-    }
-
-    fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
-        self.0.deref().field(name, func)
-    }
-
-    fn field_mut(&mut self, name: &str, func: &mut dyn FnMut(Option<&mut dyn Reflect>)) {
-        self.0.deref_mut().field_mut(name, func)
-    }
-
-    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
-        Some(Box::new(self.clone()))
     }
 }

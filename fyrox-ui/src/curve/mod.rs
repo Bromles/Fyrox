@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::message::CursorIcon;
+use crate::message::{CursorIcon, MessageData};
 use crate::style::resource::StyleResourceExt;
 use crate::style::Style;
 use crate::{
@@ -34,12 +34,10 @@ use crate::{
         parking_lot::{MappedMutexGuard, Mutex, MutexGuard},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
-        uuid_provider,
         visitor::prelude::*,
+        SafeLock,
     },
     curve::key::{CurveKeyView, CurveKeyViewContainer},
-    define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
     formatted_text::{FormattedText, FormattedTextBuilder},
     grid::{Column, GridBuilder, Row},
@@ -54,13 +52,16 @@ use crate::{
 };
 use fxhash::FxHashSet;
 
+use crate::grid::Grid;
+use crate::menu::MenuItem;
+use crate::numeric::NumericUpDown;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::{
     cell::{Cell, RefCell},
-    ops::{Deref, DerefMut},
     sync::mpsc::Sender,
 };
+use uuid::Uuid;
 
 pub mod key;
 
@@ -89,28 +90,18 @@ pub enum CurveEditorMessage {
     PasteSelection,
     // Position in screen coordinates.
     AddKey(Vector2<f32>),
+    ShowBackgroundCurves(bool),
 }
 
-impl CurveEditorMessage {
-    define_constructor!(CurveEditorMessage:SyncBackground => fn sync_background(Vec<Curve>), layout: false);
-    define_constructor!(CurveEditorMessage:Sync => fn sync(Vec<Curve>), layout: false);
-    define_constructor!(CurveEditorMessage:Colorize => fn colorize(Vec<(Uuid, Brush)>), layout: false);
-    define_constructor!(CurveEditorMessage:ViewPosition => fn view_position(Vector2<f32>), layout: false);
-    define_constructor!(CurveEditorMessage:Zoom => fn zoom(Vector2<f32>), layout: false);
-    define_constructor!(CurveEditorMessage:ZoomToFit => fn zoom_to_fit(after_layout: bool), layout: true);
-    define_constructor!(CurveEditorMessage:HighlightZones => fn hightlight_zones(Vec<HighlightZone>), layout: false);
-    // Internal. Use only when you know what you're doing.
-    define_constructor!(CurveEditorMessage:RemoveSelection => fn remove_selection(), layout: false);
-    define_constructor!(CurveEditorMessage:ChangeSelectedKeysKind => fn change_selected_keys_kind(CurveKeyKind), layout: false);
-    define_constructor!(CurveEditorMessage:ChangeSelectedKeysValue => fn change_selected_keys_value(f32), layout: false);
-    define_constructor!(CurveEditorMessage:ChangeSelectedKeysLocation => fn change_selected_keys_location(f32), layout: false);
-    define_constructor!(CurveEditorMessage:AddKey => fn add_key(Vector2<f32>), layout: false);
-    define_constructor!(CurveEditorMessage:CopySelection => fn copy_selection(), layout: false);
-    define_constructor!(CurveEditorMessage:PasteSelection => fn paste_selection(), layout: false);
+impl MessageData for CurveEditorMessage {
+    fn need_perform_layout(&self) -> bool {
+        matches!(self, Self::ZoomToFit { .. })
+    }
 }
 
 /// Highlight zone in values space.
 #[derive(Clone, Debug, PartialEq, Visit, Reflect, Default)]
+#[reflect(type_uuid = "88052cf5-4ea5-4a2e-b81a-4aca85e74c55")]
 pub struct HighlightZone {
     pub rect: Rect<f32>,
     pub brush: Brush,
@@ -121,35 +112,35 @@ pub struct CurveTransformCell(Mutex<CurveTransform>);
 
 impl Clone for CurveTransformCell {
     fn clone(&self) -> Self {
-        Self(Mutex::new(self.0.lock().clone()))
+        Self(Mutex::new(self.0.safe_lock().clone()))
     }
 }
 
 impl CurveTransformCell {
     /// Position of the center of the curve editor in the curve coordinate space.
     pub fn position(&self) -> Vector2<f32> {
-        self.0.lock().position
+        self.0.safe_lock().position
     }
     /// Scape of the curve editor: multiply curve space units by this to get screen space units.
     pub fn scale(&self) -> Vector2<f32> {
-        self.0.lock().scale
+        self.0.safe_lock().scale
     }
     /// Location of the curve editor on the screen, in screen space units.
     pub fn bounds(&self) -> Rect<f32> {
-        self.0.lock().bounds
+        self.0.safe_lock().bounds
     }
     /// Modify the current position. Call this when the center of the curve view should change.
     pub fn set_position(&self, position: Vector2<f32>) {
-        self.0.lock().position = position
+        self.0.safe_lock().position = position
     }
     /// Modify the current zoom of the curve view.
     pub fn set_scale(&self, scale: Vector2<f32>) {
-        self.0.lock().scale = scale;
+        self.0.safe_lock().scale = scale;
     }
     /// Update the bounds of the curve view. Call this to ensure the CurveTransform accurately
     /// reflects the actual size of the widget being drawn.
     pub fn set_bounds(&self, bounds: Rect<f32>) {
-        self.0.lock().bounds = bounds;
+        self.0.safe_lock().bounds = bounds;
     }
     /// Just like [CurveTransformCell::y_step_iter] but for x-coordinates.
     /// Iterate through a list of x-coordinates across the width of the bounds.
@@ -159,7 +150,7 @@ impl CurveTransformCell {
     /// This iterator indates where grid lines should be drawn to make a curve easier
     /// to read for the user.
     pub fn x_step_iter(&self, grid_size: f32) -> StepIterator {
-        self.0.lock().x_step_iter(grid_size)
+        self.0.safe_lock().x_step_iter(grid_size)
     }
     /// Just like [CurveTransformCell::x_step_iter] but for y-coordinates.
     /// Iterate through a list of y-coordinates across the width of the bounds.
@@ -169,31 +160,31 @@ impl CurveTransformCell {
     /// This iterator indates where grid lines should be drawn to make a curve easier
     /// to read for the user.
     pub fn y_step_iter(&self, grid_size: f32) -> StepIterator {
-        self.0.lock().y_step_iter(grid_size)
+        self.0.safe_lock().y_step_iter(grid_size)
     }
     /// Construct the transformation matrices to reflect the current position, scale, and bounds.
     pub fn update_transform(&self) {
-        self.0.lock().update_transform();
+        self.0.safe_lock().update_transform();
     }
     /// Transform a point on the curve into a point in the local coordinate space of the widget.
     pub fn curve_to_local(&self) -> MappedMutexGuard<Matrix3<f32>> {
-        MutexGuard::map(self.0.lock(), |t| &mut t.curve_to_local)
+        MutexGuard::map(self.0.safe_lock(), |t| &mut t.curve_to_local)
     }
     /// Transform a point on the curve into a point on the screen.
     pub fn curve_to_screen(&self) -> MappedMutexGuard<Matrix3<f32>> {
-        MutexGuard::map(self.0.lock(), |t| &mut t.curve_to_screen)
+        MutexGuard::map(self.0.safe_lock(), |t| &mut t.curve_to_screen)
     }
     /// Transform a point in the local coordinate space of the widget into a point in the coordinate space of the curve.
     /// After the transformation, the x-coordinate could be a key location and the y-coordinate could be a key value.
     /// Y-coordinates are flipped so that positive-y becomes the up direction.
     pub fn local_to_curve(&self) -> MappedMutexGuard<Matrix3<f32>> {
-        MutexGuard::map(self.0.lock(), |t| &mut t.local_to_curve)
+        MutexGuard::map(self.0.safe_lock(), |t| &mut t.local_to_curve)
     }
     /// Transform a point on the screen into a point in the coordinate space of the curve.
     /// After the transformation, the x-coordinate could be a key location and the y-coordinate could be a key value.
     /// Y-coordinates are flipped so that positive-y becomes the up direction.
     pub fn screen_to_curve(&self) -> MappedMutexGuard<Matrix3<f32>> {
-        MutexGuard::map(self.0.lock(), |t| &mut t.screen_to_curve)
+        MutexGuard::map(self.0.safe_lock(), |t| &mut t.screen_to_curve)
     }
 }
 
@@ -334,8 +325,7 @@ impl CurveTransform {
     }
 }
 
-/// Iterate through f32 values stepping by `step_size`. Each value is
-/// is a multiple of `step_size`.
+/// Iterate through f32 values stepping by `step_size`. Each value is a multiple of `step_size`.
 #[derive(Debug, Clone)]
 pub struct StepIterator {
     pub step_size: f32,
@@ -344,7 +334,7 @@ pub struct StepIterator {
 }
 
 impl StepIterator {
-    /// Construct an interator that starts at or before `start` and ends at or after `end`.
+    /// Construct an iterator that starts at or before `start` and ends at or after `end`.
     /// The intention is to cover the whole range of `start` to `end` at least.
     pub fn new(step: f32, start: f32, end: f32) -> Self {
         Self {
@@ -369,6 +359,7 @@ impl Iterator for StepIterator {
 }
 
 #[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "4b640057-639e-4f47-9a08-c08d94eca68e")]
 pub struct CurvesContainer {
     curves: Vec<CurveKeyViewContainer>,
 }
@@ -421,8 +412,11 @@ impl CurvesContainer {
     }
 }
 
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "5c7b087e-871e-498d-b064-187b604a37d8"
+)]
 pub struct CurveEditor {
     widget: Widget,
     background_curves: CurvesContainer,
@@ -459,6 +453,7 @@ pub struct CurveEditor {
     #[visit(skip)]
     #[reflect(hidden)]
     clipboard: Vec<(Vector2<f32>, CurveKeyKind)>,
+    show_background_curves: bool,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for CurveEditor {
@@ -467,6 +462,7 @@ impl ConstructorProvider<UiNode, UserInterface> for CurveEditor {
             .with_variant("Curve Editor", |ui| {
                 CurveEditorBuilder::new(WidgetBuilder::new().with_name("Curve Editor"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -476,20 +472,21 @@ impl ConstructorProvider<UiNode, UserInterface> for CurveEditor {
 crate::define_widget_deref!(CurveEditor);
 
 #[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "c81d942c-394d-498d-b460-1dc508288ed3")]
 struct ContextMenu {
     widget: RcUiNodeHandle,
-    add_key: Handle<UiNode>,
-    remove: Handle<UiNode>,
-    key: Handle<UiNode>,
-    make_constant: Handle<UiNode>,
-    make_linear: Handle<UiNode>,
-    make_cubic: Handle<UiNode>,
-    zoom_to_fit: Handle<UiNode>,
-    key_properties: Handle<UiNode>,
-    key_value: Handle<UiNode>,
-    key_location: Handle<UiNode>,
-    copy_keys: Handle<UiNode>,
-    paste_keys: Handle<UiNode>,
+    add_key: Handle<MenuItem>,
+    remove: Handle<MenuItem>,
+    key: Handle<MenuItem>,
+    make_constant: Handle<MenuItem>,
+    make_linear: Handle<MenuItem>,
+    make_cubic: Handle<MenuItem>,
+    zoom_to_fit: Handle<MenuItem>,
+    key_properties: Handle<Grid>,
+    key_value: Handle<NumericUpDown<f32>>,
+    key_location: Handle<NumericUpDown<f32>>,
+    copy_keys: Handle<MenuItem>,
+    paste_keys: Handle<MenuItem>,
 }
 
 #[derive(Clone, Debug)]
@@ -552,21 +549,20 @@ impl Selection {
     }
 }
 
-uuid_provider!(CurveEditor = "5c7b087e-871e-498d-b064-187b604a37d8");
-
 impl Control for CurveEditor {
     fn draw(&self, ctx: &mut DrawingContext) {
-        ctx.transform_stack.push(Matrix3::identity());
         self.curve_transform.set_bounds(self.screen_bounds());
         self.curve_transform.update_transform();
         self.draw_background(ctx);
         self.draw_highlight_zones(ctx);
         self.draw_grid(ctx);
-        self.draw_curves(&self.background_curves, ctx);
+        if self.show_background_curves {
+            self.draw_curves(&self.background_curves, ctx);
+            self.draw_keys(&self.background_curves, &self.background_curve_brush, ctx);
+        }
         self.draw_curves(&self.curves, ctx);
-        self.draw_keys(ctx);
+        self.draw_keys(&self.curves, &self.key_brush, ctx);
         self.draw_operation(ctx);
-        ctx.transform_stack.pop();
     }
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -587,22 +583,17 @@ impl Control for CurveEditor {
                             .is_some_and(|ctx| ctx.is_dragging());
                         if self.pick(*pos).is_some() || is_dragging {
                             if self.cursor.is_none() {
-                                ui.send_message(WidgetMessage::cursor(
+                                ui.send(
                                     self.handle,
-                                    MessageDirection::ToWidget,
-                                    Some(if is_dragging {
+                                    WidgetMessage::Cursor(Some(if is_dragging {
                                         CursorIcon::Grabbing
                                     } else {
                                         CursorIcon::Grab
-                                    }),
-                                ));
+                                    })),
+                                );
                             }
                         } else if self.cursor.is_some() {
-                            ui.send_message(WidgetMessage::cursor(
-                                self.handle,
-                                MessageDirection::ToWidget,
-                                None,
-                            ));
+                            ui.send(self.handle, WidgetMessage::Cursor(None));
                         }
 
                         let curve_mouse_pos = self.screen_to_curve_space(*pos);
@@ -619,6 +610,7 @@ impl Control for CurveEditor {
                                         }
                                     }
                                     self.sort_keys();
+                                    self.invalidate_visual();
                                 }
                                 OperationContext::MoveView {
                                     initial_mouse_pos,
@@ -629,11 +621,10 @@ impl Control for CurveEditor {
                                     // Dragging left moves the position right. Dragging up moves the position down.
                                     // Remember: up is negative-y in screen space, and up is positive-y in curve space.
                                     let delta = Vector2::<f32>::new(-d.x / zoom.x, d.y / zoom.y);
-                                    ui.send_message(CurveEditorMessage::view_position(
+                                    ui.send(
                                         self.handle,
-                                        MessageDirection::ToWidget,
-                                        initial_view_pos + delta,
-                                    ));
+                                        CurveEditorMessage::ViewPosition(initial_view_pos + delta),
+                                    );
                                 }
                                 OperationContext::DragTangent { key_id: key, left } => {
                                     if let Some(key) = self.curves.key_mut(*key) {
@@ -664,6 +655,8 @@ impl Control for CurveEditor {
                                             } else {
                                                 *right_tangent = tangent;
                                             }
+
+                                            self.invalidate_visual();
                                         } else {
                                             unreachable!(
                                                 "attempt to edit tangents of non-cubic curve key!"
@@ -679,6 +672,7 @@ impl Control for CurveEditor {
                                 } => {
                                     min.set(curve_mouse_pos.inf(initial_mouse_pos));
                                     max.set(curve_mouse_pos.sup(initial_mouse_pos));
+                                    self.invalidate_visual();
                                 }
                             }
                         } else if state.left == ButtonState::Pressed {
@@ -741,6 +735,7 @@ impl Control for CurveEditor {
                                     self.sort_keys();
 
                                     self.send_curves(ui);
+                                    self.invalidate_visual();
                                 }
                                 OperationContext::BoxSelection { min, max, .. } => {
                                     let min = min.get();
@@ -764,6 +759,7 @@ impl Control for CurveEditor {
                                             ui,
                                         );
                                     }
+                                    self.invalidate_visual();
                                 }
                                 _ => {}
                             }
@@ -849,155 +845,178 @@ impl Control for CurveEditor {
                             zoom * k
                         };
 
-                        ui.send_message(CurveEditorMessage::zoom(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            new_zoom,
-                        ));
+                        ui.send(self.handle, CurveEditorMessage::Zoom(new_zoom));
 
                         message.set_handled(true);
                     }
                     _ => {}
                 }
-            } else if let Some(msg) = message.data::<CurveEditorMessage>() {
-                if message.destination() == self.handle
-                    && message.direction() == MessageDirection::ToWidget
-                {
-                    match msg {
-                        CurveEditorMessage::SyncBackground(curves) => {
-                            self.background_curves =
-                                CurvesContainer::from_native(self.key_brush.clone(), curves);
+            } else if let Some(msg) = message.data_for::<CurveEditorMessage>(self.handle) {
+                match msg {
+                    CurveEditorMessage::SyncBackground(curves) => {
+                        self.background_curves =
+                            CurvesContainer::from_native(self.key_brush.clone(), curves);
 
-                            for curve in self.background_curves.iter_mut() {
-                                curve.brush = self.background_curve_brush.clone();
-                            }
+                        for curve in self.background_curves.iter_mut() {
+                            curve.brush = self.background_curve_brush.clone();
                         }
-                        CurveEditorMessage::Sync(curves) => {
-                            let color_map = self
-                                .curves
-                                .iter()
-                                .map(|curve| (curve.id(), curve.brush.clone()))
-                                .collect::<Vec<_>>();
 
-                            self.curves =
-                                CurvesContainer::from_native(self.key_brush.clone(), curves);
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::Sync(curves) => {
+                        let color_map = self
+                            .curves
+                            .iter()
+                            .map(|curve| (curve.id(), curve.brush.clone()))
+                            .collect::<Vec<_>>();
 
-                            self.colorize(&color_map);
-                        }
-                        CurveEditorMessage::Colorize(color_map) => {
-                            self.colorize(color_map);
-                        }
-                        CurveEditorMessage::ViewPosition(view_position) => {
-                            self.set_view_position(*view_position);
-                            ui.send_message(message.reverse());
-                        }
-                        CurveEditorMessage::Zoom(zoom) => {
-                            self.curve_transform
-                                .set_scale(zoom.simd_clamp(self.min_zoom, self.max_zoom));
-                            ui.send_message(message.reverse());
-                        }
-                        CurveEditorMessage::RemoveSelection => {
-                            self.remove_selection(ui);
-                        }
-                        CurveEditorMessage::ChangeSelectedKeysKind(kind) => {
-                            self.change_selected_keys_kind(kind.clone(), ui);
-                        }
-                        CurveEditorMessage::AddKey(screen_pos) => {
-                            let local_pos = self.screen_to_curve_space(*screen_pos);
+                        self.curves = CurvesContainer::from_native(self.key_brush.clone(), curves);
 
-                            let mut curves = Vec::new();
-                            if let Some(selection) = self.selection.as_ref() {
-                                if let Selection::Keys { keys } = selection {
-                                    curves.extend(self.curves.iter_mut().filter(|curve| {
-                                        for key in curve.keys() {
-                                            if keys.contains(&key.id) {
-                                                return true;
-                                            }
+                        self.colorize(&color_map);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::Colorize(color_map) => {
+                        self.colorize(color_map);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::ViewPosition(view_position) => {
+                        self.set_view_position(*view_position);
+                        ui.try_send_response(message);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::Zoom(zoom) => {
+                        self.curve_transform
+                            .set_scale(zoom.simd_clamp(self.min_zoom, self.max_zoom));
+                        ui.try_send_response(message);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::RemoveSelection => {
+                        self.remove_selection(ui);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::ChangeSelectedKeysKind(kind) => {
+                        self.change_selected_keys_kind(kind.clone(), ui);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::AddKey(screen_pos) => {
+                        let local_pos = self.screen_to_curve_space(*screen_pos);
+
+                        let mut curves = Vec::new();
+                        if let Some(selection) = self.selection.as_ref() {
+                            if let Selection::Keys { keys } = selection {
+                                curves.extend(self.curves.iter_mut().filter(|curve| {
+                                    for key in curve.keys() {
+                                        if keys.contains(&key.id) {
+                                            return true;
                                         }
-                                        false
-                                    }));
-                                }
-                            } else {
-                                curves.extend(self.curves.curves.iter_mut());
-                            };
+                                    }
+                                    false
+                                }));
+                            }
+                        } else {
+                            curves.extend(self.curves.curves.iter_mut());
+                        };
 
-                            let mut added_keys = FxHashSet::default();
-                            for curve in curves {
-                                let id = Uuid::new_v4();
-                                curve.add(CurveKeyView {
-                                    position: local_pos,
-                                    kind: CurveKeyKind::Linear,
-                                    id,
-                                });
-                                added_keys.insert(id);
+                        let mut added_keys = FxHashSet::default();
+                        for curve in curves {
+                            let id = Uuid::new_v4();
+                            curve.add(CurveKeyView {
+                                position: local_pos,
+                                kind: CurveKeyKind::Linear,
+                                id,
+                            });
+                            added_keys.insert(id);
+                        }
+
+                        self.set_selection(Some(Selection::Keys { keys: added_keys }), ui);
+                        self.sort_keys();
+                        self.send_curves(ui);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::ZoomToFit { after_layout } => {
+                        if *after_layout {
+                            // TODO: Layout system could take up to 10 frames in worst cases. This is super hackish solution
+                            // but when it works, who cares.
+                            self.zoom_to_fit_timer = Some(10);
+                        } else {
+                            self.zoom_to_fit(&ui.sender);
+                        }
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::ChangeSelectedKeysValue(value) => {
+                        self.change_selected_keys_value(*value, ui);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::ChangeSelectedKeysLocation(location) => {
+                        self.change_selected_keys_location(*location, ui);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::HighlightZones(zones) => {
+                        self.highlight_zones.clone_from(zones);
+
+                        self.invalidate_visual();
+                    }
+                    CurveEditorMessage::CopySelection => {
+                        if let Some(Selection::Keys { keys }) = self.selection.as_ref() {
+                            let menu_pos =
+                                ui.node(self.context_menu.widget.handle()).screen_position();
+                            let local_menu_pos = self.screen_to_curve_space(menu_pos);
+
+                            self.clipboard.clear();
+                            for key in keys {
+                                for curve in self.curves.iter() {
+                                    if let Some(key) = curve.key_ref(*key) {
+                                        self.clipboard.push((
+                                            key.position - local_menu_pos,
+                                            key.kind.clone(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    CurveEditorMessage::PasteSelection => {
+                        if !self.clipboard.is_empty() {
+                            let menu_pos =
+                                ui.node(self.context_menu.widget.handle()).screen_position();
+                            let local_menu_pos = self.screen_to_curve_space(menu_pos);
+
+                            let mut selection = FxHashSet::default();
+                            for (offset, kind) in self.clipboard.iter().cloned() {
+                                for curve in self.curves.iter_mut() {
+                                    let id = Uuid::new_v4();
+
+                                    selection.insert(id);
+
+                                    curve.add(CurveKeyView {
+                                        position: local_menu_pos + offset,
+                                        kind: kind.clone(),
+                                        id,
+                                    });
+                                }
                             }
 
-                            self.set_selection(Some(Selection::Keys { keys: added_keys }), ui);
+                            self.set_selection(Some(Selection::Keys { keys: selection }), ui);
                             self.sort_keys();
                             self.send_curves(ui);
-                        }
-                        CurveEditorMessage::ZoomToFit { after_layout } => {
-                            if *after_layout {
-                                // TODO: Layout system could take up to 10 frames in worst cases. This is super hackish solution
-                                // but when it works, who cares.
-                                self.zoom_to_fit_timer = Some(10);
-                            } else {
-                                self.zoom_to_fit(&ui.sender);
-                            }
-                        }
-                        CurveEditorMessage::ChangeSelectedKeysValue(value) => {
-                            self.change_selected_keys_value(*value, ui);
-                        }
-                        CurveEditorMessage::ChangeSelectedKeysLocation(location) => {
-                            self.change_selected_keys_location(*location, ui);
-                        }
-                        CurveEditorMessage::HighlightZones(zones) => {
-                            self.highlight_zones.clone_from(zones);
-                        }
-                        CurveEditorMessage::CopySelection => {
-                            if let Some(Selection::Keys { keys }) = self.selection.as_ref() {
-                                let menu_pos =
-                                    ui.node(self.context_menu.widget.handle()).screen_position();
-                                let local_menu_pos = self.screen_to_curve_space(menu_pos);
 
-                                self.clipboard.clear();
-                                for key in keys {
-                                    for curve in self.curves.iter() {
-                                        if let Some(key) = curve.key_ref(*key) {
-                                            self.clipboard.push((
-                                                key.position - local_menu_pos,
-                                                key.kind.clone(),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
+                            self.invalidate_visual();
                         }
-                        CurveEditorMessage::PasteSelection => {
-                            if !self.clipboard.is_empty() {
-                                let menu_pos =
-                                    ui.node(self.context_menu.widget.handle()).screen_position();
-                                let local_menu_pos = self.screen_to_curve_space(menu_pos);
-
-                                let mut selection = FxHashSet::default();
-                                for (offset, kind) in self.clipboard.iter().cloned() {
-                                    for curve in self.curves.iter_mut() {
-                                        let id = Uuid::new_v4();
-
-                                        selection.insert(id);
-
-                                        curve.add(CurveKeyView {
-                                            position: local_menu_pos + offset,
-                                            kind: kind.clone(),
-                                            id,
-                                        });
-                                    }
-                                }
-
-                                self.set_selection(Some(Selection::Keys { keys: selection }), ui);
-                                self.sort_keys();
-                                self.send_curves(ui);
-                            }
+                    }
+                    CurveEditorMessage::ShowBackgroundCurves(show) => {
+                        if self.show_background_curves != *show {
+                            self.show_background_curves = *show;
+                            self.invalidate_layout();
                         }
                     }
                 }
@@ -1008,69 +1027,52 @@ impl Control for CurveEditor {
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
         if let Some(MenuItemMessage::Click) = message.data::<MenuItemMessage>() {
             if message.destination() == self.context_menu.remove {
-                ui.send_message(CurveEditorMessage::remove_selection(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, CurveEditorMessage::RemoveSelection);
             } else if message.destination() == self.context_menu.make_constant {
-                ui.send_message(CurveEditorMessage::change_selected_keys_kind(
+                ui.send(
                     self.handle,
-                    MessageDirection::ToWidget,
-                    CurveKeyKind::Constant,
-                ));
+                    CurveEditorMessage::ChangeSelectedKeysKind(CurveKeyKind::Constant),
+                );
             } else if message.destination() == self.context_menu.make_linear {
-                ui.send_message(CurveEditorMessage::change_selected_keys_kind(
+                ui.send(
                     self.handle,
-                    MessageDirection::ToWidget,
-                    CurveKeyKind::Linear,
-                ));
+                    CurveEditorMessage::ChangeSelectedKeysKind(CurveKeyKind::Linear),
+                );
             } else if message.destination() == self.context_menu.make_cubic {
-                ui.send_message(CurveEditorMessage::change_selected_keys_kind(
+                ui.send(
                     self.handle,
-                    MessageDirection::ToWidget,
-                    CurveKeyKind::Cubic {
+                    CurveEditorMessage::ChangeSelectedKeysKind(CurveKeyKind::Cubic {
                         left_tangent: 0.0,
                         right_tangent: 0.0,
-                    },
-                ));
+                    }),
+                );
             } else if message.destination() == self.context_menu.add_key {
                 let screen_pos = ui.node(self.context_menu.widget.handle()).screen_position();
-                ui.send_message(CurveEditorMessage::add_key(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    screen_pos,
-                ));
+                ui.send(self.handle, CurveEditorMessage::AddKey(screen_pos));
             } else if message.destination() == self.context_menu.zoom_to_fit {
-                ui.send_message(CurveEditorMessage::zoom_to_fit(
+                ui.send(
                     self.handle,
-                    MessageDirection::ToWidget,
-                    false,
-                ));
+                    CurveEditorMessage::ZoomToFit {
+                        after_layout: false,
+                    },
+                );
             } else if message.destination() == self.context_menu.copy_keys {
-                ui.send_message(CurveEditorMessage::copy_selection(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, CurveEditorMessage::CopySelection);
             } else if message.destination() == self.context_menu.paste_keys {
-                ui.send_message(CurveEditorMessage::paste_selection(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, CurveEditorMessage::PasteSelection);
             }
         } else if let Some(NumericUpDownMessage::<f32>::Value(value)) = message.data() {
             if message.direction() == MessageDirection::FromWidget && !message.handled() {
                 if message.destination() == self.context_menu.key_value {
-                    ui.send_message(CurveEditorMessage::change_selected_keys_value(
+                    ui.send(
                         self.handle,
-                        MessageDirection::ToWidget,
-                        *value,
-                    ));
+                        CurveEditorMessage::ChangeSelectedKeysValue(*value),
+                    );
                 } else if message.destination() == self.context_menu.key_location {
-                    ui.send_message(CurveEditorMessage::change_selected_keys_location(
+                    ui.send(
                         self.handle,
-                        MessageDirection::ToWidget,
-                        *value,
-                    ));
+                        CurveEditorMessage::ChangeSelectedKeysLocation(*value),
+                    );
                 }
             }
         }
@@ -1174,21 +1176,19 @@ impl CurveEditor {
         let center = bounds.center();
 
         sender
-            .send(CurveEditorMessage::zoom(
+            .send(UiMessage::for_widget(
                 self.handle,
-                MessageDirection::ToWidget,
-                Vector2::new(
+                CurveEditorMessage::Zoom(Vector2::new(
                     self.actual_local_size().x / bounds.w(),
                     self.actual_local_size().y / bounds.h(),
-                ),
+                )),
             ))
             .unwrap();
 
         sender
-            .send(CurveEditorMessage::view_position(
+            .send(UiMessage::for_widget(
                 self.handle,
-                MessageDirection::ToWidget,
-                center,
+                CurveEditorMessage::ViewPosition(center),
             ))
             .unwrap();
     }
@@ -1205,6 +1205,14 @@ impl CurveEditor {
     pub fn point_to_screen_space(&self, point: Vector2<f32>) -> Vector2<f32> {
         self.curve_transform
             .curve_to_screen()
+            .transform_point(&Point2::from(point))
+            .coords
+    }
+
+    /// Transforms a point to widget's local space.
+    pub fn point_to_local_space(&self, point: Vector2<f32>) -> Vector2<f32> {
+        self.curve_transform
+            .curve_to_local()
             .transform_point(&Point2::from(point))
             .coords
     }
@@ -1231,43 +1239,29 @@ impl CurveEditor {
     fn set_selection(&mut self, selection: Option<Selection>, ui: &UserInterface) {
         self.selection = selection;
 
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             self.context_menu.remove,
-            MessageDirection::ToWidget,
-            self.selection.is_some(),
-        ));
-
-        ui.send_message(WidgetMessage::enabled(
+            WidgetMessage::Enabled(self.selection.is_some()),
+        );
+        ui.send(
             self.context_menu.key,
-            MessageDirection::ToWidget,
-            self.selection.is_some(),
-        ));
-
-        ui.send_message(WidgetMessage::enabled(
+            WidgetMessage::Enabled(self.selection.is_some()),
+        );
+        ui.send(
             self.context_menu.key_properties,
-            MessageDirection::ToWidget,
-            self.selection.is_some(),
-        ));
+            WidgetMessage::Enabled(self.selection.is_some()),
+        );
 
         if let Some(Selection::Keys { keys }) = self.selection.as_ref() {
             if let Some(first) = keys.iter().next() {
                 if let Some(key) = self.curves.key_ref(*first) {
-                    ui.send_message(
-                        NumericUpDownMessage::value(
-                            self.context_menu.key_location,
-                            MessageDirection::ToWidget,
-                            key.position.x,
-                        )
-                        .with_handled(true),
+                    ui.send_handled(
+                        self.context_menu.key_location,
+                        NumericUpDownMessage::Value(key.position.x),
                     );
-
-                    ui.send_message(
-                        NumericUpDownMessage::value(
-                            self.context_menu.key_value,
-                            MessageDirection::ToWidget,
-                            key.position.y,
-                        )
-                        .with_handled(true),
+                    ui.send_handled(
+                        self.context_menu.key_value,
+                        NumericUpDownMessage::Value(key.position.y),
                     );
                 }
             }
@@ -1386,18 +1380,22 @@ impl CurveEditor {
             + Vector2::new(angle.cos(), angle.sin()).scale(self.handle_radius)
     }
 
+    fn tangent_local_position(&self, angle: f32, key_position: Vector2<f32>) -> Vector2<f32> {
+        self.point_to_local_space(key_position)
+            + Vector2::new(angle.cos(), angle.sin()).scale(self.handle_radius)
+    }
+
     fn send_curves(&self, ui: &UserInterface) {
-        ui.send_message(CurveEditorMessage::sync(
+        ui.post(
             self.handle,
-            MessageDirection::FromWidget,
-            self.curves.to_native(),
-        ));
+            CurveEditorMessage::Sync(self.curves.to_native()),
+        );
     }
 
     fn draw_background(&self, ctx: &mut DrawingContext) {
-        let screen_bounds = self.screen_bounds();
+        let bounds = self.bounding_rect();
         // Draw background.
-        ctx.push_rect_filled(&screen_bounds, None);
+        ctx.push_rect_filled(&bounds, None);
         ctx.commit(
             self.clip_bounds(),
             self.background(),
@@ -1409,8 +1407,8 @@ impl CurveEditor {
 
     fn draw_highlight_zones(&self, ctx: &mut DrawingContext) {
         for zone in self.highlight_zones.iter() {
-            let left_top_corner = self.point_to_screen_space(zone.rect.left_top_corner());
-            let bottom_right_corner = self.point_to_screen_space(zone.rect.right_bottom_corner());
+            let left_top_corner = self.point_to_local_space(zone.rect.left_top_corner());
+            let bottom_right_corner = self.point_to_local_space(zone.rect.right_bottom_corner());
             ctx.push_rect_filled(
                 &Rect::new(
                     left_top_corner.x,
@@ -1448,27 +1446,27 @@ impl CurveEditor {
 
         for y in self.curve_transform.y_step_iter(self.grid_size.y) {
             ctx.push_line(
-                self.point_to_screen_space(Vector2::new(local_left_bottom.x - step_size_x, y)),
-                self.point_to_screen_space(Vector2::new(local_right_top.x + step_size_x, y)),
+                self.point_to_local_space(Vector2::new(local_left_bottom.x - step_size_x, y)),
+                self.point_to_local_space(Vector2::new(local_right_top.x + step_size_x, y)),
                 1.0,
             );
         }
 
         for x in self.curve_transform.x_step_iter(self.grid_size.x) {
             ctx.push_line(
-                self.point_to_screen_space(Vector2::new(x, local_left_bottom.y + step_size_y)),
-                self.point_to_screen_space(Vector2::new(x, local_right_top.y - step_size_y)),
+                self.point_to_local_space(Vector2::new(x, local_left_bottom.y + step_size_y)),
+                self.point_to_local_space(Vector2::new(x, local_right_top.y - step_size_y)),
                 1.0,
             );
         }
 
         // Draw main axes.
-        let vb = self.point_to_screen_space(Vector2::new(0.0, -10e6));
-        let ve = self.point_to_screen_space(Vector2::new(0.0, 10e6));
+        let vb = self.point_to_local_space(Vector2::new(0.0, -10e6));
+        let ve = self.point_to_local_space(Vector2::new(0.0, 10e6));
         ctx.push_line(vb, ve, 2.0);
 
-        let hb = self.point_to_screen_space(Vector2::new(-10e6, 0.0));
-        let he = self.point_to_screen_space(Vector2::new(10e6, 0.0));
+        let hb = self.point_to_local_space(Vector2::new(-10e6, 0.0));
+        let he = self.point_to_local_space(Vector2::new(10e6, 0.0));
         ctx.push_line(hb, he, 2.0);
 
         ctx.commit(
@@ -1484,10 +1482,10 @@ impl CurveEditor {
 
         if self.show_y_values {
             for y in self.curve_transform.y_step_iter(self.grid_size.y) {
-                text.set_text(format!("{y:.1}")).build();
+                text.set_text(format!("{y:.1}")).measure_and_arrange();
                 ctx.draw_text(
                     self.clip_bounds(),
-                    self.point_to_screen_space(Vector2::new(local_left_bottom_n.x, y)),
+                    self.point_to_local_space(Vector2::new(local_left_bottom_n.x, y)),
                     &self.material,
                     &text,
                 );
@@ -1496,10 +1494,10 @@ impl CurveEditor {
 
         if self.show_x_values {
             for x in self.curve_transform.x_step_iter(self.grid_size.x) {
-                text.set_text(format!("{x:.1}")).build();
+                text.set_text(format!("{x:.1}")).measure_and_arrange();
                 ctx.draw_text(
                     self.clip_bounds(),
-                    self.point_to_screen_space(Vector2::new(x, local_left_bottom_n.y)),
+                    self.point_to_local_space(Vector2::new(x, local_left_bottom_n.y)),
                     &self.material,
                     &text,
                 );
@@ -1514,11 +1512,11 @@ impl CurveEditor {
             let draw_keys = curve.keys();
 
             if let Some(first) = draw_keys.first() {
-                let screen_pos = self.point_to_screen_space(first.position);
+                let screen_pos = self.point_to_local_space(first.position);
                 ctx.push_line(Vector2::new(0.0, screen_pos.y), screen_pos, 1.0);
             }
             if let Some(last) = draw_keys.last() {
-                let screen_pos = self.point_to_screen_space(last.position);
+                let screen_pos = self.point_to_local_space(last.position);
                 ctx.push_line(
                     screen_pos,
                     Vector2::new(screen_bounds.x() + screen_bounds.w(), screen_pos.y),
@@ -1530,8 +1528,8 @@ impl CurveEditor {
                 let left = &pair[0];
                 let right = &pair[1];
 
-                let left_pos = self.point_to_screen_space(left.position);
-                let right_pos = self.point_to_screen_space(right.position);
+                let left_pos = self.point_to_local_space(left.position);
+                let right_pos = self.point_to_local_space(right.position);
 
                 let steps = ((right_pos.x - left_pos.x).abs() / 2.0) as usize;
 
@@ -1597,12 +1595,12 @@ impl CurveEditor {
         }
     }
 
-    fn draw_keys(&self, ctx: &mut DrawingContext) {
-        for curve in self.curves.iter() {
+    fn draw_keys(&self, curves: &CurvesContainer, brush: &Brush, ctx: &mut DrawingContext) {
+        for curve in curves.iter() {
             let keys_to_draw = curve.keys();
 
             for key in keys_to_draw.iter() {
-                let origin = self.point_to_screen_space(key.position);
+                let origin = self.point_to_local_space(key.position);
                 let size = Vector2::new(self.key_size, self.key_size);
                 let half_size = size.scale(0.5);
 
@@ -1658,7 +1656,7 @@ impl CurveEditor {
                     } = key.kind
                     {
                         if show_left {
-                            let left_handle_pos = self.tangent_screen_position(
+                            let left_handle_pos = self.tangent_local_position(
                                 wrap_angle(left_tangent.atan()) + std::f32::consts::PI,
                                 key.position,
                             );
@@ -1672,7 +1670,7 @@ impl CurveEditor {
                         }
 
                         if show_right {
-                            let right_handle_pos = self.tangent_screen_position(
+                            let right_handle_pos = self.tangent_local_position(
                                 wrap_angle(right_tangent.atan()),
                                 key.position,
                             );
@@ -1692,7 +1690,7 @@ impl CurveEditor {
                     if selected {
                         self.selected_key_brush.clone()
                     } else {
-                        self.key_brush.clone()
+                        brush.clone()
                     },
                     CommandTexture::None,
                     &self.material,
@@ -1706,8 +1704,8 @@ impl CurveEditor {
         if let Some(OperationContext::BoxSelection { min, max, .. }) =
             self.operation_context.as_ref()
         {
-            let min = self.point_to_screen_space(min.get());
-            let max = self.point_to_screen_space(max.get());
+            let min = self.point_to_local_space(min.get());
+            let max = self.point_to_local_space(max.get());
             let rect = Rect::new(min.x, min.y, max.x - min.x, max.y - min.y);
 
             ctx.push_rect(&rect, 1.0);
@@ -1735,6 +1733,7 @@ pub struct CurveEditorBuilder {
     min_zoom: Vector2<f32>,
     max_zoom: Vector2<f32>,
     highlight_zones: Vec<HighlightZone>,
+    show_background_curves: bool,
 }
 
 impl CurveEditorBuilder {
@@ -1752,6 +1751,7 @@ impl CurveEditorBuilder {
             min_zoom: Vector2::new(0.001, 0.001),
             max_zoom: Vector2::new(1000.0, 1000.0),
             highlight_zones: Default::default(),
+            show_background_curves: true,
         }
     }
 
@@ -1811,7 +1811,12 @@ impl CurveEditorBuilder {
         self
     }
 
-    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn with_show_background_curves(mut self, show: bool) -> Self {
+        self.show_background_curves = show;
+        self
+    }
+
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<CurveEditor> {
         let background_curve_brush = ctx.style.get_or_default::<Brush>(Style::BRUSH_LIGHT);
         let key_brush = Brush::Solid(Color::opaque(140, 140, 140));
 
@@ -1834,125 +1839,138 @@ impl CurveEditorBuilder {
         let key_location;
         let copy_keys;
         let paste_keys;
-        let context_menu = ContextMenuBuilder::new(
-            PopupBuilder::new(WidgetBuilder::new()).with_content(
-                StackPanelBuilder::new(
-                    WidgetBuilder::new()
-                        .with_child({
-                            key_properties = GridBuilder::new(
-                                WidgetBuilder::new()
-                                    .with_enabled(false)
-                                    .with_child(
-                                        TextBuilder::new(
-                                            WidgetBuilder::new()
-                                                .with_vertical_alignment(VerticalAlignment::Center)
-                                                .with_margin(Thickness::uniform(1.0))
-                                                .on_row(0)
-                                                .on_column(0),
-                                        )
-                                        .with_text("Location")
-                                        .build(ctx),
+        let context_menu =
+            ContextMenuBuilder::new(
+                PopupBuilder::new(WidgetBuilder::new())
+                    .with_content(
+                        StackPanelBuilder::new(
+                            WidgetBuilder::new()
+                                .with_child({
+                                    key_properties = GridBuilder::new(
+                                        WidgetBuilder::new()
+                                            .with_enabled(false)
+                                            .with_child(
+                                                TextBuilder::new(
+                                                    WidgetBuilder::new()
+                                                        .with_vertical_alignment(
+                                                            VerticalAlignment::Center,
+                                                        )
+                                                        .with_margin(Thickness::uniform(1.0))
+                                                        .on_row(0)
+                                                        .on_column(0),
+                                                )
+                                                .with_text("Location")
+                                                .build(ctx),
+                                            )
+                                            .with_child({
+                                                key_location = NumericUpDownBuilder::<f32>::new(
+                                                    WidgetBuilder::new()
+                                                        .with_margin(Thickness::uniform(1.0))
+                                                        .on_row(0)
+                                                        .on_column(1),
+                                                )
+                                                .build(ctx);
+                                                key_location
+                                            })
+                                            .with_child(
+                                                TextBuilder::new(
+                                                    WidgetBuilder::new()
+                                                        .with_vertical_alignment(
+                                                            VerticalAlignment::Center,
+                                                        )
+                                                        .with_margin(Thickness::uniform(1.0))
+                                                        .on_row(1)
+                                                        .on_column(0),
+                                                )
+                                                .with_text("Value")
+                                                .build(ctx),
+                                            )
+                                            .with_child({
+                                                key_value = NumericUpDownBuilder::<f32>::new(
+                                                    WidgetBuilder::new()
+                                                        .with_margin(Thickness::uniform(1.0))
+                                                        .on_row(1)
+                                                        .on_column(1),
+                                                )
+                                                .build(ctx);
+                                                key_value
+                                            }),
                                     )
-                                    .with_child({
-                                        key_location = NumericUpDownBuilder::<f32>::new(
-                                            WidgetBuilder::new()
-                                                .with_margin(Thickness::uniform(1.0))
-                                                .on_row(0)
-                                                .on_column(1),
-                                        )
+                                    .add_column(Column::auto())
+                                    .add_column(Column::stretch())
+                                    .add_row(Row::strict(22.0))
+                                    .add_row(Row::strict(22.0))
+                                    .build(ctx);
+                                    key_properties
+                                })
+                                .with_child({
+                                    add_key = MenuItemBuilder::new(WidgetBuilder::new())
+                                        .with_content(MenuItemContent::text("Add Key"))
                                         .build(ctx);
-                                        key_location
-                                    })
-                                    .with_child(
-                                        TextBuilder::new(
-                                            WidgetBuilder::new()
-                                                .with_vertical_alignment(VerticalAlignment::Center)
-                                                .with_margin(Thickness::uniform(1.0))
-                                                .on_row(1)
-                                                .on_column(0),
-                                        )
-                                        .with_text("Value")
-                                        .build(ctx),
+                                    add_key
+                                })
+                                .with_child({
+                                    remove = MenuItemBuilder::new(
+                                        WidgetBuilder::new().with_enabled(false),
                                     )
-                                    .with_child({
-                                        key_value = NumericUpDownBuilder::<f32>::new(
-                                            WidgetBuilder::new()
-                                                .with_margin(Thickness::uniform(1.0))
-                                                .on_row(1)
-                                                .on_column(1),
-                                        )
+                                    .with_content(MenuItemContent::text("Remove"))
+                                    .build(ctx);
+                                    remove
+                                })
+                                .with_child({
+                                    key = MenuItemBuilder::new(
+                                        WidgetBuilder::new().with_enabled(false),
+                                    )
+                                    .with_content(MenuItemContent::text("Key..."))
+                                    .with_items(vec![
+                                        {
+                                            make_constant =
+                                                MenuItemBuilder::new(WidgetBuilder::new())
+                                                    .with_content(MenuItemContent::text("Constant"))
+                                                    .build(ctx);
+                                            make_constant
+                                        },
+                                        {
+                                            make_linear =
+                                                MenuItemBuilder::new(WidgetBuilder::new())
+                                                    .with_content(MenuItemContent::text("Linear"))
+                                                    .build(ctx);
+                                            make_linear
+                                        },
+                                        {
+                                            make_cubic = MenuItemBuilder::new(WidgetBuilder::new())
+                                                .with_content(MenuItemContent::text("Cubic"))
+                                                .build(ctx);
+                                            make_cubic
+                                        },
+                                    ])
+                                    .build(ctx);
+                                    key
+                                })
+                                .with_child({
+                                    zoom_to_fit = MenuItemBuilder::new(WidgetBuilder::new())
+                                        .with_content(MenuItemContent::text("Zoom To Fit"))
                                         .build(ctx);
-                                        key_value
-                                    }),
-                            )
-                            .add_column(Column::auto())
-                            .add_column(Column::stretch())
-                            .add_row(Row::strict(22.0))
-                            .add_row(Row::strict(22.0))
-                            .build(ctx);
-                            key_properties
-                        })
-                        .with_child({
-                            add_key = MenuItemBuilder::new(WidgetBuilder::new())
-                                .with_content(MenuItemContent::text("Add Key"))
-                                .build(ctx);
-                            add_key
-                        })
-                        .with_child({
-                            remove = MenuItemBuilder::new(WidgetBuilder::new().with_enabled(false))
-                                .with_content(MenuItemContent::text("Remove"))
-                                .build(ctx);
-                            remove
-                        })
-                        .with_child({
-                            key = MenuItemBuilder::new(WidgetBuilder::new().with_enabled(false))
-                                .with_content(MenuItemContent::text("Key..."))
-                                .with_items(vec![
-                                    {
-                                        make_constant = MenuItemBuilder::new(WidgetBuilder::new())
-                                            .with_content(MenuItemContent::text("Constant"))
-                                            .build(ctx);
-                                        make_constant
-                                    },
-                                    {
-                                        make_linear = MenuItemBuilder::new(WidgetBuilder::new())
-                                            .with_content(MenuItemContent::text("Linear"))
-                                            .build(ctx);
-                                        make_linear
-                                    },
-                                    {
-                                        make_cubic = MenuItemBuilder::new(WidgetBuilder::new())
-                                            .with_content(MenuItemContent::text("Cubic"))
-                                            .build(ctx);
-                                        make_cubic
-                                    },
-                                ])
-                                .build(ctx);
-                            key
-                        })
-                        .with_child({
-                            zoom_to_fit = MenuItemBuilder::new(WidgetBuilder::new())
-                                .with_content(MenuItemContent::text("Zoom To Fit"))
-                                .build(ctx);
-                            zoom_to_fit
-                        })
-                        .with_child({
-                            copy_keys = MenuItemBuilder::new(WidgetBuilder::new())
-                                .with_content(MenuItemContent::text("Copy Selected Keys"))
-                                .build(ctx);
-                            copy_keys
-                        })
-                        .with_child({
-                            paste_keys = MenuItemBuilder::new(WidgetBuilder::new())
-                                .with_content(MenuItemContent::text("Paste Keys"))
-                                .build(ctx);
-                            paste_keys
-                        }),
-                )
-                .build(ctx),
-            ),
-        )
-        .build(ctx);
+                                    zoom_to_fit
+                                })
+                                .with_child({
+                                    copy_keys = MenuItemBuilder::new(WidgetBuilder::new())
+                                        .with_content(MenuItemContent::text("Copy Selected Keys"))
+                                        .build(ctx);
+                                    copy_keys
+                                })
+                                .with_child({
+                                    paste_keys = MenuItemBuilder::new(WidgetBuilder::new())
+                                        .with_content(MenuItemContent::text("Paste Keys"))
+                                        .build(ctx);
+                                    paste_keys
+                                }),
+                        )
+                        .build(ctx),
+                    )
+                    .with_restrict_picking(false),
+            )
+            .build(ctx);
         let context_menu = RcUiNodeHandle::new(context_menu, ctx.sender());
 
         if self.widget_builder.foreground.is_none() {
@@ -2006,9 +2024,10 @@ impl CurveEditorBuilder {
             zoom_to_fit_timer: None,
             clipboard: Default::default(),
             background_curve_brush,
+            show_background_curves: self.show_background_curves,
         };
 
-        ctx.add_node(UiNode::new(editor))
+        ctx.add(editor)
     }
 }
 

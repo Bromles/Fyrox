@@ -18,49 +18,52 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::{
-    core::{log::Log, pool::Handle},
-    generic_animation::machine::parameter::{Parameter, ParameterContainer, ParameterDefinition},
-    graph::{BaseSceneGraph, PrefabData, SceneGraph, SceneGraphNode},
-    gui::{
-        inspector::{
-            editors::{
-                collection::VecCollectionPropertyEditorDefinition,
-                enumeration::EnumPropertyEditorDefinition,
-                inspectable::InspectablePropertyEditorDefinition,
-                PropertyEditorDefinitionContainer,
-            },
-            InspectorBuilder, InspectorContext, InspectorMessage, PropertyAction,
-        },
-        message::UiMessage,
-        scroll_viewer::ScrollViewerBuilder,
-        widget::WidgetBuilder,
-        window::{WindowBuilder, WindowTitle},
-        BuildContext, UiNode, UserInterface,
-    },
-};
-use crate::plugins::absm::command::fetch_machine;
-use crate::plugins::inspector::editors::make_property_editors_container;
 use crate::{
-    command::make_command, message::MessageSender, Message, MessageDirection, MSG_SYNC_FLAG,
+    command::make_command,
+    fyrox::{
+        core::{log::Log, pool::Handle},
+        generic_animation::machine::parameter::{
+            Parameter, ParameterContainer, ParameterDefinition,
+        },
+        graph::{NodeWrapper, PrefabData, SceneGraph},
+        gui::{
+            inspector::{
+                editors::{
+                    collection::VecCollectionPropertyEditorDefinition,
+                    enumeration::EnumPropertyEditorDefinition,
+                    inspectable::InspectablePropertyEditorDefinition,
+                    PropertyEditorDefinitionContainer,
+                },
+                InspectorBuilder, InspectorContext, InspectorContextArgs, InspectorMessage,
+                PropertyAction,
+            },
+            message::UiMessage,
+            scroll_viewer::ScrollViewerBuilder,
+            widget::WidgetBuilder,
+            window::{WindowBuilder, WindowTitle},
+            BuildContext, UserInterface,
+        },
+    },
+    message::MessageSender,
+    plugins::absm::command::fetch_machine,
+    Message,
 };
-use fyrox::asset::manager::ResourceManager;
-use fyrox::gui::inspector::InspectorContextArgs;
+use fyrox::gui::inspector::Inspector;
+use fyrox::gui::window::Window;
+use fyrox::gui::Thickness;
 use std::sync::Arc;
 
 pub struct ParameterPanel {
-    pub window: Handle<UiNode>,
-    inspector: Handle<UiNode>,
+    pub window: Handle<Window>,
+    inspector: Handle<Inspector>,
     property_editors: Arc<PropertyEditorDefinitionContainer>,
 }
 
 impl ParameterPanel {
     pub fn new(
         ctx: &mut BuildContext,
-        sender: MessageSender,
-        resource_manager: ResourceManager,
+        property_editors: Arc<PropertyEditorDefinitionContainer>,
     ) -> Self {
-        let property_editors = make_property_editors_container(sender, resource_manager);
         property_editors
             .insert(VecCollectionPropertyEditorDefinition::<ParameterDefinition>::new());
         property_editors.insert(EnumPropertyEditorDefinition::<Parameter>::new());
@@ -72,7 +75,10 @@ impl ParameterPanel {
             .with_content(
                 ScrollViewerBuilder::new(WidgetBuilder::new())
                     .with_content({
-                        inspector = InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
+                        inspector = InspectorBuilder::new(
+                            WidgetBuilder::new().with_margin(Thickness::uniform(3.0)),
+                        )
+                        .build(ctx);
                         inspector
                     })
                     .build(ctx),
@@ -84,7 +90,7 @@ impl ParameterPanel {
         Self {
             window,
             inspector,
-            property_editors: Arc::new(property_editors),
+            property_editors,
         }
     }
 
@@ -100,39 +106,29 @@ impl ParameterPanel {
                     ctx: &mut ui.build_ctx(),
                     definition_container: self.property_editors.clone(),
                     environment: None,
-                    sync_flag: MSG_SYNC_FLAG,
                     layer_index: 0,
                     generate_property_string_values: true,
                     filter: Default::default(),
                     name_column_width: 150.0,
+                    hide_name_column: false,
                     base_path: Default::default(),
+                    has_parent_object: false,
                 })
             })
             .unwrap_or_default();
 
-        ui.send_message(InspectorMessage::context(
-            self.inspector,
-            MessageDirection::ToWidget,
-            inspector_context,
-        ));
+        ui.send(self.inspector, InspectorMessage::Context(inspector_context));
     }
 
     pub fn reset(&self, ui: &UserInterface) {
-        ui.send_message(InspectorMessage::context(
+        ui.send(
             self.inspector,
-            MessageDirection::ToWidget,
-            Default::default(),
-        ));
+            InspectorMessage::Context(Default::default()),
+        );
     }
 
     pub fn sync_to_model(&mut self, ui: &mut UserInterface, parameters: &ParameterContainer) {
-        let ctx = ui
-            .node(self.inspector)
-            .cast::<fyrox::gui::inspector::Inspector>()
-            .unwrap()
-            .context()
-            .clone();
-
+        let ctx = ui[self.inspector].context().clone();
         if let Err(sync_errors) = ctx.sync(
             parameters,
             ui,
@@ -156,31 +152,27 @@ impl ParameterPanel {
         is_in_preview_mode: bool,
     ) where
         P: PrefabData<Graph = G>,
-        G: SceneGraph<Node = N, Prefab = P>,
-        N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+        G: SceneGraph<NodeWrapper = N, Prefab = P>,
+        N: NodeWrapper<SceneGraph = G, ResourceData = P>,
     {
-        if message.destination() == self.inspector
-            && message.direction() == MessageDirection::FromWidget
+        if let Some(InspectorMessage::PropertyChanged(args)) =
+            message.data_from::<InspectorMessage>(self.inspector)
         {
-            if let Some(InspectorMessage::PropertyChanged(args)) =
-                message.data::<InspectorMessage>()
-            {
-                if is_in_preview_mode {
-                    PropertyAction::from_field_kind(&args.value).apply(
-                        &args.path(),
-                        parameters,
-                        &mut |result| {
-                            Log::verify(result);
-                        },
-                    );
-                } else {
-                    sender.send(Message::DoCommand(
-                        make_command(args, move |ctx| {
-                            fetch_machine(ctx, absm_node_handle).parameters_mut()
-                        })
-                        .unwrap(),
-                    ));
-                }
+            if is_in_preview_mode {
+                PropertyAction::from_field_action(&args.action).apply(
+                    &args.path(),
+                    parameters,
+                    &mut |result| {
+                        Log::verify(result);
+                    },
+                );
+            } else {
+                sender.send(Message::DoCommand(
+                    make_command(args, move |ctx| {
+                        Some(fetch_machine(ctx, absm_node_handle).parameters_mut())
+                    })
+                    .unwrap(),
+                ));
             }
         }
     }

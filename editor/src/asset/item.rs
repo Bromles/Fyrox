@@ -25,35 +25,39 @@ use crate::{
     fyrox::{
         asset::{manager::ResourceManager, untyped::UntypedResource, Resource, TypedResourceData},
         core::{
-            algebra::Vector2, futures::executor::block_on, make_relative_path, pool::Handle,
-            reflect::prelude::*, type_traits::prelude::*, uuid_provider, visitor::prelude::*,
+            algebra::Vector2, color::Color, futures::executor::block_on, make_relative_path,
+            parking_lot::lock_api::Mutex, pool::Handle, reflect::prelude::*, visitor::prelude::*,
         },
+        graph::SceneGraph,
         gui::{
             border::BorderBuilder,
-            define_constructor,
+            brush::Brush,
             draw::{CommandTexture, Draw, DrawingContext},
             formatted_text::WrapMode,
             grid::{Column, GridBuilder, Row},
             image::{ImageBuilder, ImageMessage},
-            message::{MessageDirection, UiMessage},
+            message::{MouseButton, UiMessage},
             style::{resource::StyleResourceExt, Style},
             text::TextBuilder,
             widget::{Widget, WidgetBuilder, WidgetMessage},
             BuildContext, Control, HorizontalAlignment, RcUiNodeHandle, Thickness, UiNode,
-            UserInterface,
+            UserInterface, VerticalAlignment,
         },
         material::Material,
+        resource::texture::TextureResource,
         scene::tilemap::{brush::TileMapBrush, tileset::TileSet},
     },
     message::MessageSender,
     Message,
 };
-
-use fyrox::gui::message::MouseButton;
-use fyrox::resource::texture::TextureResource;
+use fyrox::core::ok_or_return;
+use fyrox::gui::border::Border;
+use fyrox::gui::image::Image;
+use fyrox::gui::message::MessageData;
 use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub const DEFAULT_SIZE: f32 = 60.0;
@@ -65,22 +69,27 @@ pub enum AssetItemMessage {
     Icon {
         texture: Option<TextureResource>,
         flip_y: bool,
+        color: Color,
+    },
+    MoveTo {
+        src_item_path: PathBuf,
+        dest_dir: PathBuf,
     },
 }
-
-impl AssetItemMessage {
-    define_constructor!(AssetItemMessage:Select => fn select(bool), layout: false);
-    define_constructor!(AssetItemMessage:Icon => fn icon(texture: Option<TextureResource>, flip_y: bool), layout: false);
-}
+impl MessageData for AssetItemMessage {}
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Debug, Clone, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "54f7d9c1-e707-4c8c-a5c9-3fc5cc80b545"
+)]
 pub struct AssetItem {
     widget: Widget,
     pub path: PathBuf,
-    preview: Handle<UiNode>,
+    preview: Handle<Image>,
     selected: bool,
+    text_border: Handle<Border>,
     #[visit(skip)]
     #[reflect(hidden)]
     sender: Option<MessageSender>,
@@ -90,9 +99,13 @@ pub struct AssetItem {
 }
 
 impl AssetItem {
-    pub const SELECTED_FOREGROUND: &'static str = "AssetItem.SelectedForeground";
-    pub const SELECTED_BACKGROUND: &'static str = "AssetItem.SelectedBackground";
-    pub const DESELECTED_BRUSH: &'static str = "AssetItem.DeselectedBrush";
+    pub const SELECTED_PREVIEW: &'static str = "AssetItem.SelectedPreview";
+    pub const SELECTED_TEXT_BORDER_BACKGROUND: &'static str =
+        "AssetItem.SelectedTextBorderBackground";
+    pub const TEXT_BORDER_DROP_BRUSH: &'static str = "AssetItem.TextBorderDropBrush";
+    pub const DESELECTED_PREVIEW: &'static str = "AssetItem.DeselectedPreview";
+    pub const DESELECTED_TEXT_BORDER_BACKGROUND: &'static str = "AssetItem.DeselectedTextBorder";
+    pub const NORMAL_TEXT_BORDER_BRUSH: &'static str = "AssetItem.NormalTextBorderBrush";
 
     pub fn relative_path(&self) -> Result<PathBuf, std::io::Error> {
         let Some(resource_manager) = self.resource_manager.as_ref() else {
@@ -172,6 +185,61 @@ impl AssetItem {
             open_in_explorer(&self.path)
         }
     }
+
+    fn try_post_move_to_message(&self, ui: &UserInterface, dropped: Handle<UiNode>) {
+        let dropped_item = ok_or_return!(ui.try_get_of_type::<Self>(dropped));
+
+        if !self.path.is_dir() {
+            return;
+        }
+
+        ui.post(
+            dropped,
+            AssetItemMessage::MoveTo {
+                src_item_path: dropped_item.path.clone(),
+                dest_dir: self.path.clone(),
+            },
+        );
+    }
+
+    fn set_selected(&mut self, selected: bool, ui: &UserInterface) {
+        if self.selected == selected {
+            return;
+        }
+        self.selected = selected;
+
+        let (preview_brush, text_border_brush) = if selected {
+            (
+                ui.style.property(Self::SELECTED_PREVIEW),
+                ui.style.property(Self::SELECTED_TEXT_BORDER_BACKGROUND),
+            )
+        } else {
+            (
+                ui.style.property(Self::DESELECTED_PREVIEW),
+                ui.style.property(Self::DESELECTED_TEXT_BORDER_BACKGROUND),
+            )
+        };
+
+        ui.send(self.preview, WidgetMessage::Background(preview_brush));
+        ui.send(
+            self.text_border,
+            WidgetMessage::Background(text_border_brush),
+        );
+    }
+
+    fn can_be_dropped_to(&self, dest: &AssetItem) -> bool {
+        if self.path.is_file() && dest.path.is_dir() {
+            let Some(name) = self.path.file_name() else {
+                return false;
+            };
+            let dest_path = dest.path.join(name);
+            self.resource_manager.as_ref().is_some_and(|rm| {
+                block_on(rm.can_resource_be_moved(self.path.as_path(), dest_path, true))
+            })
+        } else {
+            self.path.is_dir() && dest.path.is_dir()
+        }
+    }
 }
 
 impl Deref for AssetItem {
@@ -188,23 +256,12 @@ impl DerefMut for AssetItem {
     }
 }
 
-uuid_provider!(AssetItem = "54f7d9c1-e707-4c8c-a5c9-3fc5cc80b545");
-
 impl Control for AssetItem {
     fn draw(&self, drawing_context: &mut DrawingContext) {
-        let bounds = self.bounding_rect();
-        drawing_context.push_rect_filled(&bounds, None);
+        drawing_context.push_rect_filled(&self.bounding_rect(), None);
         drawing_context.commit(
             self.clip_bounds(),
-            self.background(),
-            CommandTexture::None,
-            &self.material,
-            None,
-        );
-        drawing_context.push_rect(&bounds, 1.0);
-        drawing_context.commit(
-            self.clip_bounds(),
-            self.foreground(),
+            Brush::Solid(Color::TRANSPARENT),
             CommandTexture::None,
             &self.material,
             None,
@@ -214,64 +271,74 @@ impl Control for AssetItem {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(WidgetMessage::MouseDown { button, .. }) = message.data::<WidgetMessage>() {
-            if !message.handled() {
-                if *button == MouseButton::Left {
+        if let Some(msg) = message.data::<WidgetMessage>() {
+            match msg {
+                WidgetMessage::MouseDown {
+                    button: MouseButton::Left | MouseButton::Right,
+                    ..
+                } if !message.handled() && !ui.keyboard_modifiers().alt => {
                     message.set_handled(true);
+                    ui.send(self.handle(), AssetItemMessage::Select(true));
                 }
-                ui.send_message(AssetItemMessage::select(
-                    self.handle(),
-                    MessageDirection::ToWidget,
-                    true,
-                ));
+                WidgetMessage::DragOver(dropped)
+                    if ui
+                        .try_get_of_type::<AssetItem>(*dropped)
+                        .ok()
+                        .is_some_and(|dropped| dropped.can_be_dropped_to(self)) =>
+                {
+                    ui.send(
+                        self.text_border,
+                        WidgetMessage::Foreground(ui.style.property(Self::TEXT_BORDER_DROP_BRUSH)),
+                    );
+                }
+                WidgetMessage::MouseLeave => {
+                    ui.send(
+                        self.text_border,
+                        WidgetMessage::Foreground(
+                            ui.style.property(Self::DESELECTED_TEXT_BORDER_BACKGROUND),
+                        ),
+                    );
+                }
+                WidgetMessage::Drop(dropped) => {
+                    self.try_post_move_to_message(ui, *dropped);
+                }
+                WidgetMessage::DoubleClick { button, .. } if *button == MouseButton::Left => {
+                    self.open();
+                }
+                _ => {}
             }
         } else if let Some(msg) = message.data::<AssetItemMessage>() {
             match msg {
-                AssetItemMessage::Select(select) => {
-                    if self.selected != *select && message.destination() == self.handle() {
-                        self.selected = *select;
-                        ui.send_message(WidgetMessage::foreground(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                            if *select {
-                                ui.style.property(Self::SELECTED_FOREGROUND)
-                            } else {
-                                ui.style.property(Self::DESELECTED_BRUSH)
-                            },
-                        ));
-                        ui.send_message(WidgetMessage::background(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                            if *select {
-                                ui.style.property(Self::SELECTED_BACKGROUND)
-                            } else {
-                                ui.style.property(Self::DESELECTED_BRUSH)
-                            },
-                        ));
-                    }
+                AssetItemMessage::Select(select) if message.destination() == self.handle() => {
+                    self.set_selected(*select, ui);
                 }
-                AssetItemMessage::Icon { texture, flip_y } => {
-                    ui.send_message(ImageMessage::texture(
+                AssetItemMessage::Icon {
+                    texture,
+                    flip_y,
+                    color,
+                } => {
+                    ui.send(self.preview, ImageMessage::Texture(texture.clone()));
+                    ui.send(self.preview, ImageMessage::Flip(*flip_y));
+                    ui.send(
                         self.preview,
-                        MessageDirection::ToWidget,
-                        texture.clone(),
-                    ));
-                    ui.send_message(ImageMessage::flip(
-                        self.preview,
-                        MessageDirection::ToWidget,
-                        *flip_y,
-                    ))
+                        WidgetMessage::Background(Brush::Solid(*color).into()),
+                    )
                 }
+                _ => (),
             }
-        } else if let Some(WidgetMessage::DoubleClick { .. }) = message.data() {
-            self.open();
         }
+    }
+
+    fn accepts_drop(&self, widget: Handle<UiNode>, ui: &UserInterface) -> bool {
+        ui.try_get_of_type::<Self>(widget)
+            .ok()
+            .is_some_and(|asset_item| asset_item.can_be_dropped_to(self))
     }
 }
 
 pub struct AssetItemBuilder {
     widget_builder: WidgetBuilder,
-    path: Option<PathBuf>,
+    path: PathBuf,
     icon: Option<TextureResource>,
 }
 
@@ -301,13 +368,13 @@ impl AssetItemBuilder {
     pub fn new(widget_builder: WidgetBuilder) -> Self {
         Self {
             widget_builder,
-            path: None,
+            path: Default::default(),
             icon: None,
         }
     }
 
     pub fn with_path<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.path = Some(path.as_ref().to_owned());
+        self.path = path.as_ref().to_owned();
         self
     }
 
@@ -321,11 +388,10 @@ impl AssetItemBuilder {
         resource_manager: ResourceManager,
         message_sender: MessageSender,
         ctx: &mut BuildContext,
-    ) -> Handle<UiNode> {
-        let path = self.path.unwrap_or_default();
-
+    ) -> Handle<AssetItem> {
         let preview = ImageBuilder::new(
             WidgetBuilder::new()
+                .with_background(ctx.style.property(AssetItem::DESELECTED_PREVIEW))
                 .with_margin(Thickness::uniform(2.0))
                 .with_width(DEFAULT_SIZE)
                 .with_height(DEFAULT_SIZE),
@@ -333,29 +399,49 @@ impl AssetItemBuilder {
         .with_opt_texture(self.icon)
         .build(ctx);
 
+        let text_border = BorderBuilder::new(
+            WidgetBuilder::new()
+                .on_row(1)
+                .with_tooltip(make_tooltip(ctx, &format!("{}", self.path.display())))
+                .with_foreground(Brush::Solid(Color::TRANSPARENT).into())
+                .with_background(
+                    ctx.style
+                        .property(AssetItem::DESELECTED_TEXT_BORDER_BACKGROUND),
+                )
+                .with_child(
+                    TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(2.0)))
+                        .with_vertical_text_alignment(VerticalAlignment::Center)
+                        .with_horizontal_text_alignment(HorizontalAlignment::Center)
+                        .with_wrap(WrapMode::Word)
+                        .with_text(
+                            self.path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                        )
+                        .with_shadow(true)
+                        .build(ctx),
+                ),
+        )
+        .with_pad_by_corner_radius(false)
+        .with_stroke_thickness(Thickness::uniform(2.0).into())
+        .with_corner_radius(4.0.into())
+        .build(ctx);
+
         let item = AssetItem {
             widget: self
                 .widget_builder
+                .with_user_data(Arc::new(Mutex::new(self.path.clone())))
                 .with_margin(Thickness::uniform(1.0))
                 .with_allow_drag(true)
-                .with_foreground(ctx.style.property(Style::BRUSH_PRIMARY))
-                .with_tooltip(make_tooltip(ctx, &format!("{path:?}")))
+                .with_allow_drop(true)
                 .with_child(
                     GridBuilder::new(
                         WidgetBuilder::new()
                             .with_width(64.0)
                             .with_child(preview)
-                            .with_child(
-                                TextBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .on_row(1),
-                                )
-                                .with_wrap(WrapMode::Letter)
-                                .with_horizontal_text_alignment(HorizontalAlignment::Center)
-                                .with_text(path.file_name().unwrap_or_default().to_string_lossy())
-                                .build(ctx),
-                            ),
+                            .with_child(text_border),
                     )
                     .add_column(Column::strict(64.0))
                     .add_row(Row::strict(64.0))
@@ -363,13 +449,14 @@ impl AssetItemBuilder {
                     .build(ctx),
                 )
                 .build(ctx),
-            path,
+            path: self.path,
             preview,
             selected: false,
+            text_border,
             sender: Some(message_sender),
             resource_manager: Some(resource_manager),
         };
-        ctx.add_node(UiNode::new(item))
+        ctx.add(item)
     }
 }
 

@@ -40,11 +40,9 @@ impl ResourceGraphNode {
         // Look for dependent resources.
         let mut dependent_resources = FxHashSet::default();
 
-        let header = resource.0.lock();
+        let header = resource.lock();
         if let ResourceState::Ok { ref data, .. } = header.state {
-            (**data).as_reflect(&mut |entity| {
-                collect_used_resources(entity, &mut dependent_resources);
-            });
+            collect_used_resources(data, &mut dependent_resources);
         }
 
         children.extend(
@@ -117,6 +115,7 @@ impl ResourceDependencyGraph {
 mod test {
     use super::*;
     use crate::untyped::ResourceKind;
+    use fyrox_core::uuid::Uuid;
 
     #[test]
     fn resource_graph_node_new() {
@@ -131,11 +130,11 @@ mod test {
     fn resource_graph_node_pretty_print() {
         let mut s = String::new();
         let mut node = ResourceGraphNode::new(&UntypedResource::new_pending(
-            Default::default(),
+            Uuid::new_v4(),
             ResourceKind::External,
         ));
         let node2 = ResourceGraphNode::new(&UntypedResource::new_pending(
-            Default::default(),
+            Uuid::new_v4(),
             ResourceKind::External,
         ));
         node.children.push(node2);

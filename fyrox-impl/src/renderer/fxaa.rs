@@ -20,17 +20,18 @@
 
 use crate::{
     core::{algebra::Vector2, math::Rect, sstorage::ImmutableString},
+    graphics::{error::FrameworkError, framebuffer::GpuFrameBuffer, gpu_texture::GpuTexture},
     renderer::{
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
         },
-        framework::{error::FrameworkError, framebuffer::GpuFrameBuffer, gpu_texture::GpuTexture},
         make_viewport_matrix,
         resources::RendererResources,
         RenderPassStatistics,
     },
 };
+use fyrox_graphics::server::GraphicsServer;
 
 #[derive(Default)]
 pub struct FxaaRenderer {}
@@ -38,12 +39,15 @@ pub struct FxaaRenderer {}
 impl FxaaRenderer {
     pub(crate) fn render(
         &self,
+        server: &dyn GraphicsServer,
         viewport: Rect<i32>,
         frame_texture: &GpuTexture,
         frame_buffer: &GpuFrameBuffer,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("FXAA");
+
         let mut statistics = RenderPassStatistics::default();
 
         let frame_matrix = make_viewport_matrix(viewport);

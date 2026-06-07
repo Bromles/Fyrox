@@ -22,16 +22,15 @@ use crate::{
     fyrox::{
         core::{
             algebra::Vector2, color::Color, pool::ErasedHandle, pool::Handle, reflect::prelude::*,
-            type_traits::prelude::*, uuid_provider, visitor::prelude::*,
+            visitor::prelude::*,
         },
-        graph::BaseSceneGraph,
+        graph::SceneGraph,
         gui::{
             brush::Brush,
-            define_constructor,
             draw::{CommandTexture, Draw, DrawingContext},
             grid::{Column, GridBuilder, Row},
             image::ImageBuilder,
-            message::{MessageDirection, OsEvent, UiMessage},
+            message::{OsEvent, UiMessage},
             style::{resource::StyleResourceExt, Style, StyledProperty},
             text::{TextBuilder, TextMessage},
             tree::{Tree, TreeBuilder},
@@ -39,7 +38,6 @@ use crate::{
             widget::{Widget, WidgetBuilder, WidgetMessage},
             BuildContext, Control, Thickness, UiNode, UserInterface, VerticalAlignment,
         },
-        resource::texture::TextureResource,
     },
     load_image,
     message::MessageSender,
@@ -47,6 +45,11 @@ use crate::{
     Message,
 };
 
+use crate::world::SceneItemIcon;
+use fyrox::gui::grid::Grid;
+use fyrox::gui::image::Image;
+use fyrox::gui::message::MessageData;
+use fyrox::gui::text::Text;
 use std::{
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
@@ -57,11 +60,7 @@ pub enum SceneItemMessage {
     Name(String),
     Validate(Result<(), String>),
 }
-
-impl SceneItemMessage {
-    define_constructor!(SceneItemMessage:Name => fn name(String), layout: false);
-    define_constructor!(SceneItemMessage:Validate => fn validate(Result<(), String>), layout: false);
-}
+impl MessageData for SceneItemMessage {}
 
 #[derive(Copy, Clone)]
 pub enum DropAnchor {
@@ -72,17 +71,17 @@ pub enum DropAnchor {
     OnTop,
 }
 
-#[derive(Visit, Reflect, ComponentProvider)]
+#[derive(Visit, Reflect)]
 #[reflect(derived_type = "UiNode")]
+#[reflect(type_uuid = "16f35257-a250-413b-ab51-b1ad086a3a9c")]
 pub struct SceneItem {
-    #[component(include)]
     pub tree: Tree,
-    text_name: Handle<UiNode>,
+    text_name: Handle<Text>,
     name_value: String,
-    grid: Handle<UiNode>,
+    grid: Handle<Grid>,
     pub entity_handle: ErasedHandle,
     // Can be unassigned if there's no warning.
-    pub warning_icon: Handle<UiNode>,
+    pub warning_icon: Handle<Image>,
     #[reflect(hidden)]
     #[visit(skip)]
     sender: MessageSender,
@@ -132,8 +131,6 @@ impl DerefMut for SceneItem {
     }
 }
 
-uuid_provider!(SceneItem = "16f35257-a250-413b-ab51-b1ad086a3a9c");
-
 impl Control for SceneItem {
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
         self.tree.measure_override(ui, available_size)
@@ -176,21 +173,13 @@ impl Control for SceneItem {
         if let Some(SceneItemMessage::Name(name)) = message.data() {
             if message.destination() == self.handle() {
                 self.name_value = make_node_name(name, self.entity_handle);
-
-                ui.send_message(TextMessage::text(
-                    self.text_name,
-                    MessageDirection::ToWidget,
-                    self.name_value.clone(),
-                ));
+                ui.send(self.text_name, TextMessage::Text(self.name_value.clone()));
             }
         } else if let Some(SceneItemMessage::Validate(result)) = message.data() {
             if message.destination() == self.handle() {
                 match result {
                     Ok(_) => {
-                        ui.send_message(WidgetMessage::remove(
-                            self.warning_icon,
-                            MessageDirection::ToWidget,
-                        ));
+                        ui.send(self.warning_icon, WidgetMessage::Remove);
                         self.warning_icon = Handle::NONE;
                     }
                     Err(msg) => {
@@ -206,11 +195,7 @@ impl Control for SceneItem {
                         .with_opt_texture(load_image!("../../resources/warning.png"))
                         .build(&mut ui.build_ctx());
 
-                        ui.send_message(WidgetMessage::link(
-                            self.warning_icon,
-                            MessageDirection::ToWidget,
-                            self.grid,
-                        ));
+                        ui.send(self.warning_icon, WidgetMessage::link_with(self.grid));
                     }
                 }
             }
@@ -225,7 +210,7 @@ impl Control for SceneItem {
         } else if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
                 WidgetMessage::DragOver(_) => {
-                    if let Some(background) = ui.try_get(self.tree.background) {
+                    if let Ok(background) = ui.try_get_node(self.tree.background) {
                         let cursor_pos = ui.cursor_position();
                         let bounds = background.screen_bounds();
                         let deflated_bounds = bounds.deflate(0.0, 5.0);
@@ -274,7 +259,7 @@ pub struct SceneItemBuilder {
     tree_builder: TreeBuilder,
     entity_handle: ErasedHandle,
     name: String,
-    icon: Option<TextureResource>,
+    icon: Option<SceneItemIcon>,
     text_brush: Option<StyledProperty<Brush>>,
 }
 
@@ -299,7 +284,7 @@ impl SceneItemBuilder {
         self
     }
 
-    pub fn with_icon(mut self, icon: Option<TextureResource>) -> Self {
+    pub fn with_icon(mut self, icon: Option<SceneItemIcon>) -> Self {
         self.icon = icon;
         self
     }
@@ -309,7 +294,7 @@ impl SceneItemBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext, sender: MessageSender) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext, sender: MessageSender) -> Handle<SceneItem> {
         let text_name;
         let content = GridBuilder::new(
             WidgetBuilder::new()
@@ -320,9 +305,15 @@ impl SceneItemBuilder {
                             .with_height(16.0)
                             .on_column(0)
                             .with_margin(Thickness::left_right(1.0))
-                            .with_visibility(self.icon.is_some()),
+                            .with_visibility(self.icon.is_some())
+                            .with_background(
+                                self.icon
+                                    .as_ref()
+                                    .map(|i| StyledProperty::from(Brush::Solid(i.color)))
+                                    .unwrap_or_else(|| ctx.style.property(Style::BRUSH_TEXT)),
+                            ),
                     )
-                    .with_opt_texture(self.icon)
+                    .with_opt_texture(self.icon.as_ref().map(|i| i.icon.clone()))
                     .build(ctx),
                 )
                 .with_child({
@@ -333,9 +324,9 @@ impl SceneItemBuilder {
                                     .unwrap_or(ctx.style.property(Style::BRUSH_TEXT)),
                             )
                             .with_margin(Thickness::left(1.0))
-                            .on_column(1)
-                            .with_vertical_alignment(VerticalAlignment::Center),
+                            .on_column(1),
                     )
+                    .with_vertical_text_alignment(VerticalAlignment::Center)
                     .with_text(format!(
                         "{} ({}:{})",
                         self.name,
@@ -365,7 +356,7 @@ impl SceneItemBuilder {
             drop_anchor: DropAnchor::OnTop,
         };
 
-        ctx.add_node(UiNode::new(item))
+        ctx.add(item)
     }
 }
 

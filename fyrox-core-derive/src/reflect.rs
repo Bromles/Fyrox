@@ -33,7 +33,15 @@ use syn::Index;
 
 pub fn impl_reflect(ty_args: &args::TypeArgs) -> TokenStream2 {
     if ty_args.hide_all {
-        return self::gen_impl(ty_args, None, quote!(func(&[])), quote!(func(&mut [])));
+        return self::gen_impl(
+            ty_args,
+            None,
+            quote!(func(&[])),
+            quote!(func(&mut [])),
+            quote! {None},
+            quote! {None},
+            quote! {0},
+        );
     }
 
     match &ty_args.data {
@@ -65,6 +73,35 @@ pub fn gen_fields_metadata_body(
 
     quote! {
         #(#props,)*
+    }
+}
+
+pub fn gen_fields_getter_body(
+    props: &[Property],
+    field_getters: &[TokenStream2],
+    field_args: &ast::Fields<args::FieldArgs>,
+    is_mut: bool,
+) -> TokenStream2 {
+    let props = field_args
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_i, f)| !f.hidden)
+        .zip(props.iter().zip(field_getters))
+        .map(|((i, field), (prop, field_getter))| {
+            let field_definition =
+                self::quote_field_prop(&prop.value, i, field_getter, field, is_mut);
+            quote! {
+                if reflect_argument_index == #i {
+                    return Some(#field_definition);
+                }
+            }
+        });
+
+    quote! {
+        #(#props)*
+
+        None
     }
 }
 
@@ -118,8 +155,6 @@ fn quote_field_prop(
 
     let immutable_collection = field.immutable_collection;
 
-    let description = field.description.clone().unwrap_or_default();
-
     let variant = if is_mut {
         quote! { FieldMut }
     } else {
@@ -139,7 +174,6 @@ fn quote_field_prop(
                 max_value: #max_value,
                 step: #step,
                 precision: #precision,
-                description: #description,
             };
 
             #variant {
@@ -169,6 +203,11 @@ fn impl_reflect_struct(ty_args: &args::TypeArgs, field_args: &args::Fields) -> T
     let metadata_ref = gen_fields_metadata_body(&props, &fields, field_args, false);
     let metadata_mut = gen_fields_metadata_body(&props, &field_muts, field_args, true);
 
+    let getter_ref = gen_fields_getter_body(&props, &fields, field_args, false);
+    let getter_mut = gen_fields_getter_body(&props, &field_muts, field_args, true);
+
+    let fields_num = field_args.len();
+
     let set_field_body = self::struct_set_field_body(ty_args);
     self::gen_impl(
         ty_args,
@@ -179,6 +218,9 @@ fn impl_reflect_struct(ty_args: &args::TypeArgs, field_args: &args::Fields) -> T
         quote! {
             func(&mut [#metadata_mut])
         },
+        getter_ref,
+        getter_mut,
+        quote! {#fields_num},
     )
 }
 
@@ -203,7 +245,7 @@ fn struct_set_field_body(ty_args: &args::TypeArgs) -> Option<TokenStream2> {
                 }
                 Err(current) => {
                     let mut field_type_name = "(none)";
-                    self.field_mut(name, &mut |field| { field_type_name = field.unwrap().type_name() });
+                    self.find_field_mut(name, &mut |field| { field_type_name = field.unwrap().type_info_ref().type_name });
                     Err(SetFieldError::InvalidValue{field_type_name, value: current})
                 }
             })
@@ -217,11 +259,11 @@ fn struct_set_field_body(ty_args: &args::TypeArgs) -> Option<TokenStream2> {
             )*
             _ => {
                 let mut opt_value = Some(value);
-                self.field_mut(name, &mut move |field| {
+                self.find_field_mut(name, &mut move |field| {
                     let value = opt_value.take().unwrap();
                     match field {
                         Some(f) => func(f.set(value).map_err(|value| SetFieldError::InvalidValue {
-                            field_type_name: f.type_name(),
+                            field_type_name: f.type_info_ref().type_name,
                             value,
                         })),
                         None => func(Err(SetFieldError::NoSuchField {
@@ -236,8 +278,11 @@ fn struct_set_field_body(ty_args: &args::TypeArgs) -> Option<TokenStream2> {
 }
 
 fn impl_reflect_enum(ty_args: &args::TypeArgs, variant_args: &[args::VariantArgs]) -> TokenStream2 {
-    let mut fields_ref_ref = Vec::new();
-    let mut fields_mut = Vec::new();
+    let mut fields_refs = Vec::new();
+    let mut fields_muts = Vec::new();
+    let mut getter_refs = Vec::new();
+    let mut getter_muts = Vec::new();
+    let mut fields_count = Vec::new();
     for v in variant_args.iter() {
         let fields = v
             .fields
@@ -269,19 +314,36 @@ fn impl_reflect_enum(ty_args: &args::TypeArgs, variant_args: &[args::VariantArgs
         let metadata_ref = gen_fields_metadata_body(&props, &fields, &v.fields, false);
         let metadata_mut = gen_fields_metadata_body(&props, &field_muts, &v.fields, true);
 
-        fields_ref_ref.push(quote! {
+        let getter_ref = gen_fields_getter_body(&props, &fields, &v.fields, false);
+        let getter_mut = gen_fields_getter_body(&props, &field_muts, &v.fields, true);
+
+        let fields_num = v.fields.len();
+
+        fields_refs.push(quote! {
             #matcher => func(&[#metadata_ref]),
         });
 
-        fields_mut.push(quote! {
+        fields_muts.push(quote! {
             #matcher => func(&mut [#metadata_mut]),
+        });
+
+        getter_refs.push(quote! {
+             #matcher => { #getter_ref },
+        });
+
+        getter_muts.push(quote! {
+             #matcher => { #getter_mut },
+        });
+
+        fields_count.push(quote! {
+             #matcher => { #fields_num },
         });
     }
 
     let fields_metadata_ref_body = quote! {
         match self {
             #(
-                #fields_ref_ref
+                #fields_refs
             )*
             _ => func(&[])
         }
@@ -290,9 +352,36 @@ fn impl_reflect_enum(ty_args: &args::TypeArgs, variant_args: &[args::VariantArgs
     let fields_metadata_mut_body = quote! {
         match self {
             #(
-                #fields_mut
+                #fields_muts
             )*
             _ => func(&mut [])
+        }
+    };
+
+    let fields_getter_ref_body = quote! {
+        match self {
+            #(
+                #getter_refs
+            )*
+            _ => None
+        }
+    };
+
+    let fields_getter_mut_body = quote! {
+        match self {
+            #(
+                #getter_muts
+            )*
+            _ => None
+        }
+    };
+
+    let fields_count_body = quote! {
+        match self {
+            #(
+                #fields_count
+            )*
+            _ => 0
         }
     };
 
@@ -301,15 +390,20 @@ fn impl_reflect_enum(ty_args: &args::TypeArgs, variant_args: &[args::VariantArgs
         None,
         fields_metadata_ref_body,
         fields_metadata_mut_body,
+        fields_getter_ref_body,
+        fields_getter_mut_body,
+        fields_count_body,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn gen_impl(
     ty_args: &args::TypeArgs,
     set_field: Option<TokenStream2>,
     metadata_ref: TokenStream2,
     metadata_mut: TokenStream2,
+    getter_ref: TokenStream2,
+    getter_mut: TokenStream2,
+    fields_count: TokenStream2,
 ) -> TokenStream2 {
     let ty_ident = &ty_args.ident;
     let generics = ty_args.impl_generics();
@@ -335,12 +429,36 @@ fn gen_impl(
                 None
             }
         }
+    } else if let Some(ref clone_fn) = ty_args.clone_fn {
+        quote! {
+            fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
+                Some(Box::new(#clone_fn(self)))
+            }
+        }
     } else {
         quote! {
             fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
                 Some(Box::new(Clone::clone(self)))
             }
         }
+    };
+
+    let type_uuid_str = ty_args.type_uuid.as_str();
+    let type_uuid = if ty_args.generics.params.is_empty() {
+        quote! { uuid!(#type_uuid_str) }
+    } else {
+        // Try to combine uuids from types and consts.
+        let mut combined = quote! { uuid!(#type_uuid_str) };
+        for ty in ty_args.generics.type_params() {
+            let type_name = &ty.ident;
+            combined = quote! {combine_uuids(#combined, #type_name::type_info().type_uuid)}
+        }
+        for constant in ty_args.generics.const_params() {
+            let value = &constant.ident;
+            let uuid = quote! { Uuid::from_u64_pair(#value as u64, #value as u64)};
+            combined = quote! {combine_uuids(#combined, #uuid)}
+        }
+        combined
     };
 
     let types = ty_args
@@ -355,39 +473,26 @@ fn gen_impl(
     quote! {
         #[allow(warnings)]
         impl #impl_generics Reflect for #ty_ident #ty_generics #where_clause {
-            fn source_path() -> &'static str {
-                file!()
-            }
-
-            #try_clone_box
-
-            fn type_name(&self) -> &'static str {
-                std::any::type_name::<Self>()
-            }
-
-             fn derived_types() -> &'static [std::any::TypeId] {
-                static ARRAY: std::sync::LazyLock<Vec<std::any::TypeId>> = std::sync::LazyLock::new(|| vec![
+            fn type_info() -> TypeInfo where Self: Sized {
+                static DERIVED_TYPES: std::sync::LazyLock<Vec<std::any::TypeId>> = std::sync::LazyLock::new(|| vec![
                     #types
                 ]);
 
-                &ARRAY
+                TypeInfo {
+                    source_path: file!(),
+                    type_name: std::any::type_name::<Self>(),
+                    assembly_name: #assembly_name,
+                    doc_comment: #doc,
+                    derived_types: &DERIVED_TYPES,
+                    type_uuid: #type_uuid
+                }
             }
 
-            fn query_derived_types(&self) -> &'static [std::any::TypeId] {
-                Self::derived_types()
+            fn type_info_ref(&self) -> TypeInfo {
+                Self::type_info()
             }
 
-            fn doc(&self) -> &'static str {
-                #doc
-            }
-
-            fn assembly_name(&self) -> &'static str {
-                #assembly_name
-            }
-
-            fn type_assembly_name() -> &'static str {
-                #assembly_name
-            }
+            #try_clone_box
 
             fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
                 #metadata_ref
@@ -395,10 +500,6 @@ fn gen_impl(
 
             fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
                 #metadata_mut
-            }
-
-            fn into_any(self: Box<Self>) -> Box<dyn ::core::any::Any> {
-                self
             }
 
             fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
@@ -410,23 +511,19 @@ fn gen_impl(
                 Ok(Box::new(this))
             }
 
+            fn field_direct_ref(&self, reflect_argument_index: usize) -> Option<FieldRef> {
+                #getter_ref
+            }
+
+            fn field_direct_mut(&mut self, reflect_argument_index: usize) -> Option<FieldMut> {
+                #getter_mut
+            }
+
+            fn fields_count(&self) -> usize {
+                #fields_count
+            }
+
             #set_field
-
-            fn as_any(&self, func: &mut dyn FnMut(&dyn ::core::any::Any)) {
-                func(self)
-            }
-
-            fn as_any_mut(&mut self, func: &mut dyn FnMut(&mut dyn ::core::any::Any)) {
-                func(self)
-            }
-
-            fn as_reflect(&self, func: &mut dyn FnMut(&dyn Reflect)) {
-                func(self as &dyn Reflect)
-            }
-
-            fn as_reflect_mut(&mut self, func: &mut dyn FnMut(&mut dyn Reflect)) {
-                func(self as &mut dyn Reflect)
-            }
 
             #as_array_impl
 

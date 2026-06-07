@@ -22,19 +22,20 @@ use crate::fyrox::{
     core::pool::Handle,
     gui::{
         formatted_text::WrapMode,
-        message::MessageDirection,
         scroll_viewer::ScrollViewerBuilder,
         text::TextMessage,
         text_box::TextBoxBuilder,
         widget::WidgetBuilder,
         window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, Thickness, UiNode, UserInterface,
+        BuildContext, Thickness, UserInterface,
     },
 };
+use fyrox::gui::text_box::TextBox;
+use fyrox::gui::window::{Window, WindowAlignment};
 
 pub struct DocWindow {
-    pub window: Handle<UiNode>,
-    text: Handle<UiNode>,
+    pub window: Handle<Window>,
+    text: Handle<TextBox>,
 }
 
 impl DocWindow {
@@ -66,16 +67,14 @@ impl DocWindow {
     }
 
     pub fn open(&self, doc: String, ui: &UserInterface) {
-        ui.send_message(TextMessage::text(
-            self.text,
-            MessageDirection::ToWidget,
-            doc,
-        ));
-        ui.send_message(WindowMessage::open(
+        ui.send(self.text, TextMessage::Text(doc));
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
     }
 }

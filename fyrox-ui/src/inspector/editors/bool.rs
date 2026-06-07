@@ -26,7 +26,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     widget::WidgetBuilder,
@@ -47,15 +47,15 @@ impl PropertyEditorDefinition for BoolPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<bool>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: CheckBoxBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            CheckBoxBuilder::new(
                 WidgetBuilder::new()
                     .with_margin(Thickness::top_bottom(1.0))
                     .with_vertical_alignment(VerticalAlignment::Center),
             )
             .checked(Some(*value))
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -63,10 +63,9 @@ impl PropertyEditorDefinition for BoolPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<bool>()?;
-        Ok(Some(CheckBoxMessage::checked(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            Some(*value),
+            CheckBoxMessage::Check(Some(*value)),
         )))
     }
 
@@ -76,7 +75,7 @@ impl PropertyEditorDefinition for BoolPropertyEditorDefinition {
             {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(*value),
+                    action: FieldAction::object(*value),
                 });
             }
         }

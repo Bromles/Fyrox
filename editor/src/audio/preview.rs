@@ -18,45 +18,54 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use fyrox::gui::widget::WidgetMessage;
-
-use crate::fyrox::graph::SceneGraph;
-use crate::fyrox::{
-    core::pool::Handle,
-    engine::Engine,
-    gui::{
-        button::{ButtonBuilder, ButtonMessage},
-        check_box::{CheckBoxBuilder, CheckBoxMessage},
-        grid::{Column, GridBuilder, Row},
-        message::{MessageDirection, UiMessage},
-        scroll_bar::{ScrollBarBuilder, ScrollBarMessage},
-        text::TextBuilder,
-        widget::WidgetBuilder,
-        BuildContext, Thickness, UiNode, VerticalAlignment,
-    },
-    scene::{
-        node::Node,
-        sound::{Sound, Status},
-    },
-};
 use crate::{
+    fyrox::{
+        core::pool::Handle,
+        engine::Engine,
+        graph::SceneGraph,
+        gui::{
+            button::{Button, ButtonBuilder, ButtonMessage},
+            check_box::{CheckBox, CheckBoxBuilder, CheckBoxMessage},
+            grid::{Column, Grid, GridBuilder, Row},
+            message::UiMessage,
+            scroll_bar::{ScrollBar, ScrollBarBuilder, ScrollBarMessage},
+            stack_panel::StackPanel,
+            text::TextBuilder,
+            widget::{WidgetBuilder, WidgetMessage},
+            BuildContext, Thickness, VerticalAlignment,
+        },
+        scene::{
+            node::Node,
+            sound::{Sound, Status},
+        },
+    },
     scene::{GameScene, Selection},
-    send_sync_message, Message,
+    Message,
 };
 
 pub struct AudioPreviewPanel {
-    pub root_widget: Handle<UiNode>,
-    preview: Handle<UiNode>,
-    play: Handle<UiNode>,
-    pause: Handle<UiNode>,
-    stop: Handle<UiNode>,
-    rewind: Handle<UiNode>,
-    time: Handle<UiNode>,
+    pub root_widget: Handle<Grid>,
+    preview: Handle<CheckBox>,
+    play: Handle<Button>,
+    pause: Handle<Button>,
+    stop: Handle<Button>,
+    rewind: Handle<Button>,
+    time: Handle<ScrollBar>,
     sounds_state: Vec<(Handle<Node>, Node)>,
 }
 
+fn make_button(text: &str, column: usize, ctx: &mut BuildContext) -> Handle<Button> {
+    ButtonBuilder::new(
+        WidgetBuilder::new()
+            .on_column(column)
+            .with_margin(Thickness::uniform(1.0)),
+    )
+    .with_text(text)
+    .build(ctx)
+}
+
 impl AudioPreviewPanel {
-    pub fn new(inspector_head: Handle<UiNode>, ctx: &mut BuildContext) -> Self {
+    pub fn new(inspector_head: Handle<StackPanel>, ctx: &mut BuildContext) -> Self {
         let preview;
         let play;
         let pause;
@@ -89,43 +98,19 @@ impl AudioPreviewPanel {
                                 preview
                             })
                             .with_child({
-                                play = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .on_column(1)
-                                        .with_margin(Thickness::uniform(1.0)),
-                                )
-                                .with_text("Play")
-                                .build(ctx);
+                                play = make_button("Play", 1, ctx);
                                 play
                             })
                             .with_child({
-                                pause = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .on_column(2)
-                                        .with_margin(Thickness::uniform(1.0)),
-                                )
-                                .with_text("Pause")
-                                .build(ctx);
+                                pause = make_button("Pause", 2, ctx);
                                 pause
                             })
                             .with_child({
-                                stop = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .on_column(3)
-                                        .with_margin(Thickness::uniform(1.0)),
-                                )
-                                .with_text("Stop")
-                                .build(ctx);
+                                stop = make_button("Stop", 3, ctx);
                                 stop
                             })
                             .with_child({
-                                rewind = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .on_column(4)
-                                        .with_margin(Thickness::uniform(1.0)),
-                                )
-                                .with_text("Rewind")
-                                .build(ctx);
+                                rewind = make_button("Rewind", 4, ctx);
                                 rewind
                             }),
                     )
@@ -145,32 +130,36 @@ impl AudioPreviewPanel {
                                 TextBuilder::new(
                                     WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
                                 )
+                                .with_vertical_text_alignment(VerticalAlignment::Center)
                                 .with_text("Time, s")
                                 .build(ctx),
                             )
                             .with_child({
-                                time = ScrollBarBuilder::new(WidgetBuilder::new().on_column(1))
-                                    .with_min(0.0)
-                                    .build(ctx);
+                                time = ScrollBarBuilder::new(
+                                    WidgetBuilder::new()
+                                        .on_column(1)
+                                        .with_margin(Thickness::uniform(1.0)),
+                                )
+                                .show_value(true)
+                                .with_value_precision(2)
+                                .with_min(0.0)
+                                .build(ctx);
                                 time
                             }),
                     )
                     .add_column(Column::auto())
                     .add_column(Column::stretch())
-                    .add_row(Row::strict(20.0))
+                    .add_row(Row::strict(26.0))
                     .build(ctx),
                 ),
         )
         .add_column(Column::stretch())
         .add_row(Row::stretch())
-        .add_row(Row::strict(20.0))
+        .add_row(Row::strict(26.0))
         .build(ctx);
 
-        ctx.send_message(WidgetMessage::link(
-            root_widget,
-            MessageDirection::ToWidget,
-            inspector_head,
-        ));
+        ctx.inner()
+            .send(root_widget, WidgetMessage::link_with(inspector_head));
 
         Self {
             root_widget,
@@ -188,32 +177,33 @@ impl AudioPreviewPanel {
         &mut self,
         message: &Message,
         editor_selection: &Selection,
-        game_scene: &mut GameScene,
+        mut game_scene: Option<&mut GameScene>,
         engine: &mut Engine,
     ) {
-        if let Message::DoCommand(_)
-        | Message::UndoCurrentSceneCommand
-        | Message::RedoCurrentSceneCommand = message
-        {
-            self.leave_preview_mode(game_scene, engine);
+        if let Some(game_scene) = game_scene.as_mut() {
+            if let Message::DoCommand(_)
+            | Message::UndoCurrentSceneCommand
+            | Message::RedoCurrentSceneCommand = message
+            {
+                self.leave_preview_mode(game_scene, engine);
+            }
         }
 
         if let Message::SelectionChanged { .. } = message {
-            let scene = &engine.scenes[game_scene.scene];
-            if let Some(selection) = editor_selection.as_graph() {
-                let any_sound_selected = selection
-                    .nodes
-                    .iter()
-                    .any(|n| scene.graph.try_get_of_type::<Sound>(*n).is_some());
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(WidgetMessage::visibility(
-                        self.root_widget,
-                        MessageDirection::ToWidget,
-                        any_sound_selected,
-                    ));
-            }
+            let any_sound_selected = if let Some(game_scene) = game_scene {
+                let scene = &engine.scenes[game_scene.scene];
+                editor_selection.as_graph().is_some_and(|s| {
+                    s.nodes()
+                        .iter()
+                        .any(|n| scene.graph.try_get_of_type::<Sound>(*n).is_ok())
+                })
+            } else {
+                false
+            };
+            engine.user_interfaces.first_mut().send(
+                self.root_widget,
+                WidgetMessage::Visibility(any_sound_selected),
+            );
         }
     }
 
@@ -231,29 +221,20 @@ impl AudioPreviewPanel {
         let mut set = false;
         if let Some(new_graph_selection) = editor_selection.as_graph() {
             for &node_handle in &new_graph_selection.nodes {
-                if let Some(sound) = scene.graph.try_get_of_type::<Sound>(node_handle) {
+                if let Ok(sound) = scene.graph.try_get_of_type::<Sound>(node_handle) {
                     if !set {
                         if let Some(buffer) = sound.buffer() {
                             let mut state = buffer.state();
                             if let Some(buffer) = state.data() {
                                 let duration_secs = buffer.duration().as_secs_f32();
-
-                                send_sync_message(
-                                    engine.user_interfaces.first(),
-                                    ScrollBarMessage::max_value(
-                                        self.time,
-                                        MessageDirection::ToWidget,
-                                        duration_secs,
-                                    ),
-                                );
-
-                                send_sync_message(
-                                    engine.user_interfaces.first(),
-                                    ScrollBarMessage::value(
-                                        self.time,
-                                        MessageDirection::ToWidget,
-                                        sound.playback_time().clamp(0.0, duration_secs),
-                                    ),
+                                engine.user_interfaces.first().send_sync_many(
+                                    self.time,
+                                    [
+                                        ScrollBarMessage::MaxValue(duration_secs),
+                                        ScrollBarMessage::Value(
+                                            sound.playback_time().clamp(0.0, duration_secs),
+                                        ),
+                                    ],
                                 );
                             }
                         }
@@ -280,10 +261,10 @@ impl AudioPreviewPanel {
             assert!(node_overrides.remove(&sound_handle));
         }
 
-        send_sync_message(
-            engine.user_interfaces.first(),
-            CheckBoxMessage::checked(self.preview, MessageDirection::ToWidget, Some(false)),
-        );
+        engine
+            .user_interfaces
+            .first()
+            .send_sync(self.preview, CheckBoxMessage::Check(Some(false)));
 
         scene.graph.sound_context.state().destroy_sound_sources();
     }
@@ -296,15 +277,11 @@ impl AudioPreviewPanel {
         let scene = &engine.scenes[game_scene.scene];
         if let Some(new_graph_selection) = editor_selection.as_graph() {
             for &node_handle in &new_graph_selection.nodes {
-                if let Some(sound) = scene.graph.try_get_of_type::<Sound>(node_handle) {
-                    send_sync_message(
-                        engine.user_interfaces.first(),
-                        ScrollBarMessage::value(
-                            self.time,
-                            MessageDirection::ToWidget,
-                            sound.playback_time(),
-                        ),
-                    );
+                if let Ok(sound) = scene.graph.try_get_of_type::<Sound>(node_handle) {
+                    engine
+                        .user_interfaces
+                        .first()
+                        .send_sync(self.time, ScrollBarMessage::Value(sound.playback_time()));
 
                     break;
                 }
@@ -324,7 +301,7 @@ impl AudioPreviewPanel {
                 let scene = &mut engine.scenes[game_scene.scene];
 
                 for &node in &selection.nodes {
-                    if let Some(sound) = scene.graph.try_get_mut_of_type::<Sound>(node) {
+                    if let Ok(sound) = scene.graph.try_get_mut_of_type::<Sound>(node) {
                         if message.destination() == self.play {
                             sound.set_status(Status::Playing);
                         } else if message.destination() == self.pause {
@@ -336,26 +313,22 @@ impl AudioPreviewPanel {
                         }
                     }
                 }
-            } else if let Some(CheckBoxMessage::Check(Some(value))) = message.data() {
-                if message.destination() == self.preview
-                    && message.direction() == MessageDirection::FromWidget
-                {
-                    if *value {
-                        self.enter_preview_mode(editor_selection, game_scene, engine);
-                    } else {
-                        self.leave_preview_mode(game_scene, engine);
-                    }
+            } else if let Some(CheckBoxMessage::Check(Some(value))) =
+                message.data_from(self.preview)
+            {
+                if *value {
+                    self.enter_preview_mode(editor_selection, game_scene, engine);
+                } else {
+                    self.leave_preview_mode(game_scene, engine);
                 }
-            } else if let Some(ScrollBarMessage::Value(playback_position)) = message.data() {
-                if message.destination() == self.time
-                    && message.direction() == MessageDirection::FromWidget
-                {
-                    let scene = &mut engine.scenes[game_scene.scene];
+            } else if let Some(ScrollBarMessage::Value(playback_position)) =
+                message.data_from(self.time)
+            {
+                let scene = &mut engine.scenes[game_scene.scene];
 
-                    for &node in &selection.nodes {
-                        if let Some(sound) = scene.graph.try_get_mut_of_type::<Sound>(node) {
-                            sound.set_playback_time(*playback_position);
-                        }
+                for &node in &selection.nodes {
+                    if let Ok(sound) = scene.graph.try_get_mut_of_type::<Sound>(node) {
+                        sound.set_playback_time(*playback_position);
                     }
                 }
             }

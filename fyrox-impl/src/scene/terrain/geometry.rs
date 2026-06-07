@@ -23,15 +23,15 @@ use crate::{
         algebra::{Vector2, Vector3, Vector4},
         math::TriangleDefinition,
     },
-    renderer::framework::ElementRange,
+    graphics::ElementRange,
     scene::mesh::{
         buffer::{TriangleBuffer, VertexBuffer},
         surface::{SurfaceData, SurfaceResource},
         vertex::StaticVertex,
     },
 };
-use fyrox_core::Uuid;
 use fyrox_resource::untyped::ResourceKind;
+use uuid::Uuid;
 
 /// The [SurfaceSharedData](crate::scene::mesh::surface::SurfaceResource) of a grid mesh for use
 /// in rendering a terrain.

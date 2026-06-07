@@ -21,13 +21,6 @@
 //! Contains all structures and methods to create and manage mesh scene graph nodes. See [`Mesh`] docs for more info
 //! and usage examples.
 
-use crate::material::{
-    Material, MaterialResourceBinding, MaterialResourceExtension, MaterialTextureBinding,
-};
-use crate::renderer::cache::DynamicSurfaceCache;
-use crate::resource::texture::PLACEHOLDER;
-use crate::scene::mesh::surface::SurfaceBuilder;
-use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector3, Vector4},
@@ -36,17 +29,22 @@ use crate::{
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         variable::InheritableVariable,
         visitor::prelude::*,
+        SafeLock,
     },
-    graph::{BaseSceneGraph, SceneGraph},
-    material::MaterialResource,
+    graph::SceneGraph,
+    graphics::ElementRange,
+    material::{
+        Material, MaterialResource, MaterialResourceBinding, MaterialResourceExtension,
+        MaterialTextureBinding,
+    },
     renderer::{
         self,
         bundle::{RenderContext, RenderDataBundleStorageTrait, SurfaceInstanceData},
-        framework::ElementRange,
+        cache::DynamicSurfaceCache,
     },
+    resource::texture::PLACEHOLDER,
     scene::{
         base::{Base, BaseBuilder},
         debug::{Line, SceneDrawingContext},
@@ -57,8 +55,10 @@ use crate::{
                 VertexAttributeUsage, VertexBuffer, VertexBufferRefMut, VertexReadTrait,
                 VertexViewMut, VertexWriteTrait,
             },
+            surface::SurfaceBuilder,
             surface::{BlendShape, Surface, SurfaceData, SurfaceResource},
         },
+        node::constructor::NodeConstructor,
         node::{Node, NodeTrait, RdcControlFlow, SyncContext},
     },
 };
@@ -92,9 +92,8 @@ pub mod vertex;
     AsRefStr,
     EnumString,
     VariantNames,
-    TypeUuidProvider,
 )]
-#[type_uuid(id = "009bccb6-42e4-4dc6-bb26-6a8a70b3fab9")]
+#[reflect(type_uuid = "009bccb6-42e4-4dc6-bb26-6a8a70b3fab9")]
 #[repr(u32)]
 pub enum RenderPath {
     /// Deferred rendering has much better performance than Forward, but it does not support transparent
@@ -142,9 +141,8 @@ fn transform_vertex(mut vertex: VertexViewMut, world: &Matrix4<f32>) {
     AsRefStr,
     EnumString,
     VariantNames,
-    TypeUuidProvider,
 )]
-#[type_uuid(id = "745e6f32-63f5-46fe-8edb-9708699ae328")]
+#[reflect(type_uuid = "745e6f32-63f5-46fe-8edb-9708699ae328")]
 #[repr(u32)]
 pub enum BatchingMode {
     /// No batching. The mesh will be drawn in a separate draw call.
@@ -196,7 +194,7 @@ struct BatchContainerWrapper(Mutex<BatchContainer>);
 
 impl Clone for BatchContainerWrapper {
     fn clone(&self) -> Self {
-        Self(Mutex::new(self.0.lock().clone()))
+        Self(Mutex::new(self.0.safe_lock().clone()))
     }
 }
 
@@ -301,8 +299,9 @@ impl RenderDataBundleStorageTrait for BatchContainer {
 /// #         node::Node,
 /// #     },
 /// # };
-/// use fyrox_resource::untyped::ResourceKind;
-/// fn create_cube_mesh(graph: &mut Graph) -> Handle<Node> {
+/// # use fyrox_impl::scene::mesh::Mesh;
+/// # use fyrox_resource::untyped::ResourceKind;
+/// fn create_cube_mesh(graph: &mut Graph) -> Handle<Mesh> {
 ///     let cube_surface_data = SurfaceData::make_cube(Matrix4::identity());
 ///
 ///     let cube_surface = SurfaceBuilder::new(SurfaceResource::new_embedded(cube_surface_data)).build();
@@ -315,8 +314,11 @@ impl RenderDataBundleStorageTrait for BatchContainer {
 ///
 /// This example creates a unit cube surface with default material and then creates a mesh with this surface. If you need to create
 /// custom surface, see [`crate::scene::mesh::surface::SurfaceData`] docs for more info.
-#[derive(Debug, Reflect, Clone, Visit, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Reflect, Clone, Visit)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "caaf9d7b-bd74-48ce-b7cc-57e9dc65c2e6"
+)]
 pub struct Mesh {
     #[visit(rename = "Common")]
     base: Base,
@@ -327,13 +329,22 @@ pub struct Mesh {
     #[reflect(setter = "set_render_path")]
     render_path: InheritableVariable<RenderPath>,
 
+    /// Defines the batching mode used by the mesh.
+    ///
+    /// ## Static batching
+    ///
+    /// Static batching. Render data of all **descendant** nodes will be baked into a static buffer,
+    /// and it will be drawn. This mode "bakes" world transform of a node into vertices, thus making
+    /// them immovable.
+    ///
+    /// ## Dynamic Batching
+    ///
+    /// Dynamically merges render data of all **descendant** nodes. It could be useful to reduce the
+    /// number of draw calls per frame if you have lots of meshes with small vertex count. Does not
+    /// work with meshes that have skin or blend shapes. Such meshes will be drawn in a separate draw
+    /// call.
     #[visit(optional)]
-    #[reflect(
-        setter = "set_batching_mode",
-        description = "Enable or disable dynamic batching. It could be useful to reduce amount \
-    of draw calls per frame if you have lots of meshes with small vertex count. Does not work with \
-    meshes, that have skin or blend shapes. Such meshes will be drawn in a separate draw call."
-    )]
+    #[reflect(setter = "set_batching_mode")]
     batching_mode: InheritableVariable<BatchingMode>,
 
     #[visit(optional)]
@@ -387,12 +398,6 @@ impl Deref for Mesh {
 impl DerefMut for Mesh {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.base
-    }
-}
-
-impl TypeUuidProvider for Mesh {
-    fn type_uuid() -> Uuid {
-        uuid!("caaf9d7b-bd74-48ce-b7cc-57e9dc65c2e6")
     }
 }
 
@@ -514,9 +519,20 @@ impl Mesh {
         bounding_box
     }
 
-    /// Enable or disable dynamic batching. It could be useful to reduce amount of draw calls per
-    /// frame if you have lots of meshes with small vertex count. Does not work with meshes, that
-    /// have skin or blend shapes. Such meshes will be drawn in a separate draw call.
+    /// Defines the batching mode used by the mesh.
+    ///
+    /// ## Static batching
+    ///
+    /// Static batching. Render data of all **descendant** nodes will be baked into a static buffer,
+    /// and it will be drawn. This mode "bakes" world transform of a node into vertices, thus making
+    /// them immovable.
+    ///
+    /// ## Dynamic Batching
+    ///
+    /// Dynamically merges render data of all **descendant** nodes. It could be useful to reduce the
+    /// number of draw calls per frame if you have lots of meshes with small vertex count. Does not
+    /// work with meshes that have skin or blend shapes. Such meshes will be drawn in a separate draw
+    /// call.
     pub fn set_batching_mode(&mut self, mode: BatchingMode) -> BatchingMode {
         if let BatchingMode::None | BatchingMode::Dynamic = mode {
             // Destroy batched data.
@@ -611,7 +627,7 @@ impl NodeTrait for Mesh {
             let mut bounding_box = AxisAlignedBoundingBox::default();
 
             if let BatchingMode::Static = *self.batching_mode {
-                let container = self.batch_container.0.lock();
+                let container = self.batch_container.0.safe_lock();
                 for batch in container.batches.values() {
                     let data = batch.data.data_ref();
                     extend_aabb_from_vertex_buffer(&data.vertex_buffer, &mut bounding_box);
@@ -619,8 +635,10 @@ impl NodeTrait for Mesh {
             } else {
                 for surface in self.surfaces.iter() {
                     let data = surface.data();
-                    let data = data.data_ref();
-                    extend_aabb_from_vertex_buffer(&data.vertex_buffer, &mut bounding_box);
+                    if data.is_ok() {
+                        let data = data.data_ref();
+                        extend_aabb_from_vertex_buffer(&data.vertex_buffer, &mut bounding_box);
+                    }
                 }
             }
 
@@ -637,7 +655,7 @@ impl NodeTrait for Mesh {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn on_global_transform_changed(
@@ -651,7 +669,7 @@ impl NodeTrait for Mesh {
             // Special case for skinned meshes.
             for surface in self.surfaces.iter() {
                 for &bone in surface.bones() {
-                    if let Some(node) = context.nodes.try_borrow(bone) {
+                    if let Ok(node) = context.nodes.try_borrow(bone) {
                         world_aabb.add_point(node.global_position())
                     }
                 }
@@ -676,7 +694,7 @@ impl NodeTrait for Mesh {
         let sorting_index = ctx.calculate_sorting_index(self.global_position());
 
         if let BatchingMode::Static = *self.batching_mode {
-            let mut container = self.batch_container.0.lock();
+            let mut container = self.batch_container.0.safe_lock();
 
             if container.batches.is_empty() {
                 container.fill(self.handle(), ctx);
@@ -701,6 +719,9 @@ impl NodeTrait for Mesh {
             RdcControlFlow::Break
         } else {
             for surface in self.surfaces().iter() {
+                if !surface.data_ref().is_ok() {
+                    continue;
+                }
                 let is_skinned = !surface.bones.is_empty();
 
                 let world = if is_skinned {
@@ -755,7 +776,8 @@ impl NodeTrait for Mesh {
                                     .bones
                                     .iter()
                                     .map(|bone_handle| {
-                                        if let Some(bone_node) = ctx.graph.try_get(*bone_handle) {
+                                        if let Ok(bone_node) = ctx.graph.try_get_node(*bone_handle)
+                                        {
                                             bone_node.global_transform()
                                                 * bone_node.inv_bind_pose_transform()
                                         } else {
@@ -938,7 +960,7 @@ impl MeshBuilder {
     }
 
     /// Creates new mesh and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Mesh> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

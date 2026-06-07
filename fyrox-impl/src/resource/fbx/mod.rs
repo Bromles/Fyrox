@@ -41,7 +41,7 @@ use crate::{
         math::{self, triangulator::triangulate, RotationOrder},
         pool::Handle,
     },
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     material,
     material::MaterialResourceBinding,
     resource::{
@@ -80,12 +80,13 @@ use crate::{
 };
 use fxhash::{FxHashMap, FxHashSet};
 use fyrox_animation::track::TrackBinding;
-use fyrox_core::{err, Uuid};
+use fyrox_core::err;
 use fyrox_material::shader::{ShaderResource, ShaderResourceExtension};
 use fyrox_material::MaterialResource;
 use fyrox_resource::io::ResourceIo;
 use fyrox_resource::untyped::ResourceKind;
 use std::{cmp::Ordering, path::Path};
+use uuid::Uuid;
 
 /// Input angles in degrees
 fn quat_from_euler(euler: Vector3<f32>) -> UnitQuaternion<f32> {
@@ -331,7 +332,7 @@ async fn create_materials(
 
                                 let path = Path::new(".");
 
-                                if let Ok(iter) = io.walk_directory(path).await {
+                                if let Ok(iter) = io.walk_directory(path, usize::MAX).await {
                                     for dir in iter {
                                         if io.is_dir(&dir).await {
                                             let candidate = dir.join(filename);
@@ -458,7 +459,7 @@ fn create_surfaces(
         surfaces.push(surface);
     } else {
         assert_eq!(data_set.len(), model.materials.len());
-        for (&material_handle, data) in model.materials.iter().zip(data_set.into_iter()) {
+        for (&material_handle, data) in model.materials.iter().zip(data_set) {
             let mut surface_data = data.base_mesh_builder.build();
             surface_data.blend_shapes_container =
                 make_blend_shapes_container(&surface_data.vertex_buffer, data.blend_shapes);
@@ -488,7 +489,7 @@ fn convert_mesh(
     model: &FbxModel,
     graph: &mut Graph,
     materials: &MaterialMap,
-) -> Result<Handle<Node>, FbxError> {
+) -> Result<Handle<Mesh>, FbxError> {
     let geometric_transform = Matrix4::new_translation(&model.geometric_translation)
         * quat_from_euler(model.geometric_rotation).to_homogeneous()
         * Matrix4::new_nonuniform_scaling(&model.geometric_scale);
@@ -676,11 +677,11 @@ fn convert_model(
 
     // Create node with the correct kind.
     let node_handle = if !model.geoms.is_empty() {
-        convert_mesh(base, fbx_scene, model, graph, materials)?
+        convert_mesh(base, fbx_scene, model, graph, materials)?.to_base()
     } else if model.light.is_some() {
         fbx_scene.get(model.light).as_light()?.convert(base, graph)
     } else {
-        PivotBuilder::new(base).build(graph)
+        PivotBuilder::new(base).build(graph).to_base()
     };
 
     // Convert animations
@@ -895,7 +896,9 @@ async fn convert(
                             indices[k] = surface
                                 .bones
                                 .iter()
-                                .position(|bone_handle| *bone_handle == weight.effector.into())
+                                .position(|bone_handle| {
+                                    *bone_handle == Handle::<Node>::from(weight.effector)
+                                })
                                 .ok_or(FbxError::UnableToFindBone)?
                                 as u8;
                             weights[k] = weight.value;

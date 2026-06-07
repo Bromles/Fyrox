@@ -18,16 +18,17 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::framework::GeometryBufferExt;
 use crate::{
+    graphics::{
+        buffer::BufferUsage, error::FrameworkError, geometry_buffer::GpuGeometryBuffer,
+        server::GraphicsServer,
+    },
     renderer::{
         cache::{TemporaryCache, TimeToLive},
-        framework::{error::FrameworkError, server::GraphicsServer},
+        framework::GeometryBufferExt,
     },
     scene::mesh::surface::{SurfaceData, SurfaceResource},
 };
-use fyrox_graphics::buffer::BufferUsage;
-use fyrox_graphics::geometry_buffer::GpuGeometryBuffer;
 
 struct SurfaceRenderData {
     buffer: GpuGeometryBuffer,
@@ -101,6 +102,17 @@ impl GeometryCache {
                         entry.triangles_modifications_count =
                             data.geometry_buffer.modifications_count();
                     }
+                } else {
+                    let SurfaceRenderData {
+                        buffer,
+                        vertex_modifications_count,
+                        triangles_modifications_count,
+                        layout_hash,
+                    } = create_geometry_buffer(&data, server)?;
+                    entry.buffer = buffer;
+                    entry.vertex_modifications_count = vertex_modifications_count;
+                    entry.triangles_modifications_count = triangles_modifications_count;
+                    entry.layout_hash = layout_hash;
                 }
                 Ok(&entry.buffer)
             }

@@ -21,25 +21,22 @@
 //! Animation player is a node that contains multiple animations. It updates and plays all the animations.
 //! See [`AnimationPlayer`] docs for more info.
 
-use crate::MessageDirection;
+use crate::message::MessageData;
 use crate::{
     core::{
         log::{Log, MessageKind},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         variable::InheritableVariable,
         visitor::prelude::*,
     },
-    define_constructor, define_widget_deref,
+    define_widget_deref,
     generic_animation::value::{BoundValueCollection, TrackValue, ValueBinding},
     message::UiMessage,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
 };
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
-use std::ops::{Deref, DerefMut};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnimationPlayerMessage {
@@ -47,21 +44,7 @@ pub enum AnimationPlayerMessage {
     RewindAnimation { animation: String },
     TimePosition { animation: String, time: f32 },
 }
-
-impl AnimationPlayerMessage {
-    define_constructor!(
-        /// Creates a new [Self::EnableAnimation] message.
-        AnimationPlayerMessage:EnableAnimation => fn enable_animation(animation: String, enabled: bool), layout: false
-    );
-    define_constructor!(
-        /// Creates a new [Self::RewindAnimation] message.
-        AnimationPlayerMessage:RewindAnimation => fn rewind_animation(animation: String), layout: false
-    );
-    define_constructor!(
-        /// Creates a new [Self::TimePosition] message.
-        AnimationPlayerMessage:TimePosition => fn time_position(animation: String, time: f32), layout: false
-    );
-}
+impl MessageData for AnimationPlayerMessage {}
 
 /// UI-specific animation.
 pub type Animation = crate::generic_animation::Animation<Handle<UiNode>>;
@@ -74,7 +57,7 @@ pub type AnimationPose = crate::generic_animation::AnimationPose<Handle<UiNode>>
 /// UI-specific animation node pose.
 pub type NodePose = crate::generic_animation::NodePose<Handle<UiNode>>;
 
-/// Standard prelude for animations, that contains all most commonly used types and traits.
+/// Standard prelude for animations, that contains all the most commonly used types and traits.
 pub mod prelude {
     pub use super::{
         Animation, AnimationContainer, AnimationContainerExt, AnimationPlayer,
@@ -107,7 +90,7 @@ impl AnimationContainerExt for AnimationContainer {
 
 /// Extension trait for [`AnimationPose`].
 pub trait AnimationPoseExt {
-    /// Tries to set each value to the each property from the animation pose to respective widgets.
+    /// Tries to set each value to the property from the animation pose to the respective widgets.
     fn apply(&self, ui: &mut UserInterface);
 }
 
@@ -116,7 +99,7 @@ impl AnimationPoseExt for AnimationPose {
         for (node, local_pose) in self.poses() {
             if node.is_none() {
                 Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
-            } else if let Some(node) = ui.try_get_mut(*node) {
+            } else if let Ok(node) = ui.try_get_node_mut(*node) {
                 node.invalidate_layout();
 
                 local_pose.values.apply(node);
@@ -159,13 +142,14 @@ impl BoundValueCollectionExt for BoundValueCollection {
 /// Animation player is a node that contains multiple animations. It updates and plays all the animations.
 /// The node could be a source of animations for animation blending state machines. To learn more about
 /// animations, see [`Animation`] docs.
-#[derive(Visit, Reflect, Clone, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Visit, Reflect, Clone, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "44d1c94e-354f-4f9a-b918-9d31c28aa16a"
+)]
 pub struct AnimationPlayer {
     widget: Widget,
-    #[component(include)]
     pub(crate) animations: InheritableVariable<AnimationContainer>,
-    #[component(include)]
     auto_apply: bool,
 }
 
@@ -175,6 +159,7 @@ impl ConstructorProvider<UiNode, UserInterface> for AnimationPlayer {
             .with_variant("Animation Player", |ui| {
                 AnimationPlayerBuilder::new(WidgetBuilder::new().with_name("Animation Player"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Animation")
@@ -196,7 +181,7 @@ impl AnimationPlayer {
     /// then every animation in this node is updated first, and then their output pose could be applied
     /// to the graph, so the animation takes effect. Automatic applying is useful when you need your
     /// animations to be applied immediately to the graph, but in some cases (if you're using animation
-    /// blending state machines for example) this functionality is undesired.
+    /// blending state machines, for example), this functionality is undesired.
     ///
     /// Animation blending machines hijacks control over the animation container and updates only
     /// active animations, instead of all available. This is much better for performance than updating
@@ -211,13 +196,13 @@ impl AnimationPlayer {
         self.auto_apply
     }
 
-    /// Returns a reference to internal animations container.
+    /// Returns a reference to internal animations' container.
     pub fn animations(&self) -> &InheritableVariable<AnimationContainer> {
         &self.animations
     }
 
-    /// Returns a reference to internal animations container. Keep in mind that mutable access to [`InheritableVariable`]
-    /// may have side effects if used inappropriately. Checks docs for [`InheritableVariable`] for more info.
+    /// Returns a reference to internal animations' container. Keep in mind that mutable access to [`InheritableVariable`]
+    /// may have side effects if used inappropriately. Check docs for [`InheritableVariable`] for more info.
     pub fn animations_mut(&mut self) -> &mut InheritableVariable<AnimationContainer> {
         &mut self.animations
     }
@@ -232,15 +217,17 @@ impl AnimationPlayer {
     }
 }
 
-impl TypeUuidProvider for AnimationPlayer {
-    fn type_uuid() -> Uuid {
-        uuid!("44d1c94e-354f-4f9a-b918-9d31c28aa16a")
-    }
-}
-
 define_widget_deref!(AnimationPlayer);
 
 impl Control for AnimationPlayer {
+    fn update(&mut self, dt: f32, ui: &mut UserInterface) {
+        if self.auto_apply {
+            self.animations
+                .get_value_mut_silent()
+                .update_animations(ui, dt);
+        }
+    }
+
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
@@ -262,14 +249,6 @@ impl Control for AnimationPlayer {
                     }
                 }
             }
-        }
-    }
-
-    fn update(&mut self, dt: f32, ui: &mut UserInterface) {
-        if self.auto_apply {
-            self.animations
-                .get_value_mut_silent()
-                .update_animations(ui, dt);
         }
     }
 }
@@ -304,17 +283,22 @@ impl AnimationPlayerBuilder {
     }
 
     /// Creates an instance of [`AnimationPlayer`] node.
-    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
-        UiNode::new(AnimationPlayer {
+    pub fn build_animation_player(self, ctx: &BuildContext) -> AnimationPlayer {
+        AnimationPlayer {
             widget: self.widget_builder.with_need_update(true).build(ctx),
             animations: self.animations.into(),
             auto_apply: self.auto_apply,
-        })
+        }
+    }
+
+    /// Creates an instance of [`AnimationPlayer`] node.
+    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
+        UiNode::new(self.build_animation_player(ctx))
     }
 
     /// Creates an instance of [`AnimationPlayer`] node and adds it to the given user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(self.build_node(ctx))
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<AnimationPlayer> {
+        ctx.add(self.build_animation_player(ctx))
     }
 }
 

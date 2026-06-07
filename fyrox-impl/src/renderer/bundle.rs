@@ -34,7 +34,19 @@ use crate::{
         pool::Handle,
         sstorage::ImmutableString,
     },
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{GpuFrameBuffer, ResourceBindGroup, ResourceBinding},
+        gpu_program::{
+            SamplerFallback, ShaderProperty, ShaderPropertyKind, ShaderResourceDefinition,
+            ShaderResourceKind,
+        },
+        gpu_texture::GpuTexture,
+        server::GraphicsServer,
+        uniform::{ByteStorage, StaticUniformBuffer, UniformBuffer},
+        ElementRange,
+    },
     material::{self, shader::ShaderDefinition, Material, MaterialPropertyRef, MaterialResource},
     renderer::{
         cache::{
@@ -43,15 +55,6 @@ use crate::{
             texture::TextureCache,
             uniform::{UniformBlockLocation, UniformMemoryAllocator},
             DynamicSurfaceCache, TimeToLive,
-        },
-        framework::{
-            error::FrameworkError,
-            framebuffer::{GpuFrameBuffer, ResourceBindGroup, ResourceBinding},
-            gpu_program::{ShaderProperty, ShaderPropertyKind, ShaderResourceKind},
-            gpu_texture::GpuTexture,
-            server::GraphicsServer,
-            uniform::{ByteStorage, StaticUniformBuffer, UniformBuffer},
-            ElementRange,
         },
         observer::ObserverPosition,
         RenderPassStatistics,
@@ -76,8 +79,7 @@ use crate::{
     },
 };
 use fxhash::{FxBuildHasher, FxHashMap, FxHasher};
-use fyrox_graph::{SceneGraph, SceneGraphNode};
-use fyrox_graphics::gpu_program::{SamplerFallback, ShaderResourceDefinition};
+use fyrox_graph::NodeWrapper;
 use fyrox_resource::manager::ResourceManager;
 use std::{
     fmt::{Debug, Formatter},
@@ -172,18 +174,24 @@ impl Default for SurfaceInstanceData {
 }
 
 /// A set of surface instances that share the same vertex/index data and a material.
+/// Geometry instancing means rendering multiple copies of the same mesh in a scene at once,
+/// reusing the same vertex data but with a different world transform each time.
+/// This technique can be used for objects such as trees that may need to be repeated many times in a scene.
+/// See [`SurfaceInstanceData`] for the properties that can change between instances of the bundle.
 pub struct RenderDataBundle {
-    /// A pointer to shared surface data.
+    /// A pointer to shared surface data, such as vertices, triangle indices, and blend shapes.
     pub data: SurfaceResource,
     /// Amount of time (in seconds) for GPU geometry buffer (vertex + index buffers) generated for
     /// the `data`.
     pub time_to_live: TimeToLive,
-    /// A set of instances.
+    /// A set of instances, each with their own world transform and other properties.
     pub instances: Vec<SurfaceInstanceData>,
     /// A material that is shared across all instances.
     pub material: MaterialResource,
     /// A render path of the bundle.
     pub render_path: RenderPath,
+    /// The priority of this bundle when sorting the bundles to determine which will be rendered
+    /// first. Bundles with lower values are rendered before bundles with higher values.
     sort_index: u64,
 }
 
@@ -210,7 +218,7 @@ pub struct InstanceUniformData {
 /// Describes where to the actual uniform data is located in the memory backed by the uniform
 /// memory allocator on per-bundle basis.
 pub struct BundleUniformData {
-    /// Material info block location.
+    /// Material info block location in the form of (binding point, position within allocator)
     pub material_property_group_blocks: Vec<(usize, UniformBlockLocation)>,
     /// Lights info block location.
     pub light_data_block: UniformBlockLocation,
@@ -427,6 +435,12 @@ impl RenderDataBundle {
                 write_shader_values(shader_property_group, &mut buf)
             }
 
+            if buf.is_empty() {
+                // There's no need to upload empty uniform blocks. Empty uniform blocks will be
+                // optimized out anyway.
+                continue;
+            }
+
             material_property_group_blocks.push((
                 resource_definition.binding,
                 render_context.uniform_memory_allocator.allocate(buf),
@@ -553,10 +567,10 @@ impl RenderDataBundle {
                 {
                     err_once!(
                         self.data.key() as usize,
-                        "There's no render pass {} in {} shader! \
+                        "There's no render pass {} in {:?} shader! \
                         If it is not needed, add it to disabled passes.",
                         render_context.render_pass_name,
-                        shader_state.kind()
+                        shader_data.definition.name,
                     );
                 }
             }
@@ -883,7 +897,7 @@ impl RenderDataBundleStorage {
             if let Some(lod_group) = node.lod_group() {
                 for level in lod_group.levels.iter() {
                     for &object in level.objects.iter() {
-                        if let Some(object_ref) = graph.try_get(object) {
+                        if let Ok(object_ref) = graph.try_get_node(object) {
                             let distance = observer_position
                                 .translation
                                 .metric_distance(&object_ref.global_position());
@@ -898,7 +912,7 @@ impl RenderDataBundleStorage {
                 }
             }
 
-            if let Some(reflection_probe) = node.component_ref::<ReflectionProbe>() {
+            if let Some(reflection_probe) = node.self_or_field_ref::<ReflectionProbe>() {
                 if (reflection_probe as &dyn NodeTrait)
                     .world_bounding_box()
                     .is_contains_point(observer_position.translation)
@@ -908,7 +922,7 @@ impl RenderDataBundleStorage {
             }
 
             if options.collect_lights {
-                if let Some(base_light) = node.component_ref::<BaseLight>() {
+                if let Some(base_light) = node.self_or_field_ref::<BaseLight>() {
                     if frustum.is_intersects_aabb(&node.world_bounding_box())
                         && base_light.global_visibility()
                         && base_light.is_globally_enabled()
@@ -1170,6 +1184,7 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
         let mut hasher = FxHasher::default();
         hasher.write_u64(material.key());
         layout.hash(&mut hasher);
+        hasher.write_u64(sort_index);
         hasher.write_u32(render_path as u32);
         let key = hasher.finish();
 

@@ -28,15 +28,16 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        make_expander_container, FieldKind, Inspector, InspectorBuilder, InspectorContext,
+        make_expander_container, FieldAction, Inspector, InspectorBuilder, InspectorContext,
         InspectorError, InspectorMessage, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     widget::WidgetBuilder,
+    UiNode,
 };
 use fyrox_core::pool::Handle;
 use fyrox_core::PhantomDataSendSync;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::{
     any::TypeId,
     fmt::{Debug, Formatter},
@@ -94,27 +95,30 @@ where
             ctx: ctx.build_context,
             definition_container: ctx.definition_container.clone(),
             environment: ctx.environment.clone(),
-            sync_flag: ctx.sync_flag,
             layer_index: ctx.layer_index + 1,
             generate_property_string_values: ctx.generate_property_string_values,
             filter: ctx.filter,
             name_column_width: ctx.name_column_width,
+            hide_name_column: false,
             base_path: ctx.base_path.clone(),
+            has_parent_object: ctx.has_parent_object,
         });
 
         let editor;
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
-            ctx.property_info.description,
-            Handle::NONE,
+            ctx.property_info.doc,
+            Handle::<UiNode>::NONE,
             {
                 editor = InspectorBuilder::new(WidgetBuilder::new())
                     .with_context(inspector_context)
-                    .build(ctx.build_context);
+                    .build(ctx.build_context)
+                    .to_base();
                 editor
             },
             ctx.name_column_width,
+            ctx.hide_name_column,
             ctx.build_context,
         );
 
@@ -164,7 +168,7 @@ where
                 return Some(PropertyChanged {
                     name: ctx.name.to_owned(),
 
-                    value: FieldKind::Inspectable(Box::new(msg.clone())),
+                    action: FieldAction::InspectableAction(Box::new(msg.clone())),
                 });
             }
         }

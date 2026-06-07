@@ -21,7 +21,8 @@
 //! Resource metadata. See [`ResourceMetadata`] docs for more info.
 
 use crate::io::ResourceIo;
-use fyrox_core::{io::FileError, Uuid};
+use fyrox_core::io::FileError;
+use fyrox_core::uuid::Uuid;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -55,8 +56,7 @@ impl ResourceMetadata {
         resource_io.load_file(path).await.and_then(|metadata| {
             ron::de::from_bytes::<Self>(&metadata).map_err(|err| {
                 FileError::Custom(format!(
-                    "Unable to deserialize the resource metadata. Reason: {:?}",
-                    err
+                    "Unable to deserialize the resource metadata. Reason: {err:?}"
                 ))
             })
         })

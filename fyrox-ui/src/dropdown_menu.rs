@@ -18,30 +18,30 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! A simple widget that opens a popup when clicked. It could be used to create drop down menus that
+//! A simple widget that opens a popup when clicked. It could be used to create dropdown menus that
 //! consolidates content of a group.
 
+use crate::popup::Popup;
 use crate::{
-    core::{pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
-    message::{MessageDirection, MouseButton, UiMessage},
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
+    message::{MouseButton, UiMessage},
     popup::{Placement, PopupBuilder, PopupMessage},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, UiNode, UserInterface,
 };
-
-use std::ops::{Deref, DerefMut};
+use fyrox_core::pool::ObjectOrVariant;
 use std::sync::mpsc::Sender;
 
-/// A simple widget that opens a popup when clicked. It could be used to create drop down menus that
+/// A simple widget that opens a popup when clicked. It could be used to create dropdown menus that
 /// consolidates content of a group.
-#[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "c0a4c51b-f041-453b-a89d-7ceb5394e321")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "c0a4c51b-f041-453b-a89d-7ceb5394e321")]
 #[reflect(derived_type = "UiNode")]
 pub struct DropdownMenu {
     /// Base widget of the dropdown menu.
     pub widget: Widget,
     /// A handle of the inner popup, that stores the content of the menu.
-    pub popup: Handle<UiNode>,
+    pub popup: Handle<Popup>,
 }
 
 crate::define_widget_deref!(DropdownMenu);
@@ -49,10 +49,7 @@ crate::define_widget_deref!(DropdownMenu);
 impl Control for DropdownMenu {
     fn on_remove(&self, sender: &Sender<UiMessage>) {
         sender
-            .send(WidgetMessage::remove(
-                self.popup,
-                MessageDirection::ToWidget,
-            ))
+            .send(UiMessage::for_widget(self.popup, WidgetMessage::Remove))
             .unwrap()
     }
 
@@ -61,18 +58,18 @@ impl Control for DropdownMenu {
 
         if let Some(WidgetMessage::MouseDown { button, .. }) = message.data() {
             if *button == MouseButton::Left {
-                ui.send_message(PopupMessage::placement(
+                ui.send(
                     self.popup,
-                    MessageDirection::ToWidget,
-                    Placement::LeftBottom(self.handle),
-                ));
-                ui.send_message(PopupMessage::open(self.popup, MessageDirection::ToWidget));
+                    PopupMessage::Placement(Placement::LeftBottom(self.handle)),
+                );
+                ui.send(self.popup, PopupMessage::Open);
             }
         }
     }
 }
 
-/// Canvas builder creates new [`DropdownMenu`] widget instances and adds them to the user interface.
+/// Dropdown menu builder creates new [`DropdownMenu`] widget instances and adds them to the
+/// user interface.
 pub struct DropdownMenuBuilder {
     widget_builder: WidgetBuilder,
     header: Handle<UiNode>,
@@ -96,14 +93,14 @@ impl DropdownMenuBuilder {
     }
 
     /// Sets the content of the menu.
-    pub fn with_content(mut self, content: Handle<UiNode>) -> Self {
-        self.content = content;
+    pub fn with_content(mut self, content: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = content.to_base();
         self
     }
 
     /// Finishes dropdown menu widget building and adds the instance to the user interface and
     /// returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<DropdownMenu> {
         let popup = PopupBuilder::new(WidgetBuilder::new())
             .stays_open(false)
             .with_content(self.content)
@@ -113,7 +110,7 @@ impl DropdownMenuBuilder {
             widget: self.widget_builder.with_child(self.header).build(ctx),
             popup,
         };
-        ctx.add_node(UiNode::new(dropdown_menu))
+        ctx.add(dropdown_menu)
     }
 }
 

@@ -19,13 +19,85 @@
 // SOFTWARE.
 
 use crate::core::reflect::prelude::*;
-use fyrox_core::uuid_provider;
 use serde::{Deserialize, Serialize};
 use strum_macros::{AsRefStr, EnumString, VariantNames};
+
+/// Bloom effect settings.
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Reflect)]
+#[reflect(type_uuid = "6862fea7-10a9-4a8a-8701-c003415aa3b3")]
+pub struct BloomSettings {
+    /// Whether to use bloom effect.
+    pub use_bloom: bool,
+
+    /// A threshold value for luminance of a pixel to be considered "very bright". Only pixels
+    /// that passed this check (>=) will be included in the bloom render target and will have the glow
+    /// effect.
+    pub threshold: f32,
+}
+
+impl Default for BloomSettings {
+    fn default() -> Self {
+        Self {
+            use_bloom: true,
+            threshold: 1.01,
+        }
+    }
+}
+
+/// Calculation method of a frame luminance for HDR rendering pipeline.
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+    Reflect,
+    AsRefStr,
+    EnumString,
+    VariantNames,
+)]
+#[reflect(type_uuid = "b1994c1c-bc2f-497c-a05d-062a02b69ff1")]
+pub enum LuminanceCalculationMethod {
+    /// Simplest and fastest luminance calculation method based on average of luminance of all
+    /// pixels of the frame.
+    #[default]
+    DownSampling,
+
+    /// More flexible, yet slower, luminance calculation method.
+    Histogram,
+}
+
+/// Settings of high dynamic range rendering pipeline.
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Reflect)]
+#[reflect(type_uuid = "15a2975b-0f2d-4839-ba20-951e4625ee75")]
+pub struct HdrSettings {
+    /// Whether the HDR pipeline enabled or not.
+    pub use_hdr: bool,
+
+    /// Calculation method of a frame luminance for HDR rendering pipeline.
+    pub luminance_calculation_method: LuminanceCalculationMethod,
+
+    /// Bloom effect settings.
+    #[serde(default)]
+    pub bloom_settings: BloomSettings,
+}
+
+impl Default for HdrSettings {
+    fn default() -> Self {
+        Self {
+            use_hdr: true,
+            luminance_calculation_method: LuminanceCalculationMethod::DownSampling,
+            bloom_settings: BloomSettings::default(),
+        }
+    }
+}
 
 /// Quality settings allows you to find optimal balance between performance and
 /// graphics quality.
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Reflect)]
+#[reflect(type_uuid = "ef3c1b91-dd8a-49b9-9249-1ba4c03f7176")]
 pub struct QualitySettings {
     /// Point shadows
     /// Size of cube map face of shadow map texture in pixels.
@@ -79,9 +151,6 @@ pub struct QualitySettings {
     /// Whether to use Parallax Mapping or not.
     pub use_parallax_mapping: bool,
 
-    /// Whether to use bloom effect.
-    pub use_bloom: bool,
-
     /// Whether to use occlusion culling for geometry or not. Warning: this is experimental feature
     /// that may have bugs and unstable behavior. Disabled by default.
     #[serde(default)]
@@ -91,6 +160,10 @@ pub struct QualitySettings {
     /// feature that may have bugs and unstable behavior. Disabled by default.
     #[serde(default)]
     pub use_light_occlusion_culling: bool,
+
+    /// HDR pipeline settings.
+    #[serde(default)]
+    pub hdr_settings: HdrSettings,
 }
 
 impl Default for QualitySettings {
@@ -125,7 +198,7 @@ impl QualitySettings {
 
             fxaa: true,
 
-            use_bloom: true,
+            hdr_settings: Default::default(),
 
             use_parallax_mapping: true,
 
@@ -161,7 +234,7 @@ impl QualitySettings {
 
             fxaa: true,
 
-            use_bloom: true,
+            hdr_settings: Default::default(),
 
             use_parallax_mapping: true,
 
@@ -202,7 +275,7 @@ impl QualitySettings {
 
             fxaa: true,
 
-            use_bloom: true,
+            hdr_settings: Default::default(),
 
             use_parallax_mapping: false,
 
@@ -243,7 +316,13 @@ impl QualitySettings {
 
             fxaa: false,
 
-            use_bloom: false,
+            hdr_settings: HdrSettings {
+                bloom_settings: BloomSettings {
+                    use_bloom: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
 
             use_parallax_mapping: false,
 
@@ -262,6 +341,7 @@ impl QualitySettings {
 
 /// Cascaded-shadow maps settings.
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Reflect, Eq)]
+#[reflect(type_uuid = "f3dc86da-f1d4-499a-89bb-7d784eebc32d")]
 pub struct CsmSettings {
     /// Whether cascaded shadow maps enabled or not.
     pub enabled: bool,
@@ -305,6 +385,7 @@ impl Default for CsmSettings {
     EnumString,
     VariantNames,
 )]
+#[reflect(type_uuid = "f9b2755b-248e-46ba-bcab-473eac1acdb8")]
 pub enum ShadowMapPrecision {
     /// Shadow map will use 2 times less memory by switching to 16bit pixel format,
     /// but "shadow acne" may occur.
@@ -313,5 +394,3 @@ pub enum ShadowMapPrecision {
     /// but could be less performant than `Half`.
     Full,
 }
-
-uuid_provider!(ShadowMapPrecision = "f9b2755b-248e-46ba-bcab-473eac1acdb8");

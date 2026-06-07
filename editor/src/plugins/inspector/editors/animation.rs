@@ -32,7 +32,7 @@ use crate::fyrox::{
                 PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
                 PropertyEditorMessageContext, PropertyEditorTranslationContext,
             },
-            FieldKind, InspectorError, PropertyChanged,
+            FieldAction, InspectorError, PropertyChanged,
         },
         message::{MessageDirection, UiMessage},
         widget::WidgetBuilder,
@@ -81,8 +81,8 @@ where
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Handle<T>>()?;
         let environment = EditorEnvironment::try_get_from(&ctx.environment)?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: DropdownListBuilder::new(WidgetBuilder::new())
+        Ok(PropertyEditorInstance::simple(
+            DropdownListBuilder::new(WidgetBuilder::new())
                 .with_items(
                     environment
                         .available_animations
@@ -103,7 +103,7 @@ where
                         .iter()
                         .enumerate()
                         .find_map(|(i, d)| {
-                            if *value == d.handle.into() {
+                            if *value == Handle::<T>::from(d.handle) {
                                 Some(i)
                             } else {
                                 None
@@ -111,7 +111,7 @@ where
                         }),
                 )
                 .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -123,12 +123,11 @@ where
         if let Some(index) = environment
             .available_animations
             .iter()
-            .position(|d| *value == d.handle.into())
+            .position(|d| *value == Handle::<T>::from(d.handle))
         {
-            Ok(Some(DropdownListMessage::selection(
+            Ok(Some(UiMessage::for_widget(
                 ctx.instance,
-                MessageDirection::ToWidget,
-                Some(index),
+                DropdownListMessage::Selection(Some(index)),
             )))
         } else {
             Ok(None)
@@ -137,13 +136,13 @@ where
 
     fn translate_message(&self, ctx: PropertyEditorTranslationContext) -> Option<PropertyChanged> {
         if ctx.message.direction() == MessageDirection::FromWidget {
-            if let Some(DropdownListMessage::SelectionChanged(Some(value))) = ctx.message.data() {
+            if let Some(DropdownListMessage::Selection(Some(value))) = ctx.message.data() {
                 if let Ok(environment) = EditorEnvironment::try_get_from(&ctx.environment) {
                     if let Some(definition) = environment.available_animations.get(*value) {
                         return Some(PropertyChanged {
                             name: ctx.name.to_string(),
 
-                            value: FieldKind::object(Handle::<T>::from(definition.handle)),
+                            action: FieldAction::object(Handle::<T>::from(definition.handle)),
                         });
                     }
                 }
@@ -186,7 +185,8 @@ where
         Ok(PropertyEditorInstance::Simple {
             editor: ButtonBuilder::new(WidgetBuilder::new())
                 .with_text("Open Animation Editor...")
-                .build(ctx.build_context),
+                .build(ctx.build_context)
+                .to_base(),
         })
     }
 
@@ -242,7 +242,8 @@ where
         Ok(PropertyEditorInstance::Simple {
             editor: ButtonBuilder::new(WidgetBuilder::new())
                 .with_text("Open ABSM Editor...")
-                .build(ctx.build_context),
+                .build(ctx.build_context)
+                .to_base(),
         })
     }
 

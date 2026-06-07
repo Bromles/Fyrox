@@ -18,22 +18,23 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::resources::RendererResources;
 use crate::{
     core::{algebra::Vector2, math::Rect, sstorage::ImmutableString},
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, GpuFrameBuffer},
+        geometry_buffer::GpuGeometryBuffer,
+        gpu_texture::{GpuTexture, PixelKind},
+        server::GraphicsServer,
+    },
     renderer::{
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
         },
-        framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, GpuFrameBuffer},
-            geometry_buffer::GpuGeometryBuffer,
-            gpu_texture::{GpuTexture, PixelKind},
-            server::GraphicsServer,
-        },
-        make_viewport_matrix, RenderPassStatistics,
+        make_viewport_matrix,
+        resources::RendererResources,
+        RenderPassStatistics,
     },
 };
 
@@ -84,11 +85,14 @@ impl GaussianBlur {
 
     pub(crate) fn render(
         &self,
+        server: &dyn GraphicsServer,
         quad: &GpuGeometryBuffer,
         input: &GpuTexture,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("GaussianBlur");
+
         let mut stats = RenderPassStatistics::default();
 
         let viewport = Rect::new(0, 0, self.width as i32, self.height as i32);

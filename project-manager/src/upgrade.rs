@@ -19,20 +19,24 @@
 // SOFTWARE.
 
 use crate::{settings::Project, utils, utils::make_button};
+use fyrox::gui::button::Button;
+use fyrox::gui::dropdown_list::DropdownList;
+use fyrox::gui::text_box::TextBox;
+use fyrox::gui::window::{Window, WindowAlignment};
 use fyrox::{
     core::{log::Log, pool::Handle},
     gui::{
         button::ButtonMessage,
         dropdown_list::{DropdownListBuilder, DropdownListMessage},
         grid::{Column, GridBuilder, Row},
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         stack_panel::StackPanelBuilder,
         text::{TextBuilder, TextMessage},
         text_box::TextBoxBuilder,
         utils::make_dropdown_list_option,
         widget::{WidgetBuilder, WidgetMessage},
         window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+        BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
         VerticalAlignment,
     },
 };
@@ -62,12 +66,12 @@ impl Version {
 }
 
 pub struct UpgradeTool {
-    window: Handle<UiNode>,
-    version_type_selector: Handle<UiNode>,
-    upgrade: Handle<UiNode>,
-    cancel: Handle<UiNode>,
+    window: Handle<Window>,
+    version_type_selector: Handle<DropdownList>,
+    upgrade: Handle<Button>,
+    cancel: Handle<Button>,
     selected_version: Version,
-    version_input_field: Handle<UiNode>,
+    version_input_field: Handle<TextBox>,
 }
 
 impl UpgradeTool {
@@ -96,7 +100,7 @@ impl UpgradeTool {
         let is_git = dependency
             .source
             .as_ref()
-            .is_some_and(|s| s.contains("https://github.com/FyroxEngine/Fyrox"));
+            .is_some_and(|s| s.repr.contains("https://github.com/FyroxEngine/Fyrox"));
         let selected_version = if is_local {
             Version::Local
         } else if is_git {
@@ -174,12 +178,14 @@ impl UpgradeTool {
             .with_remove_on_close(true)
             .build(ctx);
 
-        ctx.send_message(WindowMessage::open_modal(
+        ctx.inner().send(
             window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
 
         Self {
             window,
@@ -208,21 +214,15 @@ impl UpgradeTool {
                     ));
                 }
                 *need_refresh = true;
-                ui.send_message(WindowMessage::close(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.window, WindowMessage::Close);
             } else if message.destination() == self.cancel {
-                ui.send_message(WindowMessage::close(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.window, WindowMessage::Close);
             }
         } else if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == self.window {
                 return None;
             }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+        } else if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
             if message.destination() == self.version_type_selector {
                 match *index {
                     0 => {
@@ -239,16 +239,14 @@ impl UpgradeTool {
                     _ => (),
                 }
 
-                ui.send_message(WidgetMessage::visibility(
+                let is_visible = matches!(self.selected_version, Version::Specific(_));
+                ui.send(
                     self.version_input_field,
-                    MessageDirection::ToWidget,
-                    matches!(self.selected_version, Version::Specific(_)),
-                ))
+                    WidgetMessage::Visibility(is_visible),
+                )
             }
         } else if let Some(TextMessage::Text(text)) = message.data() {
-            if message.destination() == self.version_input_field
-                && message.direction() == MessageDirection::FromWidget
-            {
+            if message.is_from(self.version_input_field) {
                 if let Version::Specific(ref mut version) = self.selected_version {
                     *version = text.clone();
                 }

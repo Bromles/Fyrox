@@ -18,64 +18,116 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+//! Selector is a simple container widget that allows selecting an item from a fixed set of items.
+//! See [`Selector`] docs for more info.
+
+#![warn(missing_docs)]
+
 use crate::{
     border::BorderBuilder,
-    button::{ButtonBuilder, ButtonMessage},
-    core::{
-        pool::Handle, reflect::prelude::*, type_traits::prelude::*, variable::InheritableVariable,
-        visitor::prelude::*,
-    },
-    define_constructor, define_widget_deref,
+    button::{Button, ButtonBuilder, ButtonMessage},
+    core::{pool::Handle, reflect::prelude::*, variable::InheritableVariable, visitor::prelude::*},
+    define_widget_deref,
     grid::{Column, GridBuilder, Row},
-    message::{MessageDirection, UiMessage},
+    message::{MessageData, MessageDirection, UiMessage},
     utils::{make_arrow, ArrowDirection},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
-
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
+/// A set of messages that is used by [`Selector`] widget.
 #[derive(Debug, PartialEq, Clone)]
 pub enum SelectorMessage {
+    /// Adds a new item to a selector.
     AddItem(Handle<UiNode>),
+    /// Removes an item from a selector.
     RemoveItem(Handle<UiNode>),
+    /// Sets a new set of items of a selector.
     SetItems {
+        /// A new set of items.
         items: Vec<Handle<UiNode>>,
+        /// If `true` then all the previous will be deleted before setting the new items.
         remove_previous: bool,
     },
+    /// Sets a new current item, or gets the changes from the widget.
     Current(Option<usize>),
 }
+impl MessageData for SelectorMessage {}
 
-impl SelectorMessage {
-    define_constructor!(
-        /// Creates [`SelectorMessage::AddItem`] message.
-        SelectorMessage:AddItem => fn add_item(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`SelectorMessage::RemoveItem`] message.
-        SelectorMessage:RemoveItem => fn remove_item(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`SelectorMessage::SetItems`] message.
-        SelectorMessage:SetItems => fn set_items(items: Vec<Handle<UiNode>>, remove_previous: bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`SelectorMessage::Current`] message.
-        SelectorMessage:Current => fn current(Option<usize>), layout: false
-    );
-}
-
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider, TypeUuidProvider)]
+/// Selector is a simple container widget that allows selecting an item from a fixed set of items.
+/// Selector widget shows the currently selected item at the center and two buttons on the sides
+/// that allows selecting either the previous or the next item.
+///
+/// ## Example
+///
+/// The following examples creates a new selector with three items and selects the middle one as
+/// active. The items can be of any type, even mixed types are allowed.
+///
+/// ```rust
+/// # use fyrox_ui::{
+/// #     core::pool::{Handle, HandlesVecExtension},
+/// #     selector::{Selector, SelectorBuilder},
+/// #     text::TextBuilder,
+/// #     widget::WidgetBuilder,
+/// #     BuildContext,
+/// # };
+/// #
+/// fn create_selector(ctx: &mut BuildContext) -> Handle<Selector> {
+///     SelectorBuilder::new(WidgetBuilder::new())
+///         .with_items(
+///             vec![
+///                 TextBuilder::new(WidgetBuilder::new())
+///                     .with_text("Item1")
+///                     .build(ctx),
+///                 TextBuilder::new(WidgetBuilder::new())
+///                     .with_text("Item2")
+///                     .build(ctx),
+///                 TextBuilder::new(WidgetBuilder::new())
+///                     .with_text("Item3")
+///                     .build(ctx),
+///             ]
+///             .to_base(),
+///         )
+///         .with_current_item(1)
+///         .build(ctx)
+/// }
+/// ```
+///
+/// ## Selection
+///
+/// The newly selected item index can be received from a selector by listening to [`SelectorMessage::Current`]
+/// message. To select a new item from code, send the same message with the desired index:
+///
+/// ```rust
+/// # use fyrox_ui::{
+/// #     core::pool::Handle,
+/// #     message::UiMessage,
+/// #     selector::{Selector, SelectorMessage},
+/// #     UserInterface,
+/// # };
+/// #
+/// fn on_ui_message(selector: Handle<Selector>, message: &UiMessage, ui: &UserInterface) {
+///     if let Some(SelectorMessage::Current(Some(index))) = message.data_from(selector) {
+///         println!("The new selection is {index}!");
+///
+///         if *index != 0 {
+///             // The selection can be changed by sending the same message to the widget:
+///             ui.send(selector, SelectorMessage::Current(Some(0)));
+///         }
+///     }
+/// }
+/// ```
+#[derive(Default, Clone, Visit, Reflect, Debug)]
 #[reflect(derived_type = "UiNode")]
-#[type_uuid(id = "25118853-5c3c-4197-9e4b-2e3b9d92f4d2")]
+#[reflect(type_uuid = "25118853-5c3c-4197-9e4b-2e3b9d92f4d2")]
 pub struct Selector {
     widget: Widget,
     items: InheritableVariable<Vec<Handle<UiNode>>>,
     items_panel: InheritableVariable<Handle<UiNode>>,
     current: InheritableVariable<Option<usize>>,
-    prev: InheritableVariable<Handle<UiNode>>,
-    next: InheritableVariable<Handle<UiNode>>,
+    prev: InheritableVariable<Handle<Button>>,
+    next: InheritableVariable<Handle<Button>>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for Selector {
@@ -84,6 +136,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Selector {
             .with_variant("Selector", |ui| {
                 SelectorBuilder::new(WidgetBuilder::new().with_name("Selector"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -99,17 +152,12 @@ impl Control for Selector {
         if let Some(msg) = message.data::<SelectorMessage>() {
             match msg {
                 SelectorMessage::AddItem(item) => {
-                    ui.send_message(WidgetMessage::link(
-                        *item,
-                        MessageDirection::ToWidget,
-                        *self.items_panel,
-                    ));
+                    ui.send(*item, WidgetMessage::LinkWith(*self.items_panel));
                     self.items.push(*item);
                 }
                 SelectorMessage::RemoveItem(item) => {
                     if let Some(position) = self.items.iter().position(|i| i == item) {
-                        ui.send_message(WidgetMessage::remove(*item, MessageDirection::ToWidget));
-
+                        ui.send(*item, WidgetMessage::Remove);
                         self.items.remove(position);
                     }
                 }
@@ -119,29 +167,18 @@ impl Control for Selector {
                 } => {
                     if *remove_previous {
                         for &item in &*self.items {
-                            ui.send_message(WidgetMessage::remove(
-                                item,
-                                MessageDirection::ToWidget,
-                            ));
+                            ui.send(item, WidgetMessage::Remove);
                         }
                     }
 
                     for &item in items {
-                        ui.send_message(WidgetMessage::link(
-                            item,
-                            MessageDirection::ToWidget,
-                            *self.items_panel,
-                        ));
+                        ui.send(item, WidgetMessage::LinkWith(*self.items_panel));
                     }
 
                     self.items.set_value_and_mark_modified(items.clone());
 
                     for (i, item) in self.items.iter().enumerate() {
-                        ui.send_message(WidgetMessage::visibility(
-                            *item,
-                            MessageDirection::ToWidget,
-                            *self.current == Some(i),
-                        ));
+                        ui.send(*item, WidgetMessage::Visibility(*self.current == Some(i)));
                     }
                 }
                 SelectorMessage::Current(current) => {
@@ -150,11 +187,7 @@ impl Control for Selector {
                     {
                         if let Some(current) = *self.current {
                             if let Some(current_item) = self.items.get(current) {
-                                ui.send_message(WidgetMessage::visibility(
-                                    *current_item,
-                                    MessageDirection::ToWidget,
-                                    false,
-                                ));
+                                ui.send(*current_item, WidgetMessage::Visibility(false));
                             }
                         }
 
@@ -162,15 +195,11 @@ impl Control for Selector {
 
                         if let Some(new_current) = *self.current {
                             if let Some(new_current_item) = self.items.get(new_current) {
-                                ui.send_message(WidgetMessage::visibility(
-                                    *new_current_item,
-                                    MessageDirection::ToWidget,
-                                    true,
-                                ));
+                                ui.send(*new_current_item, WidgetMessage::Visibility(true));
                             }
                         }
 
-                        ui.send_message(message.reverse());
+                        ui.try_send_response(message);
                     }
                 }
             }
@@ -178,28 +207,21 @@ impl Control for Selector {
             if message.destination() == *self.prev {
                 if let Some(current) = *self.current {
                     let new_current = current.saturating_sub(1);
-                    ui.send_message(SelectorMessage::current(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                        Some(new_current),
-                    ));
+                    ui.send(self.handle, SelectorMessage::Current(Some(new_current)));
                 }
             } else if message.destination() == *self.next {
                 if let Some(current) = *self.current {
                     let new_current = current
                         .saturating_add(1)
                         .min(self.items.len().saturating_sub(1));
-                    ui.send_message(SelectorMessage::current(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                        Some(new_current),
-                    ));
+                    ui.send(self.handle, SelectorMessage::Current(Some(new_current)));
                 }
             }
         }
     }
 }
 
+/// Creates instances of [`Selector`] widgets.
 pub struct SelectorBuilder {
     widget_builder: WidgetBuilder,
     items: Vec<Handle<UiNode>>,
@@ -207,6 +229,7 @@ pub struct SelectorBuilder {
 }
 
 impl SelectorBuilder {
+    /// Creates a new builder instance.
     pub fn new(widget_builder: WidgetBuilder) -> Self {
         Self {
             widget_builder,
@@ -215,7 +238,20 @@ impl SelectorBuilder {
         }
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    /// Sets the desired set of items for the selector.
+    pub fn with_items(mut self, items: Vec<Handle<UiNode>>) -> Self {
+        self.items = items;
+        self
+    }
+
+    /// Sets the desired selected item.
+    pub fn with_current_item(mut self, current: usize) -> Self {
+        self.current = Some(current);
+        self
+    }
+
+    /// Builds the selector.
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Selector> {
         for (i, item) in self.items.iter().enumerate() {
             ctx[*item].set_visibility(self.current == Some(i));
         }
@@ -257,13 +293,13 @@ impl SelectorBuilder {
         let selector = Selector {
             widget: self.widget_builder.with_child(grid).build(ctx),
             items: self.items.into(),
-            items_panel: items_panel.into(),
+            items_panel: items_panel.to_base().into(),
             prev: prev.into(),
             next: next.into(),
             current: self.current.into(),
         };
 
-        ctx.add_node(UiNode::new(selector))
+        ctx.add(selector)
     }
 }
 

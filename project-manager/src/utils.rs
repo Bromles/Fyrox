@@ -19,12 +19,12 @@
 // SOFTWARE.
 
 use cargo_metadata::{semver::VersionReq, Dependency, Metadata};
+use fyrox::gui::button::Button;
 use fyrox::{
     core::pool::Handle,
     gui::{
         button::ButtonBuilder, text::TextBuilder, utils::make_simple_tooltip,
-        widget::WidgetBuilder, BuildContext, HorizontalAlignment, Thickness, UiNode,
-        VerticalAlignment,
+        widget::WidgetBuilder, BuildContext, HorizontalAlignment, Thickness, VerticalAlignment,
     },
 };
 use std::{
@@ -55,7 +55,7 @@ pub fn make_button(
     column: usize,
     tooltip: Option<&str>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     let mut widget_builder = WidgetBuilder::new()
         .on_row(row)
         .on_column(column)
@@ -137,9 +137,9 @@ fn to_pretty_version(version_req: &VersionReq) -> String {
 pub fn fyrox_version_string(metadata: &Metadata) -> Option<String> {
     fyrox_dependency(metadata).and_then(|dependency| {
         if let Some(source) = dependency.source.as_ref() {
-            if source.contains("registry+") {
+            if source.repr.contains("registry+") {
                 return Some(to_pretty_version(&dependency.req));
-            } else if source.contains("git+") {
+            } else if source.repr.contains("git+") {
                 return Some("nightly".to_string());
             }
         } else if let Some(path) = dependency.path.as_ref() {
@@ -190,6 +190,6 @@ pub fn format_size(size: u64) -> String {
     } else if size >= KB {
         format!("{:.2} KB", size as f64 / KB as f64)
     } else {
-        format!("{} B", size)
+        format!("{size} B")
     }
 }

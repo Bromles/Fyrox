@@ -22,7 +22,7 @@ use crate::fyrox::{
     core::pool::Handle,
     engine::{Engine, GraphicsContext},
     gui::{
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         scroll_viewer::ScrollViewerBuilder,
         text::{TextBuilder, TextMessage},
         widget::{WidgetBuilder, WidgetMessage},
@@ -30,11 +30,14 @@ use crate::fyrox::{
         BuildContext, HorizontalAlignment, Thickness, UiNode, UserInterface, VerticalAlignment,
     },
 };
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::text::Text;
+use fyrox::gui::window::{Window, WindowAlignment};
 use fyrox::scene::Scene;
 
 pub struct StatisticsWindow {
-    pub window: Handle<UiNode>,
-    text: Handle<UiNode>,
+    pub window: Handle<Window>,
+    text: Handle<Text>,
 }
 
 pub enum StatisticsWindowAction {
@@ -43,7 +46,7 @@ pub enum StatisticsWindowAction {
 }
 
 impl StatisticsWindow {
-    pub fn new(ctx: &mut BuildContext, anchor: Handle<UiNode>) -> Self {
+    pub fn new(ctx: &mut BuildContext, anchor: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
         let text;
         let window = WindowBuilder::new(WidgetBuilder::new().with_width(215.0).with_height(300.0))
             .open(false)
@@ -61,16 +64,19 @@ impl StatisticsWindow {
             .with_title(WindowTitle::text("Rendering Statistics"))
             .build(ctx);
 
-        ctx.send_message(WindowMessage::open_and_align(
+        ctx.inner().send(
             window,
-            MessageDirection::ToWidget,
-            anchor,
-            HorizontalAlignment::Right,
-            VerticalAlignment::Top,
-            Thickness::uniform(2.0),
-            false,
-            false,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Relative {
+                    relative_to: anchor.to_base(),
+                    horizontal_alignment: HorizontalAlignment::Right,
+                    vertical_alignment: VerticalAlignment::Top,
+                    margin: Thickness::uniform(2.0),
+                },
+                focus_content: false,
+                modal: false,
+            },
+        );
 
         Self { window, text }
     }
@@ -82,11 +88,7 @@ impl StatisticsWindow {
     ) -> StatisticsWindowAction {
         if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == self.window {
-                ui.send_message(WidgetMessage::remove(
-                    self.window,
-                    MessageDirection::ToWidget,
-                ));
-
+                ui.send(self.window, WidgetMessage::Remove);
                 return StatisticsWindowAction::Remove;
             }
         }
@@ -107,11 +109,7 @@ impl StatisticsWindow {
                 engine
                     .user_interfaces
                     .first()
-                    .send_message(TextMessage::text(
-                        self.text,
-                        MessageDirection::ToWidget,
-                        statistics,
-                    ));
+                    .send(self.text, TextMessage::Text(statistics));
             }
         }
     }

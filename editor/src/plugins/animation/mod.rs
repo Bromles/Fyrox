@@ -24,24 +24,26 @@ use crate::{
         asset::manager::ResourceManager,
         core::{
             algebra::Vector2, color::Color, log::Log, math::curve::Curve, math::Rect,
-            pool::ErasedHandle, pool::Handle, some_or_return, uuid::Uuid,
+            pool::ErasedHandle, pool::Handle, reflect::Reflect, some_or_return, uuid::Uuid,
             variable::InheritableVariable,
         },
+        engine::ApplicationLoopController,
         fxhash::FxHashSet,
         generic_animation::{signal::AnimationSignal, AnimationContainer},
-        graph::{BaseSceneGraph, PrefabData, SceneGraph, SceneGraphNode},
+        graph::{NodeWrapper, PrefabData, SceneGraph},
         gui::{
             border::BorderBuilder,
             brush::Brush,
-            check_box::CheckBoxMessage,
-            curve::{CurveEditorBuilder, CurveEditorMessage, HighlightZone},
-            dock::DockingManagerMessage,
-            grid::{Column, GridBuilder, Row},
-            menu::MenuItemMessage,
-            message::{MessageDirection, UiMessage},
+            curve::{CurveEditor, CurveEditorBuilder, CurveEditorMessage, HighlightZone},
+            dock::{DockingManager, DockingManagerMessage},
+            grid::{Column, Grid, GridBuilder, Row},
+            menu::{MenuItem, MenuItemMessage},
+            message::UiMessage,
+            style::{resource::StyleResourceExt, Style},
+            toggle::ToggleButtonMessage,
             widget::{WidgetBuilder, WidgetMessage},
-            window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, UiNode, UserInterface,
+            window::{Window, WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
+            BuildContext, UserInterface,
         },
         resource::model::AnimationSource,
     },
@@ -53,22 +55,20 @@ use crate::{
             AddAnimationSignal, MoveAnimationSignal, RemoveAnimationSignal,
             ReplaceTrackCurveCommand,
         },
-        ruler::{RulerBuilder, RulerMessage, SignalView},
+        ruler::{Ruler, RulerBuilder, RulerMessage, SignalView},
         selection::{AnimationSelection, SelectedEntity},
-        thumb::{ThumbBuilder, ThumbMessage},
+        thumb::{Thumb, ThumbBuilder, ThumbMessage},
         toolbar::{Toolbar, ToolbarAction},
         track::TrackList,
     },
     scene::{commands::ChangeSelectionCommand, GameScene, Selection},
-    send_sync_message,
     ui_scene::UiScene,
     Editor, Message,
 };
-
-use fyrox::core::reflect::Reflect;
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
-use std::any::{Any, TypeId};
+use fyrox::core::uuid::uuid;
+use fyrox::gui::UiNode;
+use fyrox::scene::node::Node;
+use std::any::Any;
 
 pub mod command;
 mod ruler;
@@ -76,6 +76,40 @@ pub mod selection;
 mod thumb;
 mod toolbar;
 mod track;
+
+pub trait TransformProvider {
+    fn position(&self) -> &[f32];
+    fn rotation(&self) -> Option<&[f32]>;
+    fn scale(&self) -> Option<&[f32]>;
+}
+
+impl TransformProvider for Node {
+    fn position(&self) -> &[f32] {
+        self.local_transform().position().as_slice()
+    }
+
+    fn rotation(&self) -> Option<&[f32]> {
+        Some(self.local_transform().rotation().coords.as_slice())
+    }
+
+    fn scale(&self) -> Option<&[f32]> {
+        Some(self.local_transform().scale().as_slice())
+    }
+}
+
+impl TransformProvider for UiNode {
+    fn position(&self) -> &[f32] {
+        self.desired_local_position.as_slice()
+    }
+
+    fn rotation(&self) -> Option<&[f32]> {
+        None
+    }
+
+    fn scale(&self) -> Option<&[f32]> {
+        None
+    }
+}
 
 pub trait PreviewData {
     fn enter(&mut self);
@@ -86,16 +120,16 @@ struct PreviewModeData<N: 'static> {
 }
 
 pub struct AnimationEditor {
-    pub window: Handle<UiNode>,
+    pub window: Handle<Window>,
     animation_player: ErasedHandle,
     animation: ErasedHandle,
     track_list: TrackList,
-    curve_editor: Handle<UiNode>,
+    curve_editor: Handle<CurveEditor>,
     toolbar: Toolbar,
-    content: Handle<UiNode>,
-    ruler: Handle<UiNode>,
+    content: Handle<Grid>,
+    ruler: Handle<Ruler>,
     preview_mode_data: Option<Box<dyn Any>>,
-    thumb: Handle<UiNode>,
+    thumb: Handle<Thumb>,
 }
 
 fn fetch_selection<G, N>(
@@ -104,8 +138,8 @@ fn fetch_selection<G, N>(
     editor_selection: &Selection,
 ) -> AnimationSelection<N>
 where
-    G: SceneGraph<Node = N>,
-    N: SceneGraphNode<SceneGraph = G>,
+    G: SceneGraph<NodeWrapper = N>,
+    N: NodeWrapper<SceneGraph = G>,
 {
     let mut sel = inner_fetch_selection(editor_selection);
     if animation_container_ref(graph, sel.animation_player).is_none() {
@@ -174,12 +208,16 @@ fn animation_container<G, N>(
     handle: Handle<N>,
 ) -> Option<&mut AnimationContainer<Handle<N>>>
 where
-    G: SceneGraph<Node = N>,
-    N: SceneGraphNode<SceneGraph = G>,
+    G: SceneGraph<NodeWrapper = N>,
+    N: NodeWrapper<SceneGraph = G>,
 {
     graph
-        .try_get_mut(handle)
-        .and_then(|n| n.component_mut::<InheritableVariable<AnimationContainer<Handle<N>>>>())
+        .try_get_node_mut(handle)
+        .ok()
+        .and_then(|n| {
+            n.inner_mut()
+                .self_or_field_mut::<InheritableVariable<AnimationContainer<Handle<N>>>>()
+        })
         .map(|v| v.get_value_mut_silent())
 }
 
@@ -188,17 +226,16 @@ fn animation_container_ref<G, N>(
     handle: Handle<N>,
 ) -> Option<&AnimationContainer<Handle<N>>>
 where
-    G: SceneGraph<Node = N>,
-    N: SceneGraphNode<SceneGraph = G>,
+    G: SceneGraph<NodeWrapper = N>,
+    N: NodeWrapper<SceneGraph = G>,
 {
     graph
-        .try_get(handle)
+        .try_get_node(handle)
+        .ok()
         .and_then(|n| {
-            n.query_component_ref(TypeId::of::<
-                InheritableVariable<AnimationContainer<Handle<N>>>,
-            >())
+            n.inner_ref()
+                .first_field_ref::<InheritableVariable<AnimationContainer<Handle<N>>>>()
         })
-        .and_then(|a| a.downcast_ref::<InheritableVariable<AnimationContainer<Handle<N>>>>())
         .map(|v| v.get_value_ref())
 }
 
@@ -219,43 +256,58 @@ impl AnimationEditor {
                 .on_column(0)
                 .with_child(track_list.panel)
                 .with_child(
-                    BorderBuilder::new(
+                    GridBuilder::new(
                         WidgetBuilder::new()
                             .on_row(0)
                             .on_column(1)
                             .with_child(
-                                GridBuilder::new(
+                                BorderBuilder::new(
                                     WidgetBuilder::new()
-                                        .with_child({
-                                            ruler =
-                                                RulerBuilder::new(WidgetBuilder::new().on_row(0))
-                                                    .with_value(0.0)
-                                                    .build(ctx);
-                                            ruler
-                                        })
-                                        .with_child({
-                                            curve_editor = CurveEditorBuilder::new(
+                                        .with_child(
+                                            GridBuilder::new(
                                                 WidgetBuilder::new()
-                                                    .with_background(
-                                                        ctx.style.property(Style::BRUSH_DARK),
-                                                    )
-                                                    .on_row(1),
+                                                    .with_child({
+                                                        ruler = RulerBuilder::new(
+                                                            WidgetBuilder::new().on_row(0),
+                                                        )
+                                                        .with_value(0.0)
+                                                        .build(ctx);
+                                                        ruler
+                                                    })
+                                                    .with_child({
+                                                        curve_editor = CurveEditorBuilder::new(
+                                                            WidgetBuilder::new()
+                                                                .with_background(
+                                                                    ctx.style.property(
+                                                                        Style::BRUSH_DARK,
+                                                                    ),
+                                                                )
+                                                                .on_row(1),
+                                                        )
+                                                        .with_show_x_values(false)
+                                                        .build(ctx);
+                                                        curve_editor
+                                                    }),
                                             )
-                                            .with_show_x_values(false)
-                                            .build(ctx);
-                                            curve_editor
+                                            .add_row(Row::strict(22.0))
+                                            .add_row(Row::stretch())
+                                            .add_row(Row::auto())
+                                            .add_column(Column::stretch())
+                                            .build(ctx),
+                                        )
+                                        .with_child({
+                                            thumb =
+                                                ThumbBuilder::new(WidgetBuilder::new()).build(ctx);
+                                            thumb
                                         }),
                                 )
-                                .add_row(Row::strict(22.0))
-                                .add_row(Row::stretch())
-                                .add_column(Column::stretch())
                                 .build(ctx),
                             )
-                            .with_child({
-                                thumb = ThumbBuilder::new(WidgetBuilder::new()).build(ctx);
-                                thumb
-                            }),
+                            .with_child(toolbar.bottom_panel),
                     )
+                    .add_row(Row::stretch())
+                    .add_row(Row::auto())
+                    .add_column(Column::stretch())
                     .build(ctx),
                 ),
         )
@@ -266,10 +318,10 @@ impl AnimationEditor {
 
         let content = GridBuilder::new(
             WidgetBuilder::new()
-                .with_child(toolbar.panel)
+                .with_child(toolbar.top_panel)
                 .with_child(payload),
         )
-        .add_row(Row::strict(26.0))
+        .add_row(Row::auto())
         .add_row(Row::stretch())
         .add_column(Column::stretch())
         .build(ctx);
@@ -301,12 +353,14 @@ impl AnimationEditor {
     }
 
     pub fn open(&self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::open(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
     }
 
     pub fn handle_ui_message<P, G, N>(
@@ -321,8 +375,8 @@ impl AnimationEditor {
         node_overrides: &mut FxHashSet<Handle<N>>,
     ) where
         P: PrefabData<Graph = G> + AnimationSource<Node = N, SceneGraph = G, Prefab = P>,
-        G: SceneGraph<Node = N, Prefab = P>,
-        N: SceneGraphNode<SceneGraph = G, ResourceData = P>,
+        G: SceneGraph<NodeWrapper = N, Prefab = P>,
+        N: NodeWrapper<SceneGraph = G, ResourceData = P> + TransformProvider,
     {
         let selection = fetch_selection(self, graph, editor_selection);
 
@@ -340,63 +394,40 @@ impl AnimationEditor {
 
             let animations = animation_container(graph, selection.animation_player).unwrap();
 
-            if let Some(msg) = message.data::<CurveEditorMessage>() {
-                if message.destination() == self.curve_editor
-                    && message.direction() == MessageDirection::FromWidget
-                {
-                    match msg {
-                        CurveEditorMessage::Sync(curves) => {
-                            let group = CommandGroup::from(
-                                curves
-                                    .iter()
-                                    .cloned()
-                                    .map(|curve| {
-                                        Command::new(ReplaceTrackCurveCommand {
-                                            animation_player: selection.animation_player,
-                                            animation: selection.animation,
-                                            curve,
-                                        })
+            if let Some(msg) = message.data_from::<CurveEditorMessage>(self.curve_editor) {
+                match msg {
+                    CurveEditorMessage::Sync(curves) => {
+                        let group = CommandGroup::from(
+                            curves
+                                .iter()
+                                .cloned()
+                                .map(|curve| {
+                                    Command::new(ReplaceTrackCurveCommand {
+                                        animation_player: selection.animation_player,
+                                        animation: selection.animation,
+                                        curve,
                                     })
-                                    .collect::<Vec<_>>(),
-                            );
+                                })
+                                .collect::<Vec<_>>(),
+                        );
 
-                            sender.do_command(group);
-                        }
-                        CurveEditorMessage::ViewPosition(position) => {
-                            ui.send_message(RulerMessage::view_position(
-                                self.ruler,
-                                MessageDirection::ToWidget,
-                                position.x,
-                            ));
-                            ui.send_message(ThumbMessage::view_position(
-                                self.thumb,
-                                MessageDirection::ToWidget,
-                                position.x,
-                            ));
-                        }
-                        CurveEditorMessage::Zoom(zoom) => {
-                            ui.send_message(RulerMessage::zoom(
-                                self.ruler,
-                                MessageDirection::ToWidget,
-                                zoom.x,
-                            ));
-                            ui.send_message(ThumbMessage::zoom(
-                                self.thumb,
-                                MessageDirection::ToWidget,
-                                zoom.x,
-                            ))
-                        }
-                        _ => (),
+                        sender.do_command(group);
                     }
+                    CurveEditorMessage::ViewPosition(position) => {
+                        ui.send(self.ruler, RulerMessage::ViewPosition(position.x));
+                        ui.send(self.thumb, ThumbMessage::ViewPosition(position.x));
+                    }
+                    CurveEditorMessage::Zoom(zoom) => {
+                        ui.send(self.ruler, RulerMessage::Zoom(zoom.x));
+                        ui.send(self.thumb, ThumbMessage::Zoom(zoom.x))
+                    }
+                    _ => (),
                 }
-            } else if let Some(msg) = message.data::<RulerMessage>() {
-                if message.destination() == self.ruler
-                    && message.direction() == MessageDirection::FromWidget
-                    && animations.try_get(selection.animation).is_some()
-                {
+            } else if let Some(msg) = message.data_from::<RulerMessage>(self.ruler) {
+                if animations.try_get(selection.animation).is_ok() {
                     match msg {
                         RulerMessage::Value(value) => {
-                            if let Some(animation) = animations.try_get_mut(selection.animation) {
+                            if let Ok(animation) = animations.try_get_mut(selection.animation) {
                                 animation.set_time_position(*value);
                             }
                         }
@@ -413,7 +444,7 @@ impl AnimationEditor {
                             });
                         }
                         RulerMessage::RemoveSignal(id) => {
-                            if let Some(animation) = animations.try_get(selection.animation) {
+                            if let Ok(animation) = animations.try_get(selection.animation) {
                                 sender.do_command(RemoveAnimationSignal {
                                     animation_player_handle: selection.animation_player,
                                     animation_handle: selection.animation,
@@ -454,11 +485,11 @@ impl AnimationEditor {
                     assert!(node_overrides.insert(selection.animation_player));
 
                     let animation_player_node =
-                        graph.try_get_mut(selection.animation_player).unwrap();
+                        graph.try_get_node_mut(selection.animation_player).unwrap();
 
                     // HACK. This is unreliable to just use `bool` here. It should be wrapped into
                     // newtype or something.
-                    if let Some(auto_apply) = animation_player_node.component_mut::<bool>() {
+                    if let Some(auto_apply) = animation_player_node.self_or_field_mut::<bool>() {
                         *auto_apply = true;
                     } else {
                         Log::warn("No `auto_apply` component in animation player!")
@@ -478,7 +509,7 @@ impl AnimationEditor {
                         animation.set_enabled(handle == selection.animation);
                     }
 
-                    if let Some(animation) = animations.try_get_mut(selection.animation) {
+                    if let Ok(animation) = animations.try_get_mut(selection.animation) {
                         animation.rewind();
 
                         let animation_targets = animation
@@ -505,41 +536,67 @@ impl AnimationEditor {
                 ToolbarAction::SelectAnimation(animation) => {
                     let animation_ref = &animations[animation.into()];
 
-                    let size = ui.node(self.curve_editor).actual_local_size();
+                    let size = ui[self.curve_editor].actual_local_size();
                     let length = animation_ref.length().max(1.0);
                     let zoom = size.x / length;
 
-                    ui.send_message(CurveEditorMessage::zoom(
+                    ui.send(
                         self.curve_editor,
-                        MessageDirection::ToWidget,
-                        Vector2::new(zoom, zoom),
-                    ));
+                        CurveEditorMessage::Zoom(Vector2::new(zoom, zoom)),
+                    );
 
-                    ui.send_message(CurveEditorMessage::view_position(
+                    ui.send(
                         self.curve_editor,
-                        MessageDirection::ToWidget,
-                        Vector2::new(0.5 * animation_ref.length(), 0.0),
-                    ));
+                        CurveEditorMessage::ViewPosition(Vector2::new(
+                            0.5 * animation_ref.length(),
+                            0.0,
+                        )),
+                    );
                 }
                 ToolbarAction::PlayPause => {
                     if self.preview_mode_data.is_some() {
-                        if let Some(animation) = animations.try_get_mut(selection.animation) {
+                        if let Ok(animation) = animations.try_get_mut(selection.animation) {
                             animation.set_enabled(!animation.is_enabled());
                         }
                     }
                 }
                 ToolbarAction::Stop => {
                     if self.preview_mode_data.is_some() {
-                        if let Some(animation) = animations.try_get_mut(selection.animation) {
+                        if let Ok(animation) = animations.try_get_mut(selection.animation) {
                             animation.rewind();
                             animation.set_enabled(false);
                         }
                     }
                 }
+                ToolbarAction::NewAnimation => {
+                    let size = ui[self.curve_editor].actual_local_size();
+                    let length = 1.0;
+                    let zoom = size.x / length * 0.9;
+                    ui.send_many(
+                        self.curve_editor,
+                        [
+                            CurveEditorMessage::Zoom(Vector2::new(zoom, zoom)),
+                            CurveEditorMessage::ViewPosition(Vector2::new(0.5 * length, 0.0)),
+                        ],
+                    );
+                }
+                ToolbarAction::ShowBackgroundCurves(show) => {
+                    ui.send(
+                        self.curve_editor,
+                        CurveEditorMessage::ShowBackgroundCurves(show),
+                    );
+                }
             }
 
-            self.track_list
-                .handle_ui_message(message, &selection, root, sender, ui, graph);
+            self.track_list.handle_ui_message(
+                message,
+                editor_selection,
+                &selection,
+                root,
+                sender,
+                ui,
+                graph,
+            );
         }
 
         self.toolbar.post_handle_ui_message(
@@ -563,8 +620,8 @@ impl AnimationEditor {
         ui: &UserInterface,
         node_overrides: &mut FxHashSet<Handle<N>>,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper,
     {
         assert!(self.preview_mode_data.is_none());
 
@@ -594,8 +651,8 @@ impl AnimationEditor {
         ui: &UserInterface,
         node_overrides: &mut FxHashSet<Handle<N>>,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
         self.toolbar.on_preview_mode_changed(ui, false);
 
@@ -617,8 +674,8 @@ impl AnimationEditor {
         ui: &UserInterface,
         node_overrides: &mut FxHashSet<Handle<N>>,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
         if self.preview_mode_data.is_some() {
             self.leave_preview_mode(graph, ui, node_overrides);
@@ -636,8 +693,8 @@ impl AnimationEditor {
         ui: &UserInterface,
         node_overrides: &mut FxHashSet<Handle<N>>,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
         // Leave preview mode before execution of any scene command.
         if let Message::DoCommand(_)
@@ -648,17 +705,13 @@ impl AnimationEditor {
         }
     }
 
-    pub fn destroy(self, ui: &UserInterface, docking_manager: Handle<UiNode>) {
+    pub fn destroy(self, ui: &UserInterface, docking_manager: Handle<DockingManager>) {
         self.toolbar.destroy(ui);
-        ui.send_message(DockingManagerMessage::remove_floating_window(
+        ui.send(
             docking_manager,
-            MessageDirection::ToWidget,
-            self.window,
-        ));
-        ui.send_message(WidgetMessage::remove(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
+            DockingManagerMessage::RemoveFloatingWindow(self.window),
+        );
+        ui.send(self.window, WidgetMessage::Remove);
     }
 
     pub fn clear(&mut self, ui: &UserInterface) {
@@ -668,22 +721,17 @@ impl AnimationEditor {
 
     pub fn update<G, N>(&mut self, editor_selection: &Selection, ui: &UserInterface, graph: &G)
     where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
-        if !self.is_in_preview_mode() {
-            return;
-        }
-
         let selection = fetch_selection(self, graph, editor_selection);
 
         if let Some(container) = animation_container_ref(graph, selection.animation_player) {
-            if let Some(animation) = container.try_get(selection.animation) {
-                ui.send_message(ThumbMessage::position(
+            if let Ok(animation) = container.try_get(selection.animation) {
+                ui.send(
                     self.thumb,
-                    MessageDirection::ToWidget,
-                    animation.time_position(),
-                ));
+                    ThumbMessage::Position(animation.time_position()),
+                );
             }
         }
     }
@@ -694,8 +742,8 @@ impl AnimationEditor {
         ui: &mut UserInterface,
         graph: &G,
     ) where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
         let selection = fetch_selection(self, graph, editor_selection);
 
@@ -712,37 +760,31 @@ impl AnimationEditor {
                 self.preview_mode_data.is_some(),
             );
 
-            if let Some(animation) = animations.try_get(selection.animation) {
+            if let Ok(animation) = animations.try_get(selection.animation) {
                 self.track_list
-                    .sync_to_model(animation, graph, &selection, ui);
+                    .sync_to_model(editor_selection, animation, graph, &selection, ui);
 
                 let animation_tracks_data_state = animation.tracks_data().state();
                 let Some(animation_tracks_data) = animation_tracks_data_state.data_ref() else {
                     return;
                 };
 
-                send_sync_message(
-                    ui,
-                    CurveEditorMessage::hightlight_zones(
-                        self.curve_editor,
-                        MessageDirection::ToWidget,
-                        vec![HighlightZone {
-                            rect: Rect::new(
-                                animation.time_slice().start,
-                                -100000.0,
-                                animation.time_slice().end - animation.time_slice().start,
-                                200000.0,
-                            ),
-                            brush: ui.style.get_or_default(Style::BRUSH_PRIMARY),
-                        }],
-                    ),
+                ui.send_sync(
+                    self.curve_editor,
+                    CurveEditorMessage::HighlightZones(vec![HighlightZone {
+                        rect: Rect::new(
+                            animation.time_slice().start,
+                            -100000.0,
+                            animation.time_slice().end - animation.time_slice().start,
+                            200000.0,
+                        ),
+                        brush: ui.style.get_or_default(Style::BRUSH_PRIMARY),
+                    }]),
                 );
 
-                send_sync_message(
-                    ui,
-                    RulerMessage::sync_signals(
-                        self.ruler,
-                        MessageDirection::ToWidget,
+                ui.send_sync(
+                    self.ruler,
+                    RulerMessage::SyncSignals(
                         animation
                             .signals()
                             .iter()
@@ -813,13 +855,9 @@ impl AnimationEditor {
                     }
                 }
 
-                send_sync_message(
-                    ui,
-                    CurveEditorMessage::sync_background(
-                        self.curve_editor,
-                        MessageDirection::ToWidget,
-                        background_curves,
-                    ),
+                ui.send_sync(
+                    self.curve_editor,
+                    CurveEditorMessage::SyncBackground(background_curves),
                 );
 
                 if !selected_curves.is_empty() {
@@ -828,26 +866,16 @@ impl AnimationEditor {
                         .map(|(index, curve)| (curve.id, Brush::Solid(Color::COLORS[3 + *index])))
                         .collect::<Vec<_>>();
 
-                    send_sync_message(
-                        ui,
-                        CurveEditorMessage::sync(
-                            self.curve_editor,
-                            MessageDirection::ToWidget,
+                    ui.send_sync(
+                        self.curve_editor,
+                        CurveEditorMessage::Sync(
                             selected_curves
                                 .into_iter()
                                 .map(|(_, curve)| curve)
                                 .collect(),
                         ),
                     );
-
-                    send_sync_message(
-                        ui,
-                        CurveEditorMessage::colorize(
-                            self.curve_editor,
-                            MessageDirection::ToWidget,
-                            color_map,
-                        ),
-                    );
+                    ui.send_sync(self.curve_editor, CurveEditorMessage::Colorize(color_map));
 
                     is_curve_selected = true;
                 }
@@ -859,32 +887,20 @@ impl AnimationEditor {
         if !is_animation_selected || !is_animation_player_selected {
             self.track_list.clear(ui);
 
-            send_sync_message(
-                ui,
-                CurveEditorMessage::zoom(
-                    self.curve_editor,
-                    MessageDirection::ToWidget,
-                    Vector2::new(1.0, 1.0),
-                ),
+            ui.send_sync(
+                self.curve_editor,
+                CurveEditorMessage::Zoom(Vector2::new(1.0, 1.0)),
             );
-            send_sync_message(
-                ui,
-                CurveEditorMessage::view_position(
-                    self.curve_editor,
-                    MessageDirection::ToWidget,
-                    Vector2::default(),
-                ),
+            ui.send_sync(
+                self.curve_editor,
+                CurveEditorMessage::ViewPosition(Vector2::default()),
             );
         }
 
         if !is_animation_selected || !is_animation_player_selected || !is_curve_selected {
-            send_sync_message(
-                ui,
-                CurveEditorMessage::sync(
-                    self.curve_editor,
-                    MessageDirection::ToWidget,
-                    Default::default(),
-                ),
+            ui.send_sync(
+                self.curve_editor,
+                CurveEditorMessage::Sync(Default::default()),
             );
         }
 
@@ -892,48 +908,48 @@ impl AnimationEditor {
             self.toolbar.clear(ui);
         }
 
-        send_sync_message(
-            ui,
-            WidgetMessage::visibility(
-                self.content,
-                MessageDirection::ToWidget,
-                is_animation_player_selected,
-            ),
+        ui.send_sync(
+            self.content,
+            WidgetMessage::Visibility(is_animation_player_selected),
         );
-        send_sync_message(
-            ui,
-            WidgetMessage::enabled(
-                self.track_list.panel,
-                MessageDirection::ToWidget,
-                is_animation_selected,
-            ),
+        ui.send_sync(
+            self.track_list.panel,
+            WidgetMessage::Enabled(is_animation_selected),
         );
-        send_sync_message(
-            ui,
-            CheckBoxMessage::checked(
-                self.toolbar.preview,
-                MessageDirection::ToWidget,
-                Some(self.preview_mode_data.is_some()),
-            ),
+        ui.send_sync(
+            self.toolbar.preview,
+            ToggleButtonMessage::Toggled(self.preview_mode_data.is_some()),
         );
-        send_sync_message(
-            ui,
-            WidgetMessage::enabled(
-                self.curve_editor,
-                MessageDirection::ToWidget,
-                is_animation_selected,
-            ),
+        ui.send_sync(
+            self.curve_editor,
+            WidgetMessage::Enabled(is_animation_selected),
         );
+        let name = if let Ok(player) = graph.try_get(selection.animation_player) {
+            player.name().to_string()
+        } else {
+            "No Player".to_string()
+        };
+        ui.send_sync(
+            self.window,
+            WindowMessage::Title(WindowTitle::text(format!(
+                "Animation Editor - {}({}:{})",
+                name,
+                self.animation_player.index(),
+                self.animation_player.generation()
+            ))),
+        )
     }
 }
 
 #[derive(Default)]
 pub struct AnimationEditorPlugin {
     animation_editor: Option<AnimationEditor>,
-    open_animation_editor: Handle<UiNode>,
+    open_animation_editor: Handle<MenuItem>,
 }
 
 impl AnimationEditorPlugin {
+    pub const ANIMATION_EDITOR: Uuid = uuid!("139e314b-89a0-4494-ae82-22487f77335d");
+
     fn get_or_create_animation_editor(&mut self, ui: &mut UserInterface) -> &mut AnimationEditor {
         self.animation_editor
             .get_or_insert_with(|| AnimationEditor::new(&mut ui.build_ctx()))
@@ -951,16 +967,16 @@ impl EditorPlugin for AnimationEditorPlugin {
         }
 
         let ctx = &mut ui.build_ctx();
-        self.open_animation_editor = create_menu_item("Animation Editor", vec![], ctx);
-        ui.send_message(MenuItemMessage::add_item(
+        self.open_animation_editor =
+            create_menu_item("Animation Editor", Self::ANIMATION_EDITOR, vec![], ctx);
+        ui.send(
             editor.menu.utils_menu.menu,
-            MessageDirection::ToWidget,
-            self.open_animation_editor,
-        ));
+            MenuItemMessage::AddItem(self.open_animation_editor),
+        );
     }
 
     fn on_sync_to_model(&mut self, editor: &mut Editor) {
-        let entry = some_or_return!(editor.scenes.current_scene_entry_mut());
+        let entry = editor.scenes.current_scene_entry_mut();
         let animation_editor = some_or_return!(self.animation_editor.as_mut());
         let ui = editor.engine.user_interfaces.first_mut();
         if let Some(game_scene) = entry.controller.downcast_mut::<GameScene>() {
@@ -984,11 +1000,13 @@ impl EditorPlugin for AnimationEditorPlugin {
             }
         }
 
-        let mut animation_editor = some_or_return!(self.animation_editor.take());
+        let animation_editor = some_or_return!(self.animation_editor.as_mut());
 
         if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == animation_editor.window {
                 self.on_leave_preview_mode(editor);
+
+                let animation_editor = some_or_return!(self.animation_editor.take());
 
                 animation_editor.destroy(
                     editor.engine.user_interfaces.first(),
@@ -999,40 +1017,37 @@ impl EditorPlugin for AnimationEditorPlugin {
             }
         }
 
-        if let Some(entry) = editor.scenes.current_scene_entry_mut() {
-            let ui = editor.engine.user_interfaces.first_mut();
-            if let Some(game_scene) = entry.controller.downcast_mut::<GameScene>() {
-                let graph = &mut editor.engine.scenes[game_scene.scene].graph;
-                animation_editor.handle_ui_message(
-                    message,
-                    &entry.selection,
-                    graph,
-                    game_scene.scene_content_root,
-                    ui,
-                    &editor.engine.resource_manager,
-                    &editor.message_sender,
-                    game_scene.graph_switches.node_overrides.as_mut().unwrap(),
-                );
-            } else if let Some(ui_scene) = entry.controller.downcast_mut::<UiScene>() {
-                let ui_root = ui_scene.ui.root();
-                animation_editor.handle_ui_message(
-                    message,
-                    &entry.selection,
-                    &mut ui_scene.ui,
-                    ui_root,
-                    ui,
-                    &editor.engine.resource_manager,
-                    &editor.message_sender,
-                    ui_scene.ui_update_switches.node_overrides.as_mut().unwrap(),
-                );
-            }
+        let entry = editor.scenes.current_scene_entry_mut();
+        let ui = editor.engine.user_interfaces.first_mut();
+        if let Some(game_scene) = entry.controller.downcast_mut::<GameScene>() {
+            let graph = &mut editor.engine.scenes[game_scene.scene].graph;
+            animation_editor.handle_ui_message(
+                message,
+                &entry.selection,
+                graph,
+                game_scene.scene_content_root,
+                ui,
+                &editor.engine.resource_manager,
+                &editor.message_sender,
+                game_scene.graph_switches.node_overrides.as_mut().unwrap(),
+            );
+        } else if let Some(ui_scene) = entry.controller.downcast_mut::<UiScene>() {
+            let ui_root = ui_scene.ui.root();
+            animation_editor.handle_ui_message(
+                message,
+                &entry.selection,
+                &mut ui_scene.ui,
+                ui_root,
+                ui,
+                &editor.engine.resource_manager,
+                &editor.message_sender,
+                ui_scene.ui_update_switches.node_overrides.as_mut().unwrap(),
+            );
         }
-
-        self.animation_editor = Some(animation_editor);
     }
 
     fn on_leave_preview_mode(&mut self, editor: &mut Editor) {
-        let entry = some_or_return!(editor.scenes.current_scene_entry_mut());
+        let entry = editor.scenes.current_scene_entry_mut();
         let animation_editor = some_or_return!(self.animation_editor.as_mut());
         if let Some(game_scene) = entry.controller.downcast_mut::<GameScene>() {
             let engine = &mut editor.engine;
@@ -1055,8 +1070,8 @@ impl EditorPlugin for AnimationEditorPlugin {
         animation_editor.is_in_preview_mode()
     }
 
-    fn on_update(&mut self, editor: &mut Editor) {
-        let entry = some_or_return!(editor.scenes.current_scene_entry_mut());
+    fn on_update(&mut self, editor: &mut Editor, _loop_controller: ApplicationLoopController) {
+        let entry = editor.scenes.current_scene_entry_mut();
         let animation_editor = some_or_return!(self.animation_editor.as_mut());
         if let Some(game_scene) = entry.controller.downcast_ref::<GameScene>() {
             animation_editor.update(
@@ -1080,16 +1095,15 @@ impl EditorPlugin for AnimationEditorPlugin {
 
             animation_editor.open(ui);
 
-            ui.send_message(DockingManagerMessage::add_floating_window(
+            ui.send(
                 editor.docking_manager,
-                MessageDirection::ToWidget,
-                animation_editor.window,
-            ));
+                DockingManagerMessage::AddFloatingWindow(animation_editor.window),
+            );
 
             self.on_sync_to_model(editor);
         }
 
-        let entry = some_or_return!(editor.scenes.current_scene_entry_mut());
+        let entry = editor.scenes.current_scene_entry_mut();
         let animation_editor = some_or_return!(self.animation_editor.as_mut());
         if let Some(game_scene) = entry.controller.downcast_mut::<GameScene>() {
             animation_editor.handle_message(

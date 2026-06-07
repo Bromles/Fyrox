@@ -23,8 +23,8 @@ use crate::{
         core::{
             algebra::{Vector2, Vector3},
             pool::Handle,
+            reflect::prelude::*,
             uuid::Uuid,
-            TypeUuidProvider,
         },
         gui::{
             border::BorderBuilder,
@@ -36,7 +36,7 @@ use crate::{
             style::{resource::StyleResourceExt, Style},
             utils::make_simple_tooltip,
             widget::WidgetBuilder,
-            BuildContext, Thickness, UiNode,
+            BuildContext, Thickness,
         },
         scene::{camera::Projection, graph::Graph, node::Node},
     },
@@ -47,6 +47,9 @@ use crate::{
     Engine, Message,
 };
 use fyrox::core::define_as_any_trait;
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::button::Button;
+use fyrox::scene::camera::Camera;
 
 pub mod gizmo;
 pub mod move_mode;
@@ -59,7 +62,7 @@ pub mod terrain;
 
 define_as_any_trait!(InteractionModeAsAny => InteractionMode);
 
-pub trait InteractionMode: InteractionModeAsAny {
+pub trait InteractionMode: Reflect + InteractionModeAsAny {
     fn on_left_mouse_button_down(
         &mut self,
         editor_selection: &Selection,
@@ -195,7 +198,7 @@ pub trait InteractionMode: InteractionModeAsAny {
         false
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode>;
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button>;
 
     fn uuid(&self) -> Uuid;
 }
@@ -205,7 +208,7 @@ pub fn make_interaction_mode_button(
     image: &[u8],
     tooltip: &str,
     selected: bool,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .with_tooltip(make_simple_tooltip(ctx, tooltip))
@@ -236,9 +239,9 @@ pub fn make_interaction_mode_button(
         ImageBuilder::new(
             WidgetBuilder::new()
                 .with_background(ctx.style.property(Style::BRUSH_TEXT))
-                .with_margin(Thickness::uniform(2.0))
-                .with_width(23.0)
-                .with_height(23.0),
+                .with_margin(Thickness::uniform(4.0))
+                .with_width(19.0)
+                .with_height(19.0),
         )
         .with_opt_texture(load_image_internal(image))
         .build(ctx),
@@ -248,13 +251,13 @@ pub fn make_interaction_mode_button(
 
 pub fn calculate_gizmo_distance_scaling(
     graph: &Graph,
-    camera: Handle<Node>,
-    gizmo_origin: Handle<Node>,
+    camera: Handle<Camera>,
+    gizmo_origin: Handle<impl ObjectOrVariant<Node>>,
 ) -> Vector3<f32> {
-    let s = match graph[camera].as_camera().projection() {
+    let s = match graph[camera].projection() {
         Projection::Perspective(proj) => {
             distance_scale_factor(proj.fov)
-                * graph[gizmo_origin]
+                * graph[gizmo_origin.to_base()]
                     .global_position()
                     .metric_distance(&graph[camera].global_position())
         }
@@ -299,8 +302,8 @@ impl InteractionModeContainer {
         }
     }
 
-    pub fn remove_typed<T: InteractionMode + TypeUuidProvider>(&mut self) -> Option<Box<T>> {
-        self.remove(&T::type_uuid())
+    pub fn remove_typed<T: InteractionMode>(&mut self) -> Option<Box<T>> {
+        self.remove(&T::type_info().type_uuid)
             .and_then(|mode| mode.into_any().downcast::<T>().ok())
     }
 
@@ -322,13 +325,13 @@ impl InteractionModeContainer {
             .map(|mode| &mut **mode)
     }
 
-    pub fn of_type<T: InteractionMode + TypeUuidProvider>(&self) -> Option<&T> {
-        self.get(&T::type_uuid())
+    pub fn of_type<T: InteractionMode>(&self) -> Option<&T> {
+        self.get(&T::type_info().type_uuid)
             .and_then(|mode| mode.as_any().downcast_ref())
     }
 
-    pub fn of_type_mut<T: InteractionMode + TypeUuidProvider>(&mut self) -> Option<&mut T> {
-        self.get_mut(&T::type_uuid())
+    pub fn of_type_mut<T: InteractionMode>(&mut self) -> Option<&mut T> {
+        self.get_mut(&T::type_info().type_uuid)
             .and_then(|mode| mode.as_any_mut().downcast_mut())
     }
 

@@ -26,33 +26,33 @@
 use crate::{
     brush::Brush,
     core::{
-        algebra::{Point2, Vector2},
+        algebra::{Matrix3, Point2, Vector2},
         color::Color,
         math::Rect,
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
-        uuid_provider,
+        some_or_return,
         variable::InheritableVariable,
         visitor::prelude::*,
+        SafeLock,
     },
-    define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
     font::FontResource,
     formatted_text::{FormattedText, FormattedTextBuilder, WrapMode},
-    message::{CursorIcon, KeyCode, MessageDirection, MouseButton, UiMessage},
+    message::{CursorIcon, KeyCode, MessageData, MessageDirection, MouseButton, UiMessage},
+    style::{resource::StyleResourceExt, Style, StyledProperty},
+    text::TextBuilder,
     text::TextMessage,
     widget::{Widget, WidgetBuilder, WidgetMessage},
-    BuildContext, Control, HorizontalAlignment, UiNode, UserInterface, VerticalAlignment,
+    BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
+    VerticalAlignment,
 };
 use copypasta::ClipboardProvider;
-
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::{
     cell::RefCell,
     fmt::{Debug, Formatter},
-    ops::{Deref, DerefMut},
     sync::Arc,
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
@@ -64,40 +64,22 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
 /// Text box widget also supports [`TextMessage`] and [`WidgetMessage`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextBoxMessage {
-    /// Used to change selection brush of a text box. Use [TextBoxMessage::selection_brush`] to create the message.
+    /// Used to change selection brush of a text box.
     SelectionBrush(Brush),
-    /// Used to change caret brush of a text box. Use [TextBoxMessage::caret_brush`] to create the message.
+    /// Used to change caret brush of a text box.
     CaretBrush(Brush),
-    /// Used to change text commit mode of a text box. Use [TextBoxMessage::text_commit_mode`] to create the message.
+    /// Used to change text commit mode of a text box.
     TextCommitMode(TextCommitMode),
-    /// Used to enable or disable multiline mode of a text box. Use [TextBoxMessage::multiline`] to create the message.
+    /// Used to enable or disable multiline mode of a text box.
     Multiline(bool),
-    /// Used to enable or disable an ability to edit text box content. Use [TextBoxMessage::editable`] to create the message.
+    /// Used to enable or disable the ability to edit text box content.
     Editable(bool),
+    /// Used to set new padding for a text box.
+    Padding(Thickness),
+    /// Used to set new corner radius.
+    CornerRadius(f32),
 }
-
-impl TextBoxMessage {
-    define_constructor!(
-        /// Creates [`TextBoxMessage::SelectionBrush`].
-        TextBoxMessage:SelectionBrush => fn selection_brush(Brush), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TextBoxMessage::CaretBrush`].
-        TextBoxMessage:CaretBrush => fn caret_brush(Brush), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TextBoxMessage::TextCommitMode`].
-        TextBoxMessage:TextCommitMode => fn text_commit_mode(TextCommitMode), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TextBoxMessage::Multiline`].
-        TextBoxMessage:Multiline => fn multiline(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TextBoxMessage::Editable`].
-        TextBoxMessage:Editable => fn editable(bool), layout: false
-    );
-}
+impl MessageData for TextBoxMessage {}
 
 /// Specifies a direction on horizontal axis.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -118,8 +100,6 @@ pub enum VerticalDirection {
 }
 
 pub use crate::formatted_text::Position;
-use crate::style::resource::StyleResourceExt;
-use crate::style::{Style, StyledProperty};
 
 /// Defines the way, how the text box widget will commit the text that was typed in
 #[derive(
@@ -137,19 +117,18 @@ use crate::style::{Style, StyledProperty};
     AsRefStr,
     EnumString,
     VariantNames,
-    TypeUuidProvider,
 )]
 #[repr(u32)]
-#[type_uuid(id = "5fb7d6f0-c151-4a30-8350-2060749d74c6")]
+#[reflect(type_uuid = "5fb7d6f0-c151-4a30-8350-2060749d74c6")]
 pub enum TextCommitMode {
     /// Text box will immediately send [`TextMessage::Text`] message after any change (after any pressed button).
     Immediate = 0,
 
-    /// Text box will send Text message only when it loses focus (when a user "clicks" outside of it or with any other
+    /// Text box will send [`TextMessage::Text`] message only when it loses focus (when a user "clicks" outside of it or with any other
     /// event that forces the text box to lose focus).
     LostFocus = 1,
 
-    /// Text box will send Text message when it loses focus or if Enter key was pressed. This is **default** behavior.
+    /// Text box will send [`TextMessage::Text`] message when it loses focus or if `Enter` key was pressed. This is **default** behavior.
     ///
     /// # Notes
     ///
@@ -157,18 +136,18 @@ pub enum TextCommitMode {
     #[default]
     LostFocusPlusEnter = 2,
 
-    /// Text box will send Text message when it loses focus or if Enter key was pressed, but **only** if the content
+    /// Text box will send Text message when it loses focus or if `Enter` key was pressed, but **only** if the content
     /// of the text box changed since the last time it gained focus or the text was committed.
     ///
     /// # Notes
     ///
-    /// In case of multiline text box hitting Enter key won't commit the text!
+    /// In case of multiline text box hitting `Enter` key won't commit the text!
     Changed = 3,
 }
 
 /// Defines a set of two positions in the text, that forms a specific range.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Visit, Reflect, Default, TypeUuidProvider)]
-#[type_uuid(id = "04c8101b-cb34-47a5-af34-ecfb9b2fc426")]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Visit, Reflect, Default)]
+#[reflect(type_uuid = "04c8101b-cb34-47a5-af34-ecfb9b2fc426")]
 pub struct SelectionRange {
     /// Position of the beginning.
     pub begin: Position,
@@ -177,7 +156,7 @@ pub struct SelectionRange {
 }
 
 impl SelectionRange {
-    /// Creates a new range, that have its begin always before end. It could be useful in case if user
+    /// Creates a new range, that have its beginning always before end. It could be useful in case if a user
     /// selects a range right-to-left.
     #[must_use = "method creates new value which must be used"]
     pub fn normalized(&self) -> SelectionRange {
@@ -205,6 +184,11 @@ impl SelectionRange {
     pub fn right(&self) -> Position {
         Position::max(self.begin, self.end)
     }
+
+    /// Returns `true` if beginning of the selection equals to its ending.
+    pub fn is_collapsed(&self) -> bool {
+        self.begin == self.end
+    }
 }
 
 /// Defines a function, that could be used to filter out desired characters. It must return `true` for characters, that pass
@@ -221,9 +205,9 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     text_box::TextBoxBuilder, widget::WidgetBuilder, UiNode, UserInterface
+/// #     text_box::{TextBox, TextBoxBuilder}, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
-/// fn create_text_box(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_text_box(ui: &mut UserInterface, text: &str) -> Handle<TextBox> {
 ///     TextBoxBuilder::new(WidgetBuilder::new())
 ///         .with_text(text)
 ///         .build(&mut ui.build_ctx())
@@ -240,10 +224,10 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     text_box::TextBoxBuilder, widget::WidgetBuilder, HorizontalAlignment, UiNode, UserInterface,
+/// #     text_box::{TextBox, TextBoxBuilder}, widget::WidgetBuilder, HorizontalAlignment, UiNode, UserInterface,
 /// #     VerticalAlignment,
 /// # };
-/// fn create_centered_text(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_centered_text(ui: &mut UserInterface, text: &str) -> Handle<TextBox> {
 ///     TextBoxBuilder::new(WidgetBuilder::new())
 ///         .with_horizontal_text_alignment(HorizontalAlignment::Center)
 ///         .with_vertical_text_alignment(VerticalAlignment::Center)
@@ -259,10 +243,10 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     formatted_text::WrapMode, text_box::TextBoxBuilder, widget::WidgetBuilder, UiNode,
+/// #     formatted_text::WrapMode, text_box::{TextBox, TextBoxBuilder}, widget::WidgetBuilder, UiNode,
 /// #     UserInterface,
 /// # };
-/// fn create_text_with_word_wrap(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_text_with_word_wrap(ui: &mut UserInterface, text: &str) -> Handle<TextBox> {
 ///     TextBoxBuilder::new(WidgetBuilder::new())
 ///         .with_wrap(WrapMode::Word)
 ///         .with_text(text)
@@ -272,14 +256,14 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 ///
 /// ## Fonts and colors
 ///
-/// To set a color of the text just use [`WidgetBuilder::with_foreground`] while building the text instance:
+/// To set a color of the text, just use [`WidgetBuilder::with_foreground`] while building the text instance:
 ///
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::{color::Color, pool::Handle},
-/// #     brush::Brush, text_box::TextBoxBuilder, widget::WidgetBuilder, UiNode, UserInterface
+/// #     brush::Brush, text_box::{TextBox, TextBoxBuilder}, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
-/// fn create_text(ui: &mut UserInterface, text: &str) -> Handle<UiNode> {
+/// fn create_text(ui: &mut UserInterface, text: &str) -> Handle<TextBox> {
 ///     //                  vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 ///     TextBoxBuilder::new(WidgetBuilder::new().with_foreground(Brush::Solid(Color::RED).into()))
 ///         .with_text(text)
@@ -293,13 +277,13 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 /// # use fyrox_resource::manager::ResourceManager;
 /// # use fyrox_ui::{
 /// #     core::{futures::executor::block_on, pool::Handle},
-/// #     text_box::TextBoxBuilder,
+/// #     text_box::{TextBox, TextBoxBuilder},
 /// #     font::{Font},
 /// #     widget::WidgetBuilder,
 /// #     UiNode, UserInterface,
 /// # };
 ///
-/// fn create_text(ui: &mut UserInterface, resource_manager: &ResourceManager, text: &str) -> Handle<UiNode> {
+/// fn create_text(ui: &mut UserInterface, resource_manager: &ResourceManager, text: &str) -> Handle<TextBox> {
 ///     TextBoxBuilder::new(WidgetBuilder::new())
 ///         .with_font(resource_manager.request::<Font>("path/to/your/font.ttf"))
 ///         .with_text(text)
@@ -312,7 +296,7 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 ///
 /// ### Font size
 ///
-/// Use [`TextBoxBuilder::with_font_size`] or send [`TextMessage::font_size`] to your TextBox widget instance
+/// Use [`TextBoxBuilder::with_font_size`] or send [`TextMessage::FontSize`] to your TextBox widget instance
 /// to set the font size of it.
 ///
 /// ## Messages
@@ -331,26 +315,21 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     message::{MessageDirection},
 /// #     UiNode, UserInterface,
 /// #     text::TextMessage
 /// # };
 /// fn request_change_text(ui: &UserInterface, text_box_widget_handle: Handle<UiNode>, text: &str) {
-///     ui.send_message(TextMessage::text(
-///         text_box_widget_handle,
-///         MessageDirection::ToWidget,
-///         text.to_owned(),
-///     ))
+///     ui.send(text_box_widget_handle, TextMessage::Text(text.to_owned()))
 /// }
 /// ```
 ///
 /// Please keep in mind, that like any other situation when you "changing" something via messages, you should remember
-/// that the change is **not** immediate. The change will be applied on `ui.poll_message(..)` call somewhere in your
+/// that the change is **not** immediate. The change will be applied on `ui.poll_message(...)` call somewhere in your
 /// code.
 ///
 /// ## Shortcuts
 ///
-/// There are number of default shortcuts that can be used to speed up text editing:
+/// There are a number of default shortcuts that can be used to speed up text editing:
 ///
 /// - `Ctrl+A` - select all
 /// - `Ctrl+C` - copy selected text
@@ -366,16 +345,16 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 ///
 /// ## Multiline Text Box
 ///
-/// By default, text box will not add new line character to the text if you press `Enter` on keyboard. To enable this
+/// By default, text box will not add a new line character to the text if you press `Enter` on keyboard. To enable this
 /// functionality use [`TextBoxBuilder::with_multiline`]
 ///
 /// ## Read-only Mode
 ///
-/// You can enable or disable content editing by using read-only mode. Use [`TextBoxBuilder::with_editable`] at build stage.
+/// You can enable or disable content editing by using read-only mode. Use [`TextBoxBuilder::with_editable`] at the build stage.
 ///
 /// ## Mask Character
 ///
-/// You can specify replacement character for every other characters, this is useful option for password fields. Use
+/// You can specify replacement character for every other characters, this is a useful option for password fields. Use
 /// [`TextBoxBuilder::with_mask_char`] at build stage. For example, you can set replacement character to asterisk `*` using
 /// `.with_mask_char(Some('*'))`
 ///
@@ -392,17 +371,17 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 ///
 /// ## Filtering
 ///
-/// It is possible specify custom input filter, it can be useful if you're creating special input fields like numerical or
+/// It is possible to specify custom input filter, it can be useful if you're creating special input fields like numerical or
 /// phone number. A filter can be specified at build stage like so:
 ///
 /// ```rust,no_run
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
-/// #     text_box::TextBoxBuilder, widget::WidgetBuilder, UiNode, UserInterface
+/// #     text_box::{TextBox, TextBoxBuilder}, widget::WidgetBuilder, UiNode, UserInterface
 /// # };
 /// # use std::sync::Arc;
 /// # use fyrox_core::parking_lot::Mutex;
-/// fn create_text_box(ui: &mut UserInterface) -> Handle<UiNode> {
+/// fn create_text_box(ui: &mut UserInterface) -> Handle<TextBox> {
 ///     TextBoxBuilder::new(WidgetBuilder::new())
 ///         // Specify a filter that will pass only digits.
 ///         .with_filter(Arc::new(Mutex::new(|c: char| c.is_ascii_digit())))
@@ -414,8 +393,11 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 ///
 /// You can change brush of caret by using [`TextBoxBuilder::with_caret_brush`] and also selection brush by using
 /// [`TextBoxBuilder::with_selection_brush`], it could be useful if you don't like default colors.
-#[derive(Default, Clone, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "536276f2-a175-4c05-a376-5a7d8bf0d10b"
+)]
 pub struct TextBox {
     /// Base widget of the text box.
     pub widget: Widget,
@@ -448,7 +430,7 @@ pub struct TextBox {
     pub filter: Option<Arc<Mutex<FilterCallback>>>,
     /// Current text commit mode of the text box.
     pub commit_mode: InheritableVariable<TextCommitMode>,
-    /// `true` if the the multiline mode is active.
+    /// `true` if the multiline mode is active.
     pub multiline: InheritableVariable<bool>,
     /// `true` if the text box is editable.
     pub editable: InheritableVariable<bool>,
@@ -460,6 +442,12 @@ pub struct TextBox {
     #[visit(skip)]
     #[reflect(hidden)]
     pub recent: Vec<char>,
+    /// Placeholder widget when the text box is empty.
+    #[visit(optional)]
+    pub placeholder: Handle<UiNode>,
+    /// Corner radius of the text box.
+    #[visit(optional)]
+    pub corner_radius: InheritableVariable<f32>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for TextBox {
@@ -469,6 +457,7 @@ impl ConstructorProvider<UiNode, UserInterface> for TextBox {
                 TextBoxBuilder::new(WidgetBuilder::new().with_name("Text Box"))
                     .with_text("Text")
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -490,18 +479,14 @@ impl TextBox {
         if self.recent != raw {
             self.recent.clear();
             self.recent.extend(raw);
-            ui.send_message(TextMessage::text(
-                self.handle,
-                MessageDirection::FromWidget,
-                formatted_text.text(),
-            ));
+            ui.post(self.handle, TextMessage::Text(formatted_text.text()));
         }
     }
     fn filter_paste_str_multiline(&self, str: &str) -> String {
         let mut str = str.replace("\r\n", "\n");
         str.retain(|c| c == '\n' || !c.is_control());
         if let Some(filter) = self.filter.as_ref() {
-            let filter = &mut *filter.lock();
+            let filter = &mut *filter.safe_lock();
             str.retain(filter);
         }
         str
@@ -514,7 +499,7 @@ impl TextBox {
             .filter(|c| !c.is_control())
             .collect();
         if let Some(filter) = self.filter.as_ref() {
-            let filter = &mut *filter.lock();
+            let filter = &mut *filter.safe_lock();
             str.retain(filter);
         }
         str
@@ -535,9 +520,11 @@ impl TextBox {
                         begin: *self.caret_position,
                         end: *self.caret_position,
                     }));
+                self.invalidate_visual();
             }
         } else {
             self.selection_range.set_value_and_mark_modified(None);
+            self.invalidate_visual();
         }
 
         if lines.is_empty() {
@@ -587,7 +574,7 @@ impl TextBox {
 
     /// Maps input [`Position`] to a linear position in character array.
     /// The index returned is the index of the character after the position, which may be
-    /// out-of-bounds if thee position is at the end of the text.
+    /// out-of-bounds if the position is at the end of the text.
     /// You should check the index before trying to use it to fetch data from inner array of characters.
     pub fn position_to_char_index_unclamped(&self, position: Position) -> Option<usize> {
         self.formatted_text
@@ -597,10 +584,10 @@ impl TextBox {
 
     /// Maps input [`Position`] to a linear position in character array.
     /// The index returned is usually the index of the character after the position,
-    /// but if the position is at the end of a line then return the index of the character _before_ the position.
+    /// but if the position is at the end of a line, then return the index of the character _before_ the position.
     /// In other words, the last two positions of each line are mapped to the same character index.
-    /// Output index will always be valid for fetching, if the method returned `Some(index)`.
-    /// The index however cannot be used for text insertion, because it cannot point to a "place after last char".
+    /// Output index will always be valid for fetching if the method returned `Some(index)`.
+    /// The index, however, cannot be used for text insertion because it cannot point to a "place after last char".
     pub fn position_to_char_index_clamped(&self, position: Position) -> Option<usize> {
         self.formatted_text
             .borrow()
@@ -617,7 +604,7 @@ impl TextBox {
         self.formatted_text.borrow().end_position()
     }
 
-    /// Returns a position of a next word after the caret in the text.
+    /// Returns a position of the next word after the caret in the text.
     pub fn find_next_word(&self, from: Position) -> Position {
         self.position_to_char_index_unclamped(from)
             .and_then(|i| {
@@ -661,18 +648,14 @@ impl TextBox {
         self.formatted_text
             .borrow_mut()
             .insert_char(c, position)
-            .build();
+            .measure_and_arrange();
         self.set_caret_position(
             self.char_index_to_position(position + 1)
                 .unwrap_or_default(),
         );
-        if *self.commit_mode == TextCommitMode::Immediate {
-            ui.send_message(TextMessage::text(
-                self.handle,
-                MessageDirection::FromWidget,
-                self.formatted_text.borrow().text(),
-            ));
-        }
+        self.invalidate_layout();
+
+        self.on_text_changed(ui);
     }
 
     fn insert_str(&mut self, str: &str, ui: &UserInterface) {
@@ -690,19 +673,14 @@ impl TextBox {
             .unwrap_or_default();
         let mut text = self.formatted_text.borrow_mut();
         text.insert_str(&str, position);
-        text.build();
+        text.measure();
         drop(text);
         self.set_caret_position(
             self.char_index_to_position(position + str.chars().count())
                 .unwrap_or_default(),
         );
-        if *self.commit_mode == TextCommitMode::Immediate {
-            ui.send_message(TextMessage::text(
-                self.handle,
-                MessageDirection::FromWidget,
-                self.formatted_text.borrow().text(),
-            ));
-        }
+        self.invalidate_layout();
+        self.on_text_changed(ui);
     }
 
     fn remove_before_insert(&mut self) {
@@ -719,17 +697,18 @@ impl TextBox {
         self.formatted_text.borrow_mut().remove_range(range);
         self.selection_range.set_value_and_mark_modified(None);
         self.set_caret_position(selection.left());
+        self.invalidate_layout();
     }
 
     /// Returns current text length in characters.
     pub fn get_text_len(&self) -> usize {
-        self.formatted_text.borrow_mut().get_raw_text().len()
+        self.formatted_text.borrow().get_raw_text().len()
     }
 
     /// Returns current position the caret in the local coordinates.
     pub fn caret_local_position(&self) -> Vector2<f32> {
         self.formatted_text
-            .borrow_mut()
+            .borrow()
             .position_to_local(*self.caret_position)
     }
 
@@ -775,8 +754,10 @@ impl TextBox {
 
     fn remove_char(&mut self, direction: HorizontalDirection, ui: &UserInterface) {
         if let Some(selection) = *self.selection_range {
-            self.remove_range(ui, selection);
-            return;
+            if !selection.is_collapsed() {
+                self.remove_range(ui, selection);
+                return;
+            }
         }
         let Some(position) = self.position_to_char_index_unclamped(*self.caret_position) else {
             return;
@@ -801,17 +782,10 @@ impl TextBox {
 
             let mut text = self.formatted_text.borrow_mut();
             text.remove_at(position);
-            text.build();
+            text.measure_and_arrange();
             drop(text);
-
-            if *self.commit_mode == TextCommitMode::Immediate {
-                ui.send_message(TextMessage::text(
-                    self.handle(),
-                    MessageDirection::FromWidget,
-                    self.formatted_text.borrow().text(),
-                ));
-            }
-
+            self.invalidate_layout();
+            self.on_text_changed(ui);
             self.set_caret_position(self.char_index_to_position(position).unwrap_or_default());
         }
     }
@@ -825,16 +799,11 @@ impl TextBox {
             return;
         }
         self.formatted_text.borrow_mut().remove_range(range);
-        self.formatted_text.borrow_mut().build();
+        self.formatted_text.borrow_mut().measure_and_arrange();
         self.set_caret_position(selection.left());
         self.selection_range.set_value_and_mark_modified(None);
-        if *self.commit_mode == TextCommitMode::Immediate {
-            ui.send_message(TextMessage::text(
-                self.handle(),
-                MessageDirection::FromWidget,
-                self.formatted_text.borrow().text(),
-            ));
-        }
+        self.invalidate_layout();
+        self.on_text_changed(ui);
     }
 
     /// Checks whether the input position is correct (in bounds) or not.
@@ -854,6 +823,7 @@ impl TextBox {
         );
         self.ensure_caret_visible();
         self.reset_blink();
+        self.invalidate_visual();
     }
 
     /// Tries to map screen space position to a position in the text.
@@ -868,7 +838,7 @@ impl TextBox {
 
         Some(
             self.formatted_text
-                .borrow_mut()
+                .borrow()
                 .local_to_position(point_to_check),
         )
     }
@@ -902,7 +872,7 @@ impl TextBox {
         if let Some(index) = self.position_to_char_index_clamped(position) {
             let text_ref = self.formatted_text.borrow();
             let text = text_ref.get_raw_text();
-            let search_whitespace = !text[index].is_whitespace();
+            let search_whitespace = !some_or_return!(text.get(index)).is_whitespace();
 
             let mut left_index = index;
             while left_index > 0 {
@@ -935,32 +905,47 @@ impl TextBox {
                         begin: left,
                         end: right,
                     }));
+                self.invalidate_visual();
             }
+        }
+    }
+
+    fn on_text_changed(&self, ui: &UserInterface) {
+        if self.placeholder.is_some() {
+            ui.send(
+                self.placeholder,
+                WidgetMessage::Visibility(self.formatted_text.borrow().text.is_empty()),
+            );
+        }
+        if *self.commit_mode == TextCommitMode::Immediate {
+            ui.post(
+                self.handle,
+                TextMessage::Text(self.formatted_text.borrow().text()),
+            );
         }
     }
 }
 
-uuid_provider!(TextBox = "536276f2-a175-4c05-a376-5a7d8bf0d10b");
-
 impl Control for TextBox {
-    fn measure_override(&self, _: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
-        self.formatted_text
+    fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
+        let text_size = self
+            .formatted_text
             .borrow_mut()
             .set_super_sampling_scale(self.visual_max_scaling())
             .set_constraint(available_size)
-            .build()
+            .measure();
+        let children_size = self.widget.measure_override(ui, available_size);
+        text_size.sup(&children_size)
     }
 
-    fn on_visual_transform_changed(&self) {
-        self.formatted_text
-            .borrow_mut()
-            .set_super_sampling_scale(self.visual_max_scaling())
-            .build();
+    fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
+        self.formatted_text.borrow_mut().arrange(final_size);
+        self.widget.arrange_override(ui, final_size)
     }
 
     fn draw(&self, drawing_context: &mut DrawingContext) {
         let bounds = self.widget.bounding_rect();
-        drawing_context.push_rect_filled(&bounds, None);
+        drawing_context.push_rounded_rect_filled(&bounds, *self.corner_radius, 4);
         drawing_context.commit(
             self.clip_bounds(),
             self.widget.background(),
@@ -1071,6 +1056,19 @@ impl Control for TextBox {
         }
     }
 
+    fn on_visual_transform_changed(
+        &self,
+        _old_transform: &Matrix3<f32>,
+        _new_transform: &Matrix3<f32>,
+    ) {
+        let mut text = self.formatted_text.borrow_mut();
+        let new_super_sampling_scale = self.visual_max_scaling();
+        if new_super_sampling_scale != text.super_sampling_scale() {
+            text.set_super_sampling_scale(new_super_sampling_scale)
+                .measure_and_arrange();
+        }
+    }
+
     fn update(&mut self, dt: f32, _ui: &mut UserInterface) {
         if self.has_focus {
             *self.blink_timer += dt;
@@ -1098,7 +1096,7 @@ impl Control for TextBox {
                         for symbol in text.chars() {
                             let insert = !symbol.is_control()
                                 && if let Some(filter) = self.filter.as_ref() {
-                                    let filter = &mut *filter.lock();
+                                    let filter = &mut *filter.safe_lock();
                                     filter(symbol)
                                 } else {
                                     true
@@ -1142,14 +1140,10 @@ impl Control for TextBox {
                                 self.remove_char(HorizontalDirection::Right, ui);
                             }
                             KeyCode::NumpadEnter | KeyCode::Enter if *self.editable => {
-                                if *self.multiline {
+                                if *self.multiline && !ui.keyboard_modifiers.shift {
                                     self.insert_char('\n', ui);
                                 } else if *self.commit_mode == TextCommitMode::LostFocusPlusEnter {
-                                    ui.send_message(TextMessage::text(
-                                        self.handle,
-                                        MessageDirection::FromWidget,
-                                        self.text(),
-                                    ));
+                                    ui.post(self.handle, TextMessage::Text(self.text()));
                                 } else if *self.commit_mode == TextCommitMode::Changed {
                                     self.commit_if_changed(ui);
                                 }
@@ -1192,6 +1186,7 @@ impl Control for TextBox {
                                             end: self.end_position(),
                                         },
                                     ));
+                                    self.invalidate_visual();
                                 }
                             }
                             KeyCode::KeyC if ui.keyboard_modifiers().control => {
@@ -1243,68 +1238,63 @@ impl Control for TextBox {
                         // others are used directly to enter text.
                         message.set_handled(true);
                     }
-                    WidgetMessage::Focus => {
-                        if message.direction() == MessageDirection::FromWidget {
-                            self.reset_blink();
-                            self.has_focus = true;
-                            let end = self.end_position();
-                            if end != Position::default() {
-                                self.set_caret_position(end);
-                                self.selection_range.set_value_and_mark_modified(Some(
-                                    SelectionRange {
-                                        begin: Position::default(),
-                                        end,
-                                    },
-                                ));
-                            }
-                            if *self.commit_mode == TextCommitMode::Changed {
-                                self.recent.clear();
-                                self.recent
-                                    .extend_from_slice(self.formatted_text.borrow().get_raw_text());
-                            }
+                    WidgetMessage::Focus if message.direction() == MessageDirection::FromWidget => {
+                        self.reset_blink();
+                        self.has_focus = true;
+                        let end = self.end_position();
+                        if end != Position::default() {
+                            self.set_caret_position(end);
+                            self.selection_range.set_value_and_mark_modified(Some(
+                                SelectionRange {
+                                    begin: Position::default(),
+                                    end,
+                                },
+                            ));
+                            self.invalidate_visual();
                         }
-                    }
-                    WidgetMessage::Unfocus => {
-                        if message.direction() == MessageDirection::FromWidget {
-                            self.selection_range.set_value_and_mark_modified(None);
-                            self.has_focus = false;
-
-                            match *self.commit_mode {
-                                TextCommitMode::LostFocus | TextCommitMode::LostFocusPlusEnter => {
-                                    ui.send_message(TextMessage::text(
-                                        self.handle,
-                                        MessageDirection::FromWidget,
-                                        self.text(),
-                                    ));
-                                }
-                                TextCommitMode::Changed => {
-                                    self.commit_if_changed(ui);
-                                }
-                                _ => (),
-                            }
-                            // There is no reason to keep the stored recent value in memory
-                            // while this TextBox does not have focus. Maybe this should be stored globally in UserInterface,
-                            // since we only ever need one.
+                        if *self.commit_mode == TextCommitMode::Changed {
                             self.recent.clear();
-                            self.recent.shrink_to(0);
+                            self.recent
+                                .extend_from_slice(self.formatted_text.borrow().get_raw_text());
                         }
                     }
-                    WidgetMessage::MouseDown { pos, button } => {
-                        if *button == MouseButton::Left {
-                            let select = ui.keyboard_modifiers().shift;
-                            if !select {
-                                self.selection_range.set_value_and_mark_modified(None);
-                            }
-                            self.selecting = true;
-                            self.has_focus = true;
-                            self.before_click_position = *self.caret_position;
+                    WidgetMessage::Unfocus
+                        if message.direction() == MessageDirection::FromWidget =>
+                    {
+                        self.selection_range.set_value_and_mark_modified(None);
+                        self.invalidate_visual();
+                        self.has_focus = false;
 
-                            if let Some(position) = self.screen_pos_to_text_pos(*pos) {
-                                self.move_caret(position, select);
+                        match *self.commit_mode {
+                            TextCommitMode::LostFocus | TextCommitMode::LostFocusPlusEnter => {
+                                ui.post(self.handle, TextMessage::Text(self.text()));
                             }
-
-                            ui.capture_mouse(self.handle());
+                            TextCommitMode::Changed => {
+                                self.commit_if_changed(ui);
+                            }
+                            _ => (),
                         }
+                        // There is no reason to keep the stored recent value in memory
+                        // while this TextBox does not have focus. Maybe this should be stored globally in UserInterface,
+                        // since we only ever need one.
+                        self.recent.clear();
+                        self.recent.shrink_to(0);
+                    }
+                    WidgetMessage::MouseDown { pos, button } if *button == MouseButton::Left => {
+                        let select = ui.keyboard_modifiers().shift;
+                        if !select {
+                            self.selection_range.set_value_and_mark_modified(None);
+                            self.invalidate_visual();
+                        }
+                        self.selecting = true;
+                        self.has_focus = true;
+                        self.before_click_position = *self.caret_position;
+
+                        if let Some(position) = self.screen_pos_to_text_pos(*pos) {
+                            self.move_caret(position, select);
+                        }
+
+                        ui.capture_mouse(self.handle());
                     }
                     WidgetMessage::DoubleClick {
                         button: MouseButton::Left,
@@ -1315,16 +1305,18 @@ impl Control for TextBox {
                             }
                         }
                     }
-                    WidgetMessage::MouseMove { pos, .. } => {
-                        if self.selecting {
-                            if let Some(position) = self.screen_pos_to_text_pos(*pos) {
-                                self.move_caret(position, true);
-                            }
+                    WidgetMessage::MouseMove { pos, .. } if self.selecting => {
+                        if let Some(position) = self.screen_pos_to_text_pos(*pos) {
+                            self.move_caret(position, true);
                         }
                     }
                     WidgetMessage::MouseUp { .. } => {
                         self.selecting = false;
                         ui.release_mouse_capture();
+                    }
+                    WidgetMessage::Style(style) => {
+                        self.formatted_text.borrow_mut().set_style(style);
+                        self.invalidate_layout();
                     }
                     _ => {}
                 }
@@ -1333,6 +1325,7 @@ impl Control for TextBox {
                     let mut text = self.formatted_text.borrow_mut();
 
                     match msg {
+                        TextMessage::BBCode(_) => (),
                         TextMessage::Text(new_text) => {
                             fn text_equals(
                                 formatted_text: &FormattedText,
@@ -1355,15 +1348,13 @@ impl Control for TextBox {
                                 }
                             }
                             self.selection_range.set_value_and_mark_modified(None);
+                            self.invalidate_visual();
                             if !text_equals(&text, new_text) {
                                 text.set_text(new_text);
                                 drop(text);
                                 self.invalidate_layout();
-                                self.formatted_text.borrow_mut().build();
-
-                                if *self.commit_mode == TextCommitMode::Immediate {
-                                    ui.send_message(message.reverse());
-                                }
+                                self.formatted_text.borrow_mut().measure_and_arrange();
+                                self.on_text_changed(ui);
                             }
                         }
                         TextMessage::Wrap(wrap_mode) => {
@@ -1371,7 +1362,7 @@ impl Control for TextBox {
                                 text.set_wrap(*wrap_mode);
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextMessage::Font(font) => {
@@ -1379,7 +1370,7 @@ impl Control for TextBox {
                                 text.set_font(font.clone());
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextMessage::VerticalAlignment(alignment) => {
@@ -1387,7 +1378,7 @@ impl Control for TextBox {
                                 text.set_vertical_alignment(*alignment);
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextMessage::HorizontalAlignment(alignment) => {
@@ -1395,7 +1386,7 @@ impl Control for TextBox {
                                 text.set_horizontal_alignment(*alignment);
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         &TextMessage::Shadow(shadow) => {
@@ -1403,7 +1394,7 @@ impl Control for TextBox {
                                 text.set_shadow(shadow);
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextMessage::ShadowBrush(brush) => {
@@ -1411,7 +1402,7 @@ impl Control for TextBox {
                                 text.set_shadow_brush(brush.clone());
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         &TextMessage::ShadowDilation(dilation) => {
@@ -1419,7 +1410,7 @@ impl Control for TextBox {
                                 text.set_shadow_dilation(dilation);
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         &TextMessage::ShadowOffset(offset) => {
@@ -1427,7 +1418,7 @@ impl Control for TextBox {
                                 text.set_shadow_offset(offset);
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextMessage::FontSize(height) => {
@@ -1435,8 +1426,13 @@ impl Control for TextBox {
                                 text.set_font_size(height.clone());
                                 drop(text);
                                 self.invalidate_layout();
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
+                        }
+                        TextMessage::Runs(runs) => {
+                            text.set_runs(runs.clone());
+                            drop(text);
+                            self.invalidate_layout();
                         }
                     }
                 }
@@ -1447,31 +1443,46 @@ impl Control for TextBox {
                             if &*self.selection_brush != brush {
                                 self.selection_brush
                                     .set_value_and_mark_modified(brush.clone());
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextBoxMessage::CaretBrush(brush) => {
                             if &*self.caret_brush != brush {
                                 self.caret_brush.set_value_and_mark_modified(brush.clone());
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextBoxMessage::TextCommitMode(mode) => {
                             if &*self.commit_mode != mode {
                                 self.commit_mode.set_value_and_mark_modified(*mode);
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextBoxMessage::Multiline(multiline) => {
                             if &*self.multiline != multiline {
                                 self.multiline.set_value_and_mark_modified(*multiline);
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
                             }
                         }
                         TextBoxMessage::Editable(editable) => {
                             if &*self.editable != editable {
                                 self.editable.set_value_and_mark_modified(*editable);
-                                ui.send_message(message.reverse());
+                                ui.try_send_response(message);
+                            }
+                        }
+                        TextBoxMessage::Padding(padding) => {
+                            let mut formatted_text = self.formatted_text.borrow_mut();
+                            if &*formatted_text.padding != padding {
+                                formatted_text.padding.set_value_and_mark_modified(*padding);
+                                ui.try_send_response(message);
+                            }
+                        }
+                        TextBoxMessage::CornerRadius(corner_radius) => {
+                            if *self.corner_radius != *corner_radius {
+                                self.corner_radius
+                                    .set_value_and_mark_modified(*corner_radius);
+                                ui.try_send_response(message);
+                                self.invalidate_visual();
                             }
                         }
                     }
@@ -1481,8 +1492,36 @@ impl Control for TextBox {
     }
 }
 
+/// Placeholder builder.
+pub enum EmptyTextPlaceholder<'a> {
+    /// No placeholder is required.
+    None,
+    /// Simple constructor for text-based placeholders.
+    Text(&'a str),
+    /// Arbitrary widget (or any hierarchy of widgets).
+    Widget(Handle<UiNode>),
+}
+
+impl<'a> EmptyTextPlaceholder<'a> {
+    fn build(self, main_text: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+        match self {
+            EmptyTextPlaceholder::None => Handle::NONE,
+            EmptyTextPlaceholder::Text(text) => TextBuilder::new(
+                WidgetBuilder::new()
+                    .with_visibility(main_text.is_empty())
+                    .with_foreground(ctx.style.property(Style::BRUSH_LIGHTER)),
+            )
+            .with_text(text)
+            .with_vertical_text_alignment(VerticalAlignment::Center)
+            .build(ctx)
+            .to_base(),
+            EmptyTextPlaceholder::Widget(widget) => widget,
+        }
+    }
+}
+
 /// Text box builder creates new [`TextBox`] instances and adds them to the user interface.
-pub struct TextBoxBuilder {
+pub struct TextBoxBuilder<'a> {
     widget_builder: WidgetBuilder,
     font: Option<FontResource>,
     text: String,
@@ -1502,9 +1541,13 @@ pub struct TextBoxBuilder {
     shadow_offset: Vector2<f32>,
     skip_chars: Vec<char>,
     font_size: Option<StyledProperty<f32>>,
+    padding: Thickness,
+    placeholder: EmptyTextPlaceholder<'a>,
+    corner_radius: f32,
+    trim_text: bool,
 }
 
-impl TextBoxBuilder {
+impl<'a> TextBoxBuilder<'a> {
     /// Creates new text box widget builder with the base widget builder specified.
     pub fn new(widget_builder: WidgetBuilder) -> Self {
         Self {
@@ -1527,12 +1570,27 @@ impl TextBoxBuilder {
             shadow_offset: Vector2::new(1.0, 1.0),
             skip_chars: Default::default(),
             font_size: None,
+            padding: Thickness {
+                left: 5.0,
+                top: 2.0,
+                right: 5.0,
+                bottom: 2.0,
+            },
+            placeholder: EmptyTextPlaceholder::None,
+            corner_radius: 3.0,
+            trim_text: false,
         }
     }
 
     /// Sets the desired font of the text box.
     pub fn with_font(mut self, font: FontResource) -> Self {
         self.font = Some(font);
+        self
+    }
+
+    /// Sets the desired padding of the text box.
+    pub fn with_padding(mut self, padding: Thickness) -> Self {
+        self.padding = padding;
         self
     }
 
@@ -1642,8 +1700,27 @@ impl TextBoxBuilder {
         self
     }
 
+    /// Sets the desired placeholder widget when the search bar is empty.
+    pub fn with_empty_text_placeholder(mut self, placeholder: EmptyTextPlaceholder<'a>) -> Self {
+        self.placeholder = placeholder;
+        self
+    }
+
+    /// Sets the desired corner radius of the text box.
+    pub fn with_corner_radius(mut self, corner_radius: f32) -> Self {
+        self.corner_radius = corner_radius;
+        self
+    }
+
+    /// A flag, that defines whether the formatted text should add ellipsis (…) to lines that goes
+    /// outside provided bounds.
+    pub fn with_trim_text(mut self, trim: bool) -> Self {
+        self.trim_text = trim;
+        self
+    }
+
     /// Creates a new [`TextBox`] instance and adds it to the user interface.
-    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<TextBox> {
         let style = &ctx.style;
 
         if self.widget_builder.foreground.is_none() {
@@ -1655,10 +1732,18 @@ impl TextBoxBuilder {
         if self.widget_builder.cursor.is_none() {
             self.widget_builder.cursor = Some(CursorIcon::Text);
         }
+        let placeholder = self.placeholder.build(&self.text, ctx);
+        if let Ok(placeholder_ref) = ctx.try_get_node_mut(placeholder) {
+            placeholder_ref
+                .hit_test_visibility
+                .set_value_and_mark_modified(false);
+            placeholder_ref.set_margin(self.padding);
+        }
 
         let text_box = TextBox {
             widget: self
                 .widget_builder
+                .with_child(placeholder)
                 .with_accepts_input(true)
                 .with_need_update(true)
                 .build(ctx),
@@ -1677,6 +1762,8 @@ impl TextBoxBuilder {
                     .with_shadow_brush(self.shadow_brush)
                     .with_shadow_dilation(self.shadow_dilation)
                     .with_shadow_offset(self.shadow_offset)
+                    .with_padding(self.padding)
+                    .with_trim_text(self.trim_text)
                     .with_font_size(
                         self.font_size
                             .unwrap_or_else(|| ctx.style.property(Style::FONT_SIZE)),
@@ -1696,9 +1783,11 @@ impl TextBoxBuilder {
             view_position: Default::default(),
             skip_chars: self.skip_chars.into(),
             recent: Default::default(),
+            placeholder,
+            corner_radius: self.corner_radius.into(),
         };
 
-        ctx.add_node(UiNode::new(text_box))
+        ctx.add(text_box)
     }
 }
 

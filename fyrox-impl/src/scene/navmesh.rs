@@ -29,7 +29,6 @@ use crate::{
         parking_lot::RwLock,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -46,13 +45,14 @@ use fyrox_core::algebra::Vector3;
 use fyrox_core::math::TriangleDefinition;
 use fyrox_core::parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
 
 #[derive(Clone, Default, Reflect, Debug)]
+#[reflect(type_uuid = "7e5978ab-788b-4f41-a125-299ad89b81c7")]
 pub(crate) struct Container(Arc<RwLock<Navmesh>>);
 
 impl PartialEq for Container {
@@ -85,7 +85,9 @@ impl Visit for Container {
 /// #     scene::{base::BaseBuilder, graph::Graph, navmesh::NavigationalMeshBuilder, node::Node},
 /// #     utils::navmesh::Navmesh,
 /// # };
-/// fn create_navmesh(graph: &mut Graph) -> Handle<Node> {
+/// # use fyrox_impl::scene::navmesh::NavigationalMesh;
+///
+/// fn create_navmesh(graph: &mut Graph) -> Handle<NavigationalMesh> {
 ///     // A simple navmesh with four vertices and two triangles.
 ///     let navmesh = Navmesh::new(
 ///         vec![TriangleDefinition([0, 1, 2]), TriangleDefinition([0, 2, 3])],
@@ -154,18 +156,15 @@ impl Visit for Container {
 ///     scene.graph[handle].as_navigational_mesh_mut()
 /// }
 /// ```
-#[derive(Debug, Clone, Visit, Reflect, Default, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Clone, Visit, Reflect, Default)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "d0ce963c-b50a-4707-bd21-af6dc0d1c668"
+)]
 pub struct NavigationalMesh {
     base: Base,
     #[reflect(read_only)]
     navmesh: InheritableVariable<Container>,
-}
-
-impl TypeUuidProvider for NavigationalMesh {
-    fn type_uuid() -> Uuid {
-        uuid!("d0ce963c-b50a-4707-bd21-af6dc0d1c668")
-    }
 }
 
 impl Deref for NavigationalMesh {
@@ -213,7 +212,7 @@ impl NodeTrait for NavigationalMesh {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn debug_draw(&self, ctx: &mut SceneDrawingContext) {
@@ -289,7 +288,7 @@ impl NavigationalMeshBuilder {
     }
 
     /// Creates new navigational mesh instance and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<NavigationalMesh> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

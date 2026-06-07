@@ -22,8 +22,9 @@
 //! mechanism when you need to bundle all game resources and put them in the executable file. See
 //! [`BuiltInResource`] docs for more info.
 
-use crate::{core::Uuid, untyped::UntypedResource, Resource, TypedResourceData};
+use crate::{untyped::UntypedResource, Resource, TypedResourceData};
 use fxhash::FxHashMap;
+use fyrox_core::uuid::Uuid;
 use std::{
     borrow::Cow,
     ops::Deref,
@@ -89,23 +90,19 @@ pub struct UntypedBuiltInResource {
 /// ```rust
 /// use fyrox_resource::{
 ///     builtin::BuiltInResource,
-///     core::{reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*, Uuid},
+///     core::{reflect::prelude::*, visitor::prelude::*},
 ///     manager::ResourceManager,
 ///     Resource, ResourceData,
 /// };
 /// use std::{error::Error, path::Path};
 ///
-/// #[derive(TypeUuidProvider, Default, Debug, Clone, Visit, Reflect)]
-/// #[type_uuid(id = "00d036bb-fbed-47f7-94e3-b3fce93dee17")]
+/// #[derive(Default, Debug, Clone, Visit, Reflect)]
+/// #[reflect(type_uuid = "00d036bb-fbed-47f7-94e3-b3fce93dee17")]
 /// struct MyResource {
 ///     some_data: String,
 /// }
 ///
 /// impl ResourceData for MyResource {
-///     fn type_uuid(&self) -> Uuid {
-///         <Self as TypeUuidProvider>::type_uuid()
-///     }
-///
 ///     fn save(&mut self, _path: &Path) -> Result<(), Box<dyn Error>> {
 ///         Ok(())
 ///     }
@@ -146,8 +143,6 @@ where
     pub id: PathBuf,
     /// Initial data, from which the resource is created from.
     pub data_source: Option<DataSource>,
-    /// Uuid of the resource.
-    pub resource_uuid: Uuid,
     /// Ready-to-use ("loaded") resource.
     pub resource: Resource<T>,
 }
@@ -157,7 +152,6 @@ impl<T: TypedResourceData> Clone for BuiltInResource<T> {
         Self {
             id: self.id.clone(),
             data_source: self.data_source.clone(),
-            resource_uuid: self.resource_uuid,
             resource: self.resource.clone(),
         }
     }
@@ -173,9 +167,6 @@ impl<T: TypedResourceData> BuiltInResource<T> {
         let resource = make(&data_source.bytes);
         Self {
             id: id.as_ref().to_path_buf(),
-            resource_uuid: resource
-                .resource_uuid()
-                .expect("the resource must be in ok state"),
             resource,
             data_source: Some(data_source),
         }
@@ -186,9 +177,6 @@ impl<T: TypedResourceData> BuiltInResource<T> {
         Self {
             id: id.as_ref().to_path_buf(),
             data_source: None,
-            resource_uuid: resource
-                .resource_uuid()
-                .expect("the resource must be in ok state"),
             resource,
         }
     }
@@ -204,7 +192,7 @@ impl<T: TypedResourceData> From<BuiltInResource<T>> for UntypedBuiltInResource {
         Self {
             id: value.id,
             data_source: value.data_source,
-            resource_uuid: value.resource_uuid,
+            resource_uuid: value.resource.resource_uuid(),
             resource: value.resource.into(),
         }
     }
@@ -243,6 +231,18 @@ impl BuiltInResourcesContainer {
     /// Tries to find a built-in resource by its uuid.
     pub fn find_by_uuid(&self, uuid: Uuid) -> Option<&UntypedBuiltInResource> {
         self.inner.values().find(|r| r.resource_uuid == uuid)
+    }
+
+    /// Checks whether the given resource path corresponds to a built-in resource or not.
+    pub fn is_built_in_resource_path(&self, resource: impl AsRef<Path>) -> bool {
+        self.inner.contains_key(resource.as_ref())
+    }
+
+    /// Checks whether the given resource is a built-in resource instance or not.
+    pub fn is_built_in_resource(&self, resource: impl AsRef<UntypedResource>) -> bool {
+        self.inner
+            .values()
+            .any(|built_in| &built_in.resource == resource.as_ref())
     }
 }
 

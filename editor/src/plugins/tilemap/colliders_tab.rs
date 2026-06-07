@@ -39,24 +39,25 @@ use fyrox::{
 
 use fyrox::scene::tilemap::{tileset::*, *};
 
-use crate::{send_sync_message, MSG_SYNC_FLAG};
-
 use super::*;
 use commands::*;
+use fyrox::gui::button::Button;
+use fyrox::gui::color::ColorField;
+use fyrox::gui::text_box::TextBox;
 
 /// This is the tab of the tile set editor that allows the user to modify the collider
 /// layers stored within the tile set. Layers can be created, deleted, renamed
 /// and their colors can be modified.
 pub struct CollidersTab {
-    handle: Handle<UiNode>,
-    list: Handle<UiNode>,
-    up_button: Handle<UiNode>,
-    down_button: Handle<UiNode>,
-    remove_button: Handle<UiNode>,
-    add_button: Handle<UiNode>,
-    data_panel: Handle<UiNode>,
-    name_field: Handle<UiNode>,
-    color_field: Handle<UiNode>,
+    handle: Handle<Grid>,
+    list: Handle<ListView>,
+    up_button: Handle<Button>,
+    down_button: Handle<Button>,
+    remove_button: Handle<Button>,
+    add_button: Handle<Button>,
+    data_panel: Handle<Grid>,
+    name_field: Handle<TextBox>,
+    color_field: Handle<ColorField>,
 }
 
 fn make_arrow_button(
@@ -64,7 +65,7 @@ fn make_arrow_button(
     dir: ArrowDirection,
     column: usize,
     row: usize,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     let arrow = make_arrow(ctx, dir, 16.0);
     ButtonBuilder::new(
         WidgetBuilder::new()
@@ -83,7 +84,7 @@ fn make_button(
     ctx: &mut BuildContext,
     column: usize,
     row: usize,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_column(column)
@@ -132,6 +133,7 @@ pub fn make_list_item(ctx: &mut BuildContext, collider: &TileSetColliderLayer) -
             .with_pad_by_corner_radius(false),
     )
     .build(ctx)
+    .to_base()
 }
 
 fn make_items(ctx: &mut BuildContext, tile_set: &OptionTileSet) -> Vec<Handle<UiNode>> {
@@ -259,15 +261,11 @@ impl CollidersTab {
         }
     }
     pub fn handle(&self) -> Handle<UiNode> {
-        self.handle
+        self.handle.to_base()
     }
     pub fn sync_to_model(&mut self, tile_set: &OptionTileSet, ui: &mut UserInterface) {
         let items = make_items(&mut ui.build_ctx(), tile_set);
-        ui.send_message(ListViewMessage::items(
-            self.list,
-            MessageDirection::ToWidget,
-            items,
-        ));
+        ui.send(self.list, ListViewMessage::Items(items));
         self.sync_data(tile_set, ui);
     }
     fn sync_data(&mut self, tile_set: &OptionTileSet, ui: &mut UserInterface) {
@@ -288,19 +286,9 @@ impl CollidersTab {
                 .unwrap_or(Color::BLACK),
             None => Color::BLACK,
         };
-        ui.send_message(WidgetMessage::enabled(
-            self.data_panel,
-            MessageDirection::ToWidget,
-            sel_index.is_some(),
-        ));
-        send_sync_message(
-            ui,
-            TextMessage::text(self.name_field, MessageDirection::ToWidget, name),
-        );
-        send_sync_message(
-            ui,
-            ColorFieldMessage::color(self.color_field, MessageDirection::ToWidget, color),
-        );
+        ui.send(self.data_panel, WidgetMessage::Enabled(sel_index.is_some()));
+        ui.send_sync(self.name_field, TextMessage::Text(name));
+        ui.send_sync(self.color_field, ColorFieldMessage::Color(color));
     }
     pub fn handle_ui_message(
         &mut self,
@@ -309,10 +297,10 @@ impl CollidersTab {
         ui: &mut UserInterface,
         sender: &MessageSender,
     ) {
-        if message.direction() == MessageDirection::ToWidget || message.flags == MSG_SYNC_FLAG {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
-        if let Some(ListViewMessage::SelectionChanged(_)) = message.data() {
+        if let Some(ListViewMessage::Selection(_)) = message.data() {
             if message.destination() == self.list {
                 self.sync_data(&TileSetRef::new(&tile_set).as_loaded(), ui);
             }
@@ -337,11 +325,7 @@ impl CollidersTab {
         }
     }
     fn selection_index(&self, ui: &UserInterface) -> Option<usize> {
-        ui.node(self.list)
-            .cast::<ListView>()?
-            .selection
-            .last()
-            .copied()
+        ui.try_get(self.list).ok()?.selection.last().copied()
     }
     fn update_name(
         &self,
@@ -362,10 +346,7 @@ impl CollidersTab {
         let Some(uuid) = colliders.get(sel_index).map(|l| l.uuid) else {
             return;
         };
-        ui.send_message(WidgetMessage::focus(
-            self.name_field,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.name_field, WidgetMessage::Focus);
         sender.do_command(SetColliderLayerNameCommand {
             tile_set: resource.clone(),
             uuid,
@@ -412,11 +393,7 @@ impl CollidersTab {
         if sel_index == new_index {
             return;
         }
-        ui.send_message(ListViewMessage::selection(
-            self.list,
-            MessageDirection::ToWidget,
-            vec![new_index],
-        ));
+        ui.send(self.list, ListViewMessage::Selection(vec![new_index]));
         sender.do_command(MoveColliderLayerCommand {
             tile_set: resource.clone(),
             start: sel_index,
@@ -430,11 +407,7 @@ impl CollidersTab {
             .map(|i| i + 1)
             .unwrap_or(0)
             .clamp(0, tile_set.colliders.len());
-        ui.send_message(ListViewMessage::selection(
-            self.list,
-            MessageDirection::ToWidget,
-            vec![index],
-        ));
+        ui.send(self.list, ListViewMessage::Selection(vec![index]));
         sender.do_command(AddColliderLayerCommand {
             tile_set: resource.clone(),
             index,

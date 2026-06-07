@@ -30,23 +30,23 @@ use crate::{
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
+        SafeLock,
     },
+    graphics::ElementRange,
     material::MaterialResourceExtension,
     material::{Material, MaterialProperty, MaterialResource},
     renderer::{
         self,
         bundle::{RenderContext, SurfaceInstanceData},
-        framework::ElementRange,
     },
     resource::texture::{
-        Texture, TextureKind, TexturePixelKind, TextureResource, TextureResourceExtension,
+        Texture, TextureDataRefMut, TextureKind, TextureMagnificationFilter,
+        TextureMinificationFilter, TexturePixelKind, TextureResource, TextureResourceExtension,
         TextureWrapMode,
     },
-    resource::texture::{TextureDataRefMut, TextureMagnificationFilter, TextureMinificationFilter},
     scene::node::RdcControlFlow,
     scene::{
         base::{Base, BaseBuilder},
@@ -59,17 +59,17 @@ use crate::{
     },
 };
 use fxhash::FxHashMap;
-use fyrox_core::{uuid_provider, warn};
-use fyrox_graph::BaseSceneGraph;
+use fyrox_core::warn;
+use fyrox_graph::SceneGraph;
 use fyrox_resource::untyped::ResourceKind;
 use half::f16;
 use image::{imageops::FilterType, ImageBuffer, Luma};
-use lazy_static::lazy_static;
 use std::{
     cell::Cell,
     cmp::Ordering,
     collections::HashMap,
     ops::{Deref, DerefMut, Range},
+    sync::LazyLock,
 };
 
 pub mod brushstroke;
@@ -78,25 +78,27 @@ mod quadtree;
 
 use crate::scene::node::constructor::NodeConstructor;
 pub use brushstroke::*;
-use fyrox_core::visitor::pod::PodVecView;
 use fyrox_graph::constructor::ConstructorProvider;
 
 use super::collider::BitMask;
 
 /// Current implementation version marker.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 0;
 
-lazy_static! {
-    /// Solid white texture
-    pub static ref WHITE_1X1: TextureResource = TextureResource::from_bytes(
+/// WHITE_1X1 TextureResource.
+pub static WHITE_1X1: LazyLock<TextureResource> = LazyLock::new(|| {
+    TextureResource::from_bytes(
         uuid!("09a71013-ccb2-4a41-a48a-ab6c80f14f0e"),
-        TextureKind::Rectangle { width: 1, height: 1 },
+        TextureKind::Rectangle {
+            width: 1,
+            height: 1,
+        },
         TexturePixelKind::R8,
         vec![255],
         ResourceKind::External,
     )
-    .unwrap();
-}
+    .unwrap()
+});
 
 /// Position of a single cell within terrain data.
 #[derive(Debug, Clone)]
@@ -240,6 +242,7 @@ impl std::ops::IndexMut<Vector2<i32>> for ChunkHeightMutData<'_> {
 /// performance, so keep amount of layers on reasonable level (1 - 5 should be enough for most
 /// cases).
 #[derive(Debug, Clone, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "7439d5fd-43a9-45f0-bd7c-76cf4d2ec22e")]
 pub struct Layer {
     /// Material of the layer.
     pub material: MaterialResource,
@@ -259,8 +262,6 @@ pub struct Layer {
     #[visit(optional)]
     pub node_uv_offsets_property_name: String,
 }
-
-uuid_provider!(Layer = "7439d5fd-43a9-45f0-bd7c-76cf4d2ec22e");
 
 impl Default for Layer {
     fn default() -> Self {
@@ -347,15 +348,14 @@ fn make_height_map_texture(height_map: Vec<f32>, size: Vector2<u32>) -> TextureR
 /// use its own set of materials for layers. This could be useful for different biomes, to prevent high amount of
 /// layers which could harm the performance.
 #[derive(Debug, Reflect)]
+#[reflect(type_uuid = "ae996754-69c1-49ba-9c17-a7bd4be072a9")]
 pub struct Chunk {
     #[reflect(hidden)]
     quad_tree: Mutex<QuadTree>,
-    #[reflect(
-        setter = "set_height_map",
-        description = "Height map of the chunk. You can assign a custom height map image here. Keep in mind, that \
-        only Red channel will be used! The assigned texture will be automatically converted to internal format suitable \
-        for terrain needs."
-    )]
+    /// Height map of the chunk. You can assign a custom height map image here. Keep in mind, that
+    /// only Red channel will be used! The assigned texture will be automatically converted to internal
+    /// format suitable for terrain needs.
+    #[reflect(setter = "set_height_map")]
     heightmap: Option<TextureResource>,
     #[reflect(hidden)]
     hole_mask: Option<TextureResource>,
@@ -375,8 +375,6 @@ pub struct Chunk {
     #[reflect(hidden)]
     height_map_modifications_count: u64,
 }
-
-uuid_provider!(Chunk = "ae996754-69c1-49ba-9c17-a7bd4be072a9");
 
 impl PartialEq for Chunk {
     fn eq(&self, other: &Self) -> bool {
@@ -419,58 +417,22 @@ impl Visit for Chunk {
         let mut region = visitor.enter_region(name)?;
 
         let mut version = VERSION;
-        let _ = version.visit("Version", &mut region);
+        version.visit("Version", &mut region)?;
 
-        match version {
-            0 => {
-                let mut height_map = Vec::<f32>::new();
-                let mut view = PodVecView::from_pod_vec(&mut height_map);
-                view.visit("Heightmap", &mut region)?;
-
-                self.position.visit("Position", &mut region)?;
-
-                let mut width = 0.0f32;
-                width.visit("Width", &mut region)?;
-                let mut length = 0.0f32;
-                length.visit("Length", &mut region)?;
-                self.physical_size = Vector2::new(width, length);
-
-                let mut width_point_count = 0u32;
-                width_point_count.visit("WidthPointCount", &mut region)?;
-                let mut length_point_count = 0u32;
-                length_point_count.visit("LengthPointCount", &mut region)?;
-                self.height_map_size = Vector2::new(width_point_count, length_point_count);
-
-                self.grid_position = Vector2::new(
-                    (self.position.x / width) as i32,
-                    (self.position.y / length) as i32,
-                );
-
-                self.heightmap = Some(make_height_map_texture(
-                    height_map,
-                    Vector2::new(width_point_count, length_point_count),
-                ));
+        if let VERSION = version {
+            self.heightmap.visit("Heightmap", &mut region)?;
+            self.hole_mask.visit("HoleMask", &mut region)?;
+            // We do not need to visit position, since its value is implied by grid_position.
+            //self.position.visit("Position", &mut region)?;
+            self.physical_size.visit("PhysicalSize", &mut region)?;
+            self.height_map_size.visit("HeightMapSize", &mut region)?;
+            self.layer_masks.visit("LayerMasks", &mut region)?;
+            self.grid_position.visit("GridPosition", &mut region)?;
+            // Set position to have the value implied by grid_position
+            if region.is_reading() {
+                self.position = self.position()
             }
-            1 | VERSION => {
-                self.heightmap.visit("Heightmap", &mut region)?;
-                let _ = self.hole_mask.visit("HoleMask", &mut region);
-                // We do not need to visit position, since its value is implied by grid_position.
-                //self.position.visit("Position", &mut region)?;
-                self.physical_size.visit("PhysicalSize", &mut region)?;
-                self.height_map_size.visit("HeightMapSize", &mut region)?;
-                self.layer_masks.visit("LayerMasks", &mut region)?;
-                self.grid_position.visit("GridPosition", &mut region)?;
-                // Set position to have the value implied by grid_position
-                if region.is_reading() {
-                    self.position = self.position()
-                }
-                let _ = self.block_size.visit("BlockSize", &mut region);
-            }
-            _ => (),
-        }
-
-        if region.is_reading() && version < 2 {
-            self.create_margin();
+            self.block_size.visit("BlockSize", &mut region)?;
         }
 
         self.quad_tree = Mutex::new(make_quad_tree(
@@ -526,7 +488,7 @@ impl Chunk {
             return;
         };
         let count = heightmap.data_ref().modifications_count();
-        let mut quad_tree = self.quad_tree.lock();
+        let mut quad_tree = self.quad_tree.safe_lock();
         if count != quad_tree.height_mod_count() {
             *quad_tree = make_quad_tree(&self.heightmap, self.height_map_size, self.block_size);
         }
@@ -820,9 +782,12 @@ impl Chunk {
     pub fn debug_draw(&self, transform: &Matrix4<f32>, ctx: &mut SceneDrawingContext) {
         let transform = *transform * Matrix4::new_translation(&self.position());
 
-        self.quad_tree
-            .lock()
-            .debug_draw(&transform, self.height_map_size, self.physical_size, ctx)
+        self.quad_tree.safe_lock().debug_draw(
+            &transform,
+            self.height_map_size,
+            self.physical_size,
+            ctx,
+        )
     }
 
     fn set_block_size(&mut self, block_size: Vector2<u32>) {
@@ -835,7 +800,7 @@ impl Chunk {
         if self.heightmap.is_none() {
             return;
         }
-        *self.quad_tree.lock() =
+        *self.quad_tree.safe_lock() =
             make_quad_tree(&self.heightmap, self.height_map_size, self.block_size);
     }
 }
@@ -1064,8 +1029,11 @@ impl BrushContext {
 /// count the number of pixels needed to render the vertices of that part of the terrain, which means that they
 /// overlap with their neighbors just as chunks overlap. Two adjacent blocks share vertices along their edge,
 /// so they also share pixels in the height map data.
-#[derive(Debug, Reflect, Clone, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Reflect, Clone)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "4b0a7927-bcd8-41a3-949a-dd10fba8e16a"
+)]
 pub struct Terrain {
     base: Base,
 
@@ -1075,29 +1043,19 @@ pub struct Terrain {
     #[reflect(setter = "set_layers")]
     layers: InheritableVariable<Vec<Layer>>,
 
-    /// Size of the chunk, in meters.
-    /// This value becomes the [Chunk::physical_size] of newly created chunks.
-    #[reflect(
-        min_value = 0.001,
-        description = "Size of the chunk, in meters.",
-        setter = "set_chunk_size"
-    )]
+    /// Size of the chunk, in meters. This value becomes the [Chunk::physical_size] of newly created
+    /// chunks.
+    #[reflect(min_value = 0.001, setter = "set_chunk_size")]
     chunk_size: InheritableVariable<Vector2<f32>>,
 
-    /// Min and max 'coordinate' of chunks along X axis.
-    #[reflect(
-        step = 1.0,
-        description = "Min and max 'coordinate' of chunks along X axis. Modifying this will create new chunks or destroy existing chunks.",
-        setter = "set_width_chunks"
-    )]
+    /// Min and max 'coordinate' of chunks along X axis. Modifying this will create new chunks or
+    /// destroy existing chunks.
+    #[reflect(step = 1.0, setter = "set_width_chunks")]
     width_chunks: InheritableVariable<Range<i32>>,
 
-    /// Min and max 'coordinate' of chunks along Y axis.
-    #[reflect(
-        step = 1.0,
-        description = "Min and max 'coordinate' of chunks along Y axis. Modifying this will create new chunks or destroy existing chunks.",
-        setter = "set_length_chunks"
-    )]
+    /// Min and max 'coordinate' of chunks along Y axis. Modifying this will create new chunks or
+    /// destroy existing chunks.
+    #[reflect(step = 1.0, setter = "set_length_chunks")]
     length_chunks: InheritableVariable<Range<i32>>,
 
     /// Size of the height map per chunk, in pixels. Warning: any change to this value will result in resampling!
@@ -1108,14 +1066,7 @@ pub struct Terrain {
     /// If there cannot be an equal number of vertices on each side of the split, then the split will be made
     /// so that the number of vertices is as close to equal as possible, but this may result in vertices not being
     /// properly aligned between adjacent blocks.
-    #[reflect(
-        min_value = 2.0,
-        step = 1.0,
-        description = "Size of the height map per chunk, in pixels. \
-        Each dimension should be a power of 2 plus 3, for example: 7 (4 + 3), 11 (8 + 3), 19 (16 + 3), etc. \
-        Warning: any change to this value will result in resampling!",
-        setter = "set_height_map_size"
-    )]
+    #[reflect(min_value = 2.0, step = 1.0, setter = "set_height_map_size")]
     height_map_size: InheritableVariable<Vector2<u32>>,
 
     /// Size of the mesh block that will be scaled to various sizes to render the terrain at various levels of detail,
@@ -1124,23 +1075,11 @@ pub struct Terrain {
     /// Each dimension should be one greater than some power of 2, such as 5 = 4 + 1, 9 = 8 + 1, 17 = 16 + 1, and so on.
     /// This helps the vertices of the block to align with the pixels of the height data texture.
     /// Excluding the one-pixel margin that is not rendered, height data should also be one greater than some power of 2.
-    #[reflect(
-        min_value = 8.0,
-        step = 1.0,
-        setter = "set_block_size",
-        description = "Size of the mesh block in vertices. \
-        Each dimension should be a power of 2 plus 1, for example: 5 (4 + 1), 9 (8 + 1), 17 (16 + 1), etc. \
-        The power of two should not be greater than the power of two of the height map size."
-    )]
+    #[reflect(min_value = 8.0, step = 1.0, setter = "set_block_size")]
     block_size: InheritableVariable<Vector2<u32>>,
 
     /// Size of the blending mask per chunk, in pixels. Warning: any change to this value will result in resampling!
-    #[reflect(
-        min_value = 1.0,
-        step = 1.0,
-        description = "Size of the blending mask per chunk, in pixels. Warning: any change to this value will result in resampling!",
-        setter = "set_mask_size"
-    )]
+    #[reflect(min_value = 1.0, step = 1.0, setter = "set_mask_size")]
     mask_size: InheritableVariable<Vector2<u32>>,
 
     #[reflect(immutable_collection)]
@@ -1178,151 +1117,29 @@ impl Default for Terrain {
     }
 }
 
-#[derive(Visit)]
-struct OldLayer {
-    pub material: MaterialResource,
-    pub mask_property_name: String,
-    pub chunk_masks: Vec<TextureResource>,
-}
-
-impl Default for OldLayer {
-    fn default() -> Self {
-        Self {
-            material: MaterialResource::new_ok(
-                Uuid::new_v4(),
-                Default::default(),
-                Material::standard_terrain(),
-            ),
-            mask_property_name: "maskTexture".to_string(),
-            chunk_masks: Default::default(),
-        }
-    }
-}
-
 impl Visit for Terrain {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         let mut region = visitor.enter_region(name)?;
 
         let mut version = VERSION;
-        let _ = version.visit("Version", &mut region);
+        version.visit("Version", &mut region)?;
 
-        match version {
-            0 => {
-                // Old version.
-                self.base.visit("Base", &mut region)?;
-
-                let mut layers =
-                    InheritableVariable::<Vec<OldLayer>>::new_modified(Default::default());
-                layers.visit("Layers", &mut region)?;
-
-                let mut width = 0.0f32;
-                width.visit("Width", &mut region)?;
-                let mut length = 0.0f32;
-                length.visit("Length", &mut region)?;
-
-                let mut mask_resolution = 0.0f32;
-                mask_resolution.visit("MaskResolution", &mut region)?;
-
-                let mut height_map_resolution = 0.0f32;
-                height_map_resolution.visit("HeightMapResolution", &mut region)?;
-
-                let mut chunks = Vec::<Chunk>::new();
-                chunks.visit("Chunks", &mut region)?;
-
-                let mut width_chunks = 0u32;
-                width_chunks.visit("WidthChunks", &mut region)?;
-                self.width_chunks = (0..(width_chunks as i32)).into();
-
-                let mut length_chunks = 0u32;
-                length_chunks.visit("LengthChunks", &mut region)?;
-                self.length_chunks = (0..(length_chunks as i32)).into();
-
-                self.chunk_size =
-                    Vector2::new(width / width_chunks as f32, length / length_chunks as f32).into();
-
-                self.mask_size = Vector2::new(
-                    (self.chunk_size.x * mask_resolution) as u32,
-                    (self.chunk_size.y * mask_resolution) as u32,
-                )
-                .into();
-                self.height_map_size = Vector2::new(
-                    (self.chunk_size.x * height_map_resolution) as u32,
-                    (self.chunk_size.y * height_map_resolution) as u32,
-                )
-                .into();
-
-                // Convert to new format.
-                for mut layer in layers.take() {
-                    for chunk in chunks.iter_mut().rev() {
-                        chunk.layer_masks.push(layer.chunk_masks.pop().unwrap());
-                    }
-
-                    // TODO: Due to the bug in resource system, material properties are not kept in sync
-                    // so here we must re-create the material and put every property from the old material
-                    // to the new.
-                    let new_material = Material::standard_terrain();
-
-                    // TODO
-                    /*
-                    let mut material_state = layer.material.state();
-                    if let Some(material) = material_state.data() {
-                        for (name, value) in material.properties() {
-                            Log::verify(new_material.set_property(name.clone(), value.clone()));
-                        }
-                    }*/
-
-                    self.layers.push(Layer {
-                        material: MaterialResource::new_ok(
-                            Uuid::new_v4(),
-                            Default::default(),
-                            new_material,
-                        ),
-                        mask_property_name: layer.mask_property_name,
-                        ..Default::default()
-                    });
-                }
-
-                self.chunks = chunks.into();
-            }
-            1 | VERSION => {
-                // Current version
-                self.base.visit("Base", &mut region)?;
-                let _ = self.holes_enabled.visit("HolesEnabled", &mut region);
-                self.layers.visit("Layers", &mut region)?;
-                self.chunk_size.visit("ChunkSize", &mut region)?;
-                self.width_chunks.visit("WidthChunks", &mut region)?;
-                self.length_chunks.visit("LengthChunks", &mut region)?;
-                self.height_map_size.visit("HeightMapSize", &mut region)?;
-                let _ = self.block_size.visit("BlockSize", &mut region);
-                self.mask_size.visit("MaskSize", &mut region)?;
-                self.chunks.visit("Chunks", &mut region)?;
-            }
-            _ => (),
+        if let VERSION = version {
+            // Current version
+            self.base.visit("Base", &mut region)?;
+            self.holes_enabled.visit("HolesEnabled", &mut region)?;
+            self.layers.visit("Layers", &mut region)?;
+            self.chunk_size.visit("ChunkSize", &mut region)?;
+            self.width_chunks.visit("WidthChunks", &mut region)?;
+            self.length_chunks.visit("LengthChunks", &mut region)?;
+            self.height_map_size.visit("HeightMapSize", &mut region)?;
+            self.block_size.visit("BlockSize", &mut region)?;
+            self.mask_size.visit("MaskSize", &mut region)?;
+            self.chunks.visit("Chunks", &mut region)?;
         }
 
         if region.is_reading() {
             self.geometry = TerrainGeometry::new(*self.block_size);
-            if version < 2 {
-                Log::info(format!("Updating terrain to version: {VERSION}"));
-                *self.height_map_size = self.height_map_size.map(|x| x + 2);
-                for c in self.chunks.iter() {
-                    if c.height_map_size() != self.height_map_size() {
-                        Log::err(format!(
-                            "Terrain version update failure, height map size mismatch: {} != {}",
-                            c.height_map_size(),
-                            self.height_map_size()
-                        ));
-                    }
-                }
-                for pos in self
-                    .chunks
-                    .iter()
-                    .map(|c| c.grid_position)
-                    .collect::<Vec<_>>()
-                {
-                    self.align_chunk_margins(pos);
-                }
-            }
         }
 
         Ok(())
@@ -1440,12 +1257,6 @@ fn create_zero_margin(mut data: Vec<f32>, data_size: Vector2<u32>) -> Vec<f32> {
         *v = 0.0;
     }
     data
-}
-
-impl TypeUuidProvider for Terrain {
-    fn type_uuid() -> Uuid {
-        uuid!("4b0a7927-bcd8-41a3-949a-dd10fba8e16a")
-    }
 }
 
 impl Terrain {
@@ -2130,7 +1941,7 @@ impl Terrain {
             drop(texture_modifier);
             drop(texture_data);
 
-            *chunk.quad_tree.lock() =
+            *chunk.quad_tree.safe_lock() =
                 make_quad_tree(&chunk.heightmap, chunk.height_map_size, chunk.block_size);
         }
 
@@ -2615,7 +2426,7 @@ impl NodeTrait for Terrain {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn collect_render_data(&self, ctx: &mut RenderContext) -> RdcControlFlow {
@@ -2647,7 +2458,7 @@ impl NodeTrait for Terrain {
                 // The first element of the list is the furthest distance, where the lowest LOD is used.
                 // The formula used to produce this list has been chosen arbitrarily based on what seems to produce
                 // the best results in the render.
-                let quad_tree = chunk.quad_tree.lock();
+                let quad_tree = chunk.quad_tree.safe_lock();
                 let levels = (0..=quad_tree.max_level)
                     .map(|n| {
                         ctx.observer_position.z_far
@@ -2833,7 +2644,7 @@ impl TerrainBuilder {
             width_chunks: 0..2,
             length_chunks: 0..2,
             mask_size: Vector2::new(256, 256),
-            height_map_size: Vector2::new(257, 257),
+            height_map_size: Vector2::new(259, 259),
             block_size: Vector2::new(33, 33),
             layers: Default::default(),
         }
@@ -2961,8 +2772,8 @@ impl TerrainBuilder {
     }
 
     /// Builds terrain node and adds it to given graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Terrain> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }
 

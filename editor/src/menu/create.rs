@@ -25,8 +25,8 @@ use crate::{
         engine::{Engine, SerializationContext},
         fxhash::FxHashMap,
         gui::{
-            menu::MenuItemMessage, message::MessageDirection, message::UiMessage,
-            widget::WidgetMessage, BuildContext, UiNode, UserInterface,
+            menu::MenuItemMessage, message::UiMessage, widget::WidgetMessage, BuildContext,
+            UserInterface,
         },
         scene::node::Node,
     },
@@ -41,17 +41,20 @@ use crate::{
     Mode,
 };
 use fyrox::core::log::Log;
+use fyrox::core::uuid::{uuid, Uuid};
 use fyrox::graph::constructor::{VariantConstructor, VariantResult};
 use fyrox::gui::constructor::WidgetConstructorContainer;
-use fyrox::gui::menu::SortingPredicate;
+use fyrox::gui::menu::{MenuItem, SortingPredicate};
 use fyrox::scene::graph::Graph;
 
 pub struct CreateEntityRootMenu {
-    pub menu: Handle<UiNode>,
+    pub menu: Handle<MenuItem>,
     pub sub_menus: CreateEntityMenu,
 }
 
 impl CreateEntityRootMenu {
+    pub const CREATE: Uuid = uuid!("edc4d319-2e8e-4173-8b35-73ff4982f380");
+
     pub fn new(
         serialization_context: &SerializationContext,
         widget_constructors_container: &WidgetConstructorContainer,
@@ -60,13 +63,12 @@ impl CreateEntityRootMenu {
         let sub_menus =
             CreateEntityMenu::new(serialization_context, widget_constructors_container, ctx);
 
-        let menu = create_root_menu_item("Create", sub_menus.root_items.clone(), ctx);
+        let menu = create_root_menu_item("Create", Self::CREATE, sub_menus.root_items.clone(), ctx);
 
-        ctx.inner().send_message(MenuItemMessage::sort(
+        ctx.inner().send(
             menu,
-            MessageDirection::ToWidget,
-            SortingPredicate::sort_by_text(),
-        ));
+            MenuItemMessage::Sort(SortingPredicate::sort_by_text()),
+        );
 
         Self { menu, sub_menus }
     }
@@ -108,18 +110,14 @@ impl CreateEntityRootMenu {
     }
 
     pub fn on_mode_changed(&mut self, ui: &UserInterface, mode: &Mode) {
-        ui.send_message(WidgetMessage::enabled(
-            self.menu,
-            MessageDirection::ToWidget,
-            mode.is_edit(),
-        ));
+        ui.send(self.menu, WidgetMessage::Enabled(mode.is_edit()));
     }
 }
 
 pub struct CreateEntityMenu {
     ui_menu: UiMenu,
-    pub root_items: Vec<Handle<UiNode>>,
-    constructor_views: FxHashMap<Handle<UiNode>, VariantConstructor<Node, Graph>>,
+    pub root_items: Vec<Handle<MenuItem>>,
+    constructor_views: FxHashMap<Handle<MenuItem>, VariantConstructor<Node, Graph>>,
 }
 
 impl CreateEntityMenu {
@@ -136,31 +134,27 @@ impl CreateEntityMenu {
         let constructors = serialization_context.node_constructors.map();
         for constructor in constructors.values() {
             for variant in constructor.variants.iter() {
-                let item = create_menu_item(&variant.name, vec![], ctx);
+                let item = create_menu_item(&variant.name, Uuid::new_v4(), vec![], ctx);
                 constructor_views.insert(item, variant.constructor.clone());
                 if constructor.group.is_empty() {
                     root_items.push(item);
                 } else {
                     let group = *groups.entry(constructor.group).or_insert_with(|| {
-                        let group = create_menu_item(constructor.group, vec![], ctx);
+                        let group =
+                            create_menu_item(constructor.group, Uuid::new_v4(), vec![], ctx);
                         root_items.push(group);
                         group
                     });
-                    ctx.send_message(MenuItemMessage::add_item(
-                        group,
-                        MessageDirection::ToWidget,
-                        item,
-                    ))
+                    ctx.inner().send(group, MenuItemMessage::AddItem(item))
                 }
             }
         }
 
         for root_item in root_items.iter() {
-            ctx.inner().send_message(MenuItemMessage::sort(
+            ctx.inner().send(
                 *root_item,
-                MessageDirection::ToWidget,
-                SortingPredicate::sort_by_text(),
-            ))
+                MenuItemMessage::Sort(SortingPredicate::sort_by_text()),
+            )
         }
 
         Self {
@@ -173,22 +167,13 @@ impl CreateEntityMenu {
     pub fn on_scene_changed(&self, controller: &dyn SceneController, ui: &UserInterface) {
         let is_ui_scene = controller.downcast_ref::<UiScene>().is_some();
 
-        ui.send_message(WidgetMessage::enabled(
-            self.ui_menu.menu,
-            MessageDirection::ToWidget,
-            is_ui_scene,
-        ));
+        ui.send(self.ui_menu.menu, WidgetMessage::Enabled(is_ui_scene));
 
         for widget in self.root_items.iter() {
             if *widget == self.ui_menu.menu {
                 continue;
             }
-
-            ui.send_message(WidgetMessage::enabled(
-                *widget,
-                MessageDirection::ToWidget,
-                !is_ui_scene,
-            ));
+            ui.send(*widget, WidgetMessage::Enabled(!is_ui_scene));
         }
     }
 
@@ -206,7 +191,10 @@ impl CreateEntityMenu {
         } else if let Some(game_scene) = controller.downcast_mut::<GameScene>() {
             let graph = &mut engine.scenes[game_scene.scene].graph;
             if let Some(MenuItemMessage::Click) = message.data::<MenuItemMessage>() {
-                if let Some(constructor) = self.constructor_views.get(&message.destination()) {
+                if let Some(constructor) = self
+                    .constructor_views
+                    .get(&message.destination().to_variant())
+                {
                     if let VariantResult::Owned(node) = constructor(graph) {
                         return Some(node);
                     } else {

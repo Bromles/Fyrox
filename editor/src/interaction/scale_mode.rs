@@ -18,34 +18,34 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::command::{Command, CommandGroup};
-use crate::fyrox::{
-    core::{
-        algebra::{Vector2, Vector3},
-        pool::Handle,
-        uuid::{uuid, Uuid},
-        TypeUuidProvider,
-    },
-    gui::{BuildContext, UiNode},
-};
-use crate::scene::SelectionContainer;
 use crate::{
     camera::PickingOptions,
-    interaction::{
-        calculate_gizmo_distance_scaling, gizmo::scale_gizmo::ScaleGizmo,
-        make_interaction_mode_button, InteractionMode,
+    command::{Command, CommandGroup},
+    fyrox::{
+        core::{
+            algebra::{Vector2, Vector3},
+            pool::Handle,
+            reflect::prelude::*,
+            some_or_return,
+            uuid::{uuid, Uuid},
+        },
+        gui::BuildContext,
     },
+    interaction::{gizmo::scale_gizmo::ScaleGizmo, make_interaction_mode_button, InteractionMode},
     message::MessageSender,
     scene::{
         commands::{graph::ScaleNodeCommand, ChangeSelectionCommand},
         controller::SceneController,
-        GameScene, Selection,
+        GameScene, Selection, SelectionContainer,
     },
     settings::Settings,
     world::selection::GraphSelection,
     Engine,
 };
+use fyrox::gui::button::Button;
 
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable, type_uuid = "64b4da1a-5d0f-49e1-9f48-011165cd1ec5")]
 pub struct ScaleInteractionMode {
     initial_scales: Vec<Vector3<f32>>,
     scale_gizmo: ScaleGizmo,
@@ -61,12 +61,6 @@ impl ScaleInteractionMode {
             interacting: false,
             message_sender,
         }
-    }
-}
-
-impl TypeUuidProvider for ScaleInteractionMode {
-    fn type_uuid() -> Uuid {
-        uuid!("64b4da1a-5d0f-49e1-9f48-011165cd1ec5")
     }
 }
 
@@ -96,7 +90,7 @@ impl InteractionMode for ScaleInteractionMode {
                     filter: None,
                     ignore_back_faces: false,
                     use_picking_loop: true,
-                    only_meshes: false,
+                    method: Default::default(),
                     settings: &settings.selection,
                 },
             ) {
@@ -157,7 +151,7 @@ impl InteractionMode for ScaleInteractionMode {
                         filter: None,
                         ignore_back_faces: settings.selection.ignore_back_faces,
                         use_picking_loop: true,
-                        only_meshes: false,
+                        method: Default::default(),
                         settings: &settings.selection,
                     },
                 )
@@ -230,7 +224,7 @@ impl InteractionMode for ScaleInteractionMode {
                             filter: None,
                             ignore_back_faces: false,
                             use_picking_loop: false,
-                            only_meshes: false,
+                            method: Default::default(),
                             settings: &settings.selection,
                         },
                     )
@@ -246,26 +240,15 @@ impl InteractionMode for ScaleInteractionMode {
         editor_selection: &Selection,
         controller: &mut dyn SceneController,
         engine: &mut Engine,
-        _settings: &Settings,
+        settings: &Settings,
     ) {
-        let Some(game_scene) = controller.downcast_mut::<GameScene>() else {
-            return;
-        };
-
-        if let Some(selection) = editor_selection.as_graph() {
-            let graph = &mut engine.scenes[game_scene.scene].graph;
-            if editor_selection.is_empty() {
-                self.scale_gizmo.set_visible(graph, false);
-            } else {
-                let scale = calculate_gizmo_distance_scaling(
-                    graph,
-                    game_scene.camera_controller.camera,
-                    self.scale_gizmo.origin,
-                ) * _settings.graphics.gizmo_scale;
-                self.scale_gizmo.sync_transform(graph, selection, scale);
-                self.scale_gizmo.set_visible(graph, true);
-            }
-        }
+        let game_scene = some_or_return!(controller.downcast_mut::<GameScene>());
+        self.scale_gizmo.sync_with_selection(
+            &mut engine.scenes[game_scene.scene].graph,
+            game_scene.camera_controller.camera,
+            settings,
+            editor_selection,
+        );
     }
 
     fn deactivate(&mut self, controller: &dyn SceneController, engine: &mut Engine) {
@@ -277,7 +260,7 @@ impl InteractionMode for ScaleInteractionMode {
         self.scale_gizmo.set_visible(graph, false);
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         let scale_mode_tooltip =
             "Scale Object(s) - Shortcut: [4]\n\nScaling interaction mode allows you to scale selected \
         objects. Keep in mind that scaling always works in local coordinates!\n\n\
@@ -292,6 +275,6 @@ impl InteractionMode for ScaleInteractionMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        Self::type_info().type_uuid
     }
 }

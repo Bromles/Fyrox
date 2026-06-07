@@ -22,6 +22,7 @@
 //! for more info and examples
 
 use crate::effects::{Effect, EffectRenderTrait};
+use fyrox_core::pool::PoolError;
 use fyrox_core::{
     pool::{Handle, Pool, Ticket},
     reflect::prelude::*,
@@ -101,6 +102,7 @@ impl PingPongBuffer {
 /// to some other audio bus and be processed again, but with different sound effects (this can be done via
 /// [`AudioBusGraph`].
 #[derive(Debug, Reflect, Visit, Clone)]
+#[reflect(type_uuid = "de4c1709-c9ac-4823-8f77-22199bb53645")]
 pub struct AudioBus {
     pub(crate) name: String,
     effects: Vec<Effect>,
@@ -184,11 +186,11 @@ impl AudioBus {
         }
     }
 
-    fn apply_effects(&mut self) {
+    fn apply_effects(&mut self, sample_rate: u32) {
         // Pass through the chain of effects.
         for effect in self.effects.iter_mut() {
             let (input, output) = self.ping_pong_buffer.input_output_buffers();
-            effect.render(input, output);
+            effect.render(sample_rate, input, output);
             self.ping_pong_buffer.swap();
         }
     }
@@ -308,6 +310,7 @@ impl AudioBus {
 ///
 /// If you delete an audio bus to which a bunch of sound sources is bound, then they will simply stop playing.
 #[derive(Default, Debug, Clone, Visit, Reflect)]
+#[reflect(type_uuid = "417d2cff-e699-4396-bd90-a57b5564372a")]
 pub struct AudioBusGraph {
     buses: Pool<AudioBus>,
     root: Handle<AudioBus>,
@@ -355,7 +358,7 @@ impl AudioBusGraph {
             std::mem::replace(&mut self.buses[node_handle].parent_bus, Handle::NONE);
 
         // Remove child from parent's children list
-        if let Some(parent) = self.buses.try_borrow_mut(parent_handle) {
+        if let Ok(parent) = self.buses.try_borrow_mut(parent_handle) {
             if let Some(i) = parent.children().iter().position(|h| *h == node_handle) {
                 parent.child_buses.remove(i);
             }
@@ -415,12 +418,15 @@ impl AudioBusGraph {
     }
 
     /// Tries to borrow an audio bus by its handle.
-    pub fn try_get_bus_ref(&self, handle: Handle<AudioBus>) -> Option<&AudioBus> {
+    pub fn try_get_bus_ref(&self, handle: Handle<AudioBus>) -> Result<&AudioBus, PoolError> {
         self.buses.try_borrow(handle)
     }
 
     /// Tries to borrow an audio bus by its handle.
-    pub fn try_get_bus_mut(&mut self, handle: Handle<AudioBus>) -> Option<&mut AudioBus> {
+    pub fn try_get_bus_mut(
+        &mut self,
+        handle: Handle<AudioBus>,
+    ) -> Result<&mut AudioBus, PoolError> {
         self.buses.try_borrow_mut(handle)
     }
 
@@ -439,7 +445,7 @@ impl AudioBusGraph {
     pub fn try_take_reserve_bus(
         &mut self,
         handle: Handle<AudioBus>,
-    ) -> Option<(Ticket<AudioBus>, AudioBus)> {
+    ) -> Result<(Ticket<AudioBus>, AudioBus), PoolError> {
         self.buses.try_take_reserve(handle)
     }
 
@@ -483,10 +489,10 @@ impl AudioBusGraph {
         }
     }
 
-    pub(crate) fn end_render(&mut self, output_device_buffer: &mut [(f32, f32)]) {
+    pub(crate) fn end_render(&mut self, sample_rate: u32, output_device_buffer: &mut [(f32, f32)]) {
         let mut leafs = Vec::new();
         for (handle, bus) in self.buses.pair_iter_mut() {
-            bus.apply_effects();
+            bus.apply_effects(sample_rate);
 
             if bus.child_buses.is_empty() {
                 leafs.push(handle);
@@ -527,6 +533,8 @@ mod test {
         effects::{Attenuate, Effect},
     };
 
+    const SAMPLE_RATE: u32 = 44100;
+
     #[test]
     fn test_multi_bus_data_flow() {
         let mut output_buffer = [(0.0f32, 0.0f32)];
@@ -549,7 +557,7 @@ mod test {
             *right = 1.0;
         }
 
-        graph.end_render(&mut output_buffer);
+        graph.end_render(SAMPLE_RATE, &mut output_buffer);
 
         assert_eq!(output_buffer[0], (2.0, 2.0));
     }
@@ -568,7 +576,7 @@ mod test {
             *right = 1.0;
         }
 
-        graph.end_render(&mut output_buffer);
+        graph.end_render(SAMPLE_RATE, &mut output_buffer);
 
         assert_eq!(output_buffer[0], (1.0, 1.0));
     }
@@ -602,7 +610,7 @@ mod test {
             *right = 1.0;
         }
 
-        graph.end_render(&mut output_buffer);
+        graph.end_render(SAMPLE_RATE, &mut output_buffer);
 
         assert_eq!(output_buffer[0], (0.75, 0.75));
     }

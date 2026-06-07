@@ -26,7 +26,6 @@
 
 #![forbid(unsafe_code)]
 
-use crate::material::MaterialResourceBinding;
 use crate::{
     asset::manager::{ResourceManager, ResourceRegistrationError},
     core::{
@@ -54,7 +53,9 @@ use crate::{
     utils::{uvgen, uvgen::SurfaceDataPatch},
 };
 use fxhash::FxHashMap;
-use fyrox_core::Uuid;
+use fyrox_core::{ok_or_continue, warn};
+use fyrox_graph::NodeWrapper;
+use fyrox_material::Material;
 use fyrox_resource::ResourceData;
 use lightmap::light::{
     DirectionalLightDefinition, LightDefinition, PointLightDefinition, SpotLightDefinition,
@@ -71,7 +72,11 @@ use std::{
 };
 
 /// Applies surface data patch to a surface data.
-pub fn apply_surface_data_patch(data: &mut SurfaceData, patch: &SurfaceDataPatch) {
+pub fn apply_surface_data_patch(
+    data: &mut SurfaceData,
+    patch: &SurfaceDataPatch,
+    tex_coord_binding_point: u8,
+) {
     if !data
         .vertex_buffer
         .has_attribute(VertexAttributeUsage::TexCoord1)
@@ -84,7 +89,7 @@ pub fn apply_surface_data_patch(data: &mut SurfaceData, patch: &SurfaceDataPatch
                     data_type: VertexAttributeDataType::F32,
                     size: 2,
                     divisor: 0,
-                    shader_location: 6, // HACK: GBuffer renderer expects it to be at 6
+                    shader_location: tex_coord_binding_point,
                     normalized: false,
                 },
                 Vector2::<f32>::default(),
@@ -120,6 +125,7 @@ pub fn apply_surface_data_patch(data: &mut SurfaceData, patch: &SurfaceDataPatch
 
 /// Lightmap entry.
 #[derive(Default, Clone, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "17c570ce-0e98-42c0-b93f-ddc97012380d")]
 pub struct LightmapEntry {
     /// Lightmap texture.
     ///
@@ -160,8 +166,19 @@ impl Visit for SurfaceDataPatchWrapper {
 }
 
 /// Lightmap is a texture with precomputed lighting.
-#[derive(Default, Clone, Debug, Visit, Reflect)]
+#[derive(Clone, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "931d2ee2-f8f0-42e7-9d9b-3c429ca75128")]
 pub struct Lightmap {
+    /// Name of the property this light map is bound to in all materials across all
+    /// surfaces for which the light map was generated.
+    #[visit(optional)] // Backward compatibility
+    pub texture_name: String,
+
+    /// Location of the second texture coordinate attribute in the vertex buffer
+    /// of all surfaces.
+    #[visit(optional)] // Backward compatibility
+    pub second_tex_coord_location: u8,
+
     /// Node handle to lightmap mapping. It is used to quickly get information about
     /// lightmaps for any node in scene.
     pub map: FxHashMap<Handle<Node>, Vec<LightmapEntry>>,
@@ -171,6 +188,17 @@ pub struct Lightmap {
     // We don't need to inspect patches, because they contain no useful data.
     #[reflect(hidden)]
     pub patches: FxHashMap<u64, SurfaceDataPatchWrapper>,
+}
+
+impl Default for Lightmap {
+    fn default() -> Self {
+        Self {
+            texture_name: "lightmapTexture".to_string(),
+            second_tex_coord_location: 6,
+            map: Default::default(),
+            patches: Default::default(),
+        }
+    }
 }
 
 struct Instance {
@@ -246,12 +274,9 @@ pub struct ProgressData {
 impl ProgressData {
     /// Returns progress percentage in [0; 100] range.
     pub fn progress_percent(&self) -> u32 {
-        let iterations = self.max_iterations.load(atomic::Ordering::SeqCst);
-        if iterations > 0 {
-            self.progress.load(atomic::Ordering::SeqCst) * 100 / iterations
-        } else {
-            0
-        }
+        (self.progress.load(atomic::Ordering::SeqCst) * 100)
+            .checked_div(self.max_iterations.load(atomic::Ordering::SeqCst))
+            .unwrap_or(0)
     }
 
     /// Returns current stage.
@@ -309,6 +334,8 @@ pub enum LightmapGenerationError {
     InvalidData(VertexFetchError),
 }
 
+impl std::error::Error for LightmapGenerationError {}
+
 impl Display for LightmapGenerationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -335,14 +362,47 @@ impl From<VertexFetchError> for LightmapGenerationError {
 /// It is used to split preparation step from the actual lightmap generation; to be able to put heavy generation in a separate
 /// thread.
 pub struct LightmapInputData {
+    texture_name: String,
+    second_tex_coord_location: u8,
     data_set: FxHashMap<u64, SurfaceResource>,
     instances: Vec<Instance>,
     lights: FxHashMap<Handle<Node>, LightDefinition>,
 }
 
+fn has_lightmap_texture_binding_point(
+    texture_name: &str,
+    node: &Node,
+    surface_index: usize,
+    material: &Material,
+) -> bool {
+    if let Some(shader) = material.shader().data_ref().as_loaded_ref() {
+        if shader.has_texture_resource(texture_name) {
+            true
+        } else {
+            warn!(
+                "[Lightmap]: skipping {}({}) node's surface {surface_index}, because its material \
+                does not have a {texture_name} texture resource!",
+                node.name(),
+                node.self_handle()
+            );
+            false
+        }
+    } else {
+        warn!(
+            "[Lightmap]: skipping {}({}) node's surface {surface_index}, because its material \
+            has unloaded shader!",
+            node.name(),
+            node.self_handle()
+        );
+        false
+    }
+}
+
 impl LightmapInputData {
     /// Creates a new input data that can be later used to generate a lightmap.
     pub fn from_scene<F>(
+        texture_name: &str,
+        second_tex_coord_location: u8,
         scene: &Scene,
         mut filter: F,
         cancellation_token: CancellationToken,
@@ -437,35 +497,46 @@ impl LightmapInputData {
         let mut instances = Vec::new();
         let mut data_set = FxHashMap::default();
 
-        'node_loop: for (handle, node) in scene.graph.pair_iter() {
+        let mut stack = vec![scene.graph.root()];
+
+        'node_loop: while let Some(handle) = stack.pop() {
+            let node = ok_or_continue!(scene.graph.try_get_node(handle));
+
             if !filter(handle, node) {
                 continue 'node_loop;
             }
 
+            stack.extend_from_slice(node.children());
+
             if let Some(mesh) = node.cast::<Mesh>() {
                 if !mesh.global_visibility() || !mesh.is_globally_enabled() {
+                    warn!(
+                        "[Lightmap]: skipping {}({}) node, because \
+                    it is either invisible or disabled.",
+                        mesh.name(),
+                        handle
+                    );
                     continue;
                 }
                 let global_transform = mesh.global_transform();
-                'surface_loop: for surface in mesh.surfaces() {
+                'surface_loop: for (surface_index, surface) in mesh.surfaces().iter().enumerate() {
                     // Check material for compatibility.
-
                     let mut material_state = surface.material().state();
-                    if let Some(material) = material_state.data() {
-                        if !material
-                            .binding_ref("lightmapTexture")
-                            .map(|v| matches!(v, MaterialResourceBinding::Texture { .. }))
-                            .unwrap_or_default()
-                        {
-                            continue 'surface_loop;
-                        }
+                    let Some(material) = material_state.data() else {
+                        continue 'surface_loop;
+                    };
+                    if !has_lightmap_texture_binding_point(
+                        texture_name,
+                        node,
+                        surface_index,
+                        material,
+                    ) {
+                        continue 'surface_loop;
                     }
 
                     // Gather unique "list" of surface data to generate UVs for.
                     let data = surface.data();
-                    let key = &*data.data_ref() as *const _ as u64;
-                    data_set.entry(key).or_insert_with(|| surface.data());
-
+                    data_set.entry(data.key()).or_insert_with(|| surface.data());
                     instances.push(Instance {
                         owner: handle,
                         source_data: data.clone(),
@@ -478,6 +549,8 @@ impl LightmapInputData {
         }
 
         Ok(Self {
+            texture_name: texture_name.to_string(),
+            second_tex_coord_location,
             data_set,
             instances,
             lights,
@@ -523,6 +596,8 @@ impl Lightmap {
         progress_indicator: ProgressIndicator,
     ) -> Result<Self, LightmapGenerationError> {
         let LightmapInputData {
+            texture_name,
+            second_tex_coord_location,
             data_set,
             mut instances,
             lights,
@@ -532,11 +607,11 @@ impl Lightmap {
 
         let patches = data_set
             .into_par_iter()
-            .map(|(_, data)| {
+            .map(|(_, surface)| {
                 if cancellation_token.is_cancelled() {
                     Err(LightmapGenerationError::Cancelled)
                 } else {
-                    let mut data = data.data_ref();
+                    let mut data = surface.data_ref();
                     let data = &mut *data;
 
                     let mut patch = uvgen::generate_uvs(
@@ -549,7 +624,7 @@ impl Lightmap {
                     .ok_or(LightmapGenerationError::InvalidIndex)?;
                     patch.data_id = data.content_hash();
 
-                    apply_surface_data_patch(data, &patch);
+                    apply_surface_data_patch(data, &patch, second_tex_coord_location);
 
                     progress_indicator.advance_progress();
                     Ok((patch.data_id, SurfaceDataPatchWrapper(patch)))
@@ -643,7 +718,12 @@ impl Lightmap {
             progress_indicator.advance_progress();
         }
 
-        Ok(Self { map, patches })
+        Ok(Self {
+            texture_name,
+            second_tex_coord_location,
+            map,
+            patches,
+        })
     }
 
     /// Saves lightmap textures into specified folder.
@@ -751,6 +831,8 @@ mod test {
         .build(&mut scene.graph);
 
         let data = LightmapInputData::from_scene(
+            "lightmapTexture",
+            6,
             &scene,
             |_, _| true,
             Default::default(),

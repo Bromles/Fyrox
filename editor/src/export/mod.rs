@@ -18,274 +18,70 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-mod android;
-mod asset;
-mod pc;
-mod utils;
-mod wasm;
-
+use crate::settings::build::BuildSettings;
 use crate::{
     fyrox::{
+        asset::manager::ResourceManager,
         core::{
             log::{Log, LogMessage, MessageKind},
             platform::TargetPlatform,
             pool::Handle,
-            reflect::prelude::*,
         },
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
         gui::{
             border::BorderBuilder,
-            button::{ButtonBuilder, ButtonMessage},
+            button::{Button, ButtonBuilder, ButtonMessage},
             decorator::DecoratorBuilder,
-            dropdown_list::{DropdownListBuilder, DropdownListMessage},
+            dropdown_list::{DropdownList, DropdownListBuilder, DropdownListMessage},
             formatted_text::WrapMode,
             grid::{Column, GridBuilder, Row},
             inspector::{
                 editors::PropertyEditorDefinitionContainer, Inspector, InspectorBuilder,
-                InspectorContext, InspectorMessage, PropertyAction,
+                InspectorContext, InspectorContextArgs, InspectorMessage, PropertyAction,
             },
-            list_view::{ListViewBuilder, ListViewMessage},
-            message::{MessageDirection, UiMessage},
-            scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
-            stack_panel::StackPanelBuilder,
+            list_view::{ListView, ListViewBuilder, ListViewMessage},
+            message::UiMessage,
+            scroll_viewer::{ScrollViewer, ScrollViewerBuilder, ScrollViewerMessage},
+            stack_panel::{StackPanel, StackPanelBuilder},
             style::{resource::StyleResourceExt, Style},
-            text::TextBuilder,
+            text::{Text, TextBuilder},
             utils::make_dropdown_list_option,
             widget::{WidgetBuilder, WidgetMessage},
-            window::{WindowBuilder, WindowMessage, WindowTitle},
+            window::{Window, WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
             wrap_panel::WrapPanelBuilder,
-            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
             VerticalAlignment,
         },
     },
     message::MessageSender,
     Message,
 };
-use cargo_metadata::camino::Utf8Path;
-use fyrox::asset::manager::ResourceManager;
-use fyrox::gui::inspector::InspectorContextArgs;
-use std::{
-    io::{BufRead, BufReader},
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
-        Arc,
-    },
-    time::Duration,
+use fyrox_build_tools::export::{BuildResult, ExportOptions};
+use std::sync::{
+    atomic::AtomicBool,
+    mpsc::{self, Receiver},
+    Arc,
 };
 use strum::VariantNames;
 
-#[derive(Reflect, Debug, Clone)]
-struct ExportOptions {
-    #[reflect(hidden)]
-    target_platform: TargetPlatform,
-    destination_folder: PathBuf,
-    include_used_assets: bool,
-    assets_folders: Vec<PathBuf>,
-    ignored_extensions: Vec<String>,
-    #[reflect(hidden)]
-    build_targets: Vec<String>,
-    #[reflect(hidden)]
-    selected_build_target: usize,
-    run_after_build: bool,
-    open_destination_folder: bool,
-    convert_assets: bool,
-}
-
-impl Default for ExportOptions {
-    fn default() -> Self {
-        Self {
-            target_platform: Default::default(),
-            destination_folder: "./build/".into(),
-            assets_folders: vec!["./data/".into()],
-            include_used_assets: false,
-            ignored_extensions: vec!["log".to_string()],
-            build_targets: vec!["default".to_string()],
-            selected_build_target: 0,
-            run_after_build: false,
-            open_destination_folder: true,
-            convert_assets: true,
-        }
-    }
-}
-
 pub struct ExportWindow {
-    pub window: Handle<UiNode>,
-    log: Handle<UiNode>,
-    export: Handle<UiNode>,
-    cancel: Handle<UiNode>,
-    log_scroll_viewer: Handle<UiNode>,
+    pub window: Handle<Window>,
+    log: Handle<StackPanel>,
+    export: Handle<Button>,
+    cancel: Handle<Button>,
+    log_scroll_viewer: Handle<ScrollViewer>,
     cancel_flag: Arc<AtomicBool>,
     log_message_receiver: Option<Receiver<LogMessage>>,
-    build_result_receiver: Option<Receiver<Result<(), String>>>,
-    target_platform_list: Handle<UiNode>,
+    build_result_receiver: Option<Receiver<BuildResult>>,
+    target_platform_list: Handle<ListView>,
     export_options: ExportOptions,
-    inspector: Handle<UiNode>,
-    build_targets_selector: Handle<UiNode>,
+    inspector: Handle<Inspector>,
+    build_targets_selector: Handle<DropdownList>,
+    child_processes: Vec<std::process::Child>,
+    build_targets: Vec<String>,
 }
 
-fn build_package(
-    package_name: &str,
-    build_target: &str,
-    package_dir_path: &Utf8Path,
-    target_platform: TargetPlatform,
-    cancel_flag: Arc<AtomicBool>,
-) -> Result<(), String> {
-    utils::configure_build_environment(target_platform, build_target)?;
-
-    let mut process = match target_platform {
-        TargetPlatform::PC => pc::build_package(package_name),
-        TargetPlatform::WebAssembly => wasm::build_package(package_dir_path),
-        TargetPlatform::Android => android::build_package(package_name, build_target),
-    };
-
-    let mut handle = match process.spawn() {
-        Ok(handle) => handle,
-        Err(err) => {
-            return Err(format!("Failed to build the game. Reason: {err:?}"));
-        }
-    };
-
-    let mut stderr = handle.stderr.take().unwrap();
-
-    // Spin until the build is finished.
-    loop {
-        if cancel_flag.load(Ordering::Relaxed) {
-            Log::verify(handle.kill());
-            Log::warn("Build was cancelled.");
-            return Ok(());
-        }
-
-        for line in BufReader::new(&mut stderr).lines().take(10).flatten() {
-            Log::writeln(MessageKind::Information, line);
-        }
-
-        match handle.try_wait() {
-            Ok(status) => {
-                if let Some(status) = status {
-                    let code = status.code().unwrap_or(1);
-                    if code != 0 {
-                        return Err("Failed to build the game.".to_string());
-                    } else {
-                        Log::info("The game was built successfully.");
-                        break;
-                    }
-                }
-            }
-            Err(err) => {
-                return Err(format!("Failed to build the game. Reason: {err:?}"));
-            }
-        }
-
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    Ok(())
-}
-
-fn export(
-    export_options: ExportOptions,
-    cancel_flag: Arc<AtomicBool>,
-    resource_manager: ResourceManager,
-) -> Result<(), String> {
-    Log::info("Building the game...");
-
-    utils::prepare_build_dir(&export_options.destination_folder)?;
-    let metadata = utils::read_metadata()?;
-
-    let package_name = match export_options.target_platform {
-        TargetPlatform::PC => "executor",
-        TargetPlatform::WebAssembly => "executor-wasm",
-        TargetPlatform::Android => "executor-android",
-    };
-
-    let Some(package) = metadata.packages.iter().find(|p| p.name == package_name) else {
-        return Err(format!(
-            "The project does not have `{package_name}` package."
-        ));
-    };
-
-    let package_dir_path = package.manifest_path.as_path().parent().unwrap();
-
-    let mut temp_folders = Vec::new();
-
-    // Copy assets
-    match export_options.target_platform {
-        TargetPlatform::PC | TargetPlatform::WebAssembly => {
-            Log::info("Trying to copy the assets...");
-
-            for folder in export_options.assets_folders {
-                Log::info(format!(
-                    "Trying to copy assets from {} to {}...",
-                    folder.display(),
-                    export_options.destination_folder.display()
-                ));
-
-                Log::verify(asset::copy_and_convert_assets(
-                    &folder,
-                    export_options.destination_folder.join(&folder),
-                    export_options.target_platform,
-                    &|_| true,
-                    &resource_manager,
-                    export_options.convert_assets,
-                ));
-            }
-        }
-        TargetPlatform::Android => android::copy_assets(
-            &export_options,
-            package,
-            package_dir_path,
-            &mut temp_folders,
-            &resource_manager,
-            export_options.convert_assets,
-        )?,
-    }
-
-    build_package(
-        package_name,
-        &export_options.build_targets[export_options.selected_build_target],
-        package_dir_path,
-        export_options.target_platform,
-        cancel_flag,
-    )?;
-
-    match export_options.target_platform {
-        TargetPlatform::PC => {
-            pc::copy_binaries(&metadata, package_name, &export_options.destination_folder)?
-        }
-        TargetPlatform::WebAssembly => wasm::copy_binaries(
-            package_dir_path.as_std_path(),
-            &export_options.destination_folder,
-        )?,
-        TargetPlatform::Android => {
-            android::copy_binaries(&metadata, package_name, &export_options.destination_folder)?
-        }
-    }
-
-    // Remove all temp folders.
-    for temp_folder in temp_folders {
-        Log::verify(std::fs::remove_dir_all(temp_folder));
-    }
-
-    if let Ok(destination_folder) = export_options.destination_folder.canonicalize() {
-        if export_options.run_after_build {
-            match export_options.target_platform {
-                TargetPlatform::PC => pc::run_build(&destination_folder, package_name),
-                TargetPlatform::WebAssembly => wasm::run_build(&destination_folder),
-                TargetPlatform::Android => android::run_build(package_name, &destination_folder),
-            }
-        }
-
-        if export_options.open_destination_folder {
-            Log::verify(open::that_detached(destination_folder));
-        }
-    }
-
-    Ok(())
-}
-
-fn make_title_text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_title_text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<Text> {
     TextBuilder::new(
         WidgetBuilder::new()
             .on_row(row)
@@ -311,6 +107,7 @@ impl ExportWindow {
         let log_scroll_viewer;
         let target_platform_list;
         let export_options = ExportOptions::default();
+        let build_targets = vec![export_options.build_target.clone()];
 
         let platform_section = StackPanelBuilder::new(
             WidgetBuilder::new()
@@ -351,6 +148,7 @@ impl ExportWindow {
                                 ))
                                 .with_selected(i == 0)
                                 .build(ctx)
+                                .to_base()
                             })
                             .collect::<Vec<_>>(),
                     )
@@ -374,8 +172,7 @@ impl ExportWindow {
                     build_targets_selector =
                         DropdownListBuilder::new(WidgetBuilder::new().on_column(1))
                             .with_items(
-                                export_options
-                                    .build_targets
+                                build_targets
                                     .iter()
                                     .map(|opt| make_dropdown_list_option(ctx, opt))
                                     .collect::<Vec<_>>(),
@@ -408,12 +205,13 @@ impl ExportWindow {
                                 PropertyEditorDefinitionContainer::with_default_editors(),
                             ),
                             environment: None,
-                            sync_flag: 1,
                             layer_index: 0,
                             generate_property_string_values: true,
                             filter: Default::default(),
                             name_column_width: 150.0,
+                            hide_name_column: false,
                             base_path: Default::default(),
+                            has_parent_object: false,
                         });
 
                         inspector = InspectorBuilder::new(WidgetBuilder::new())
@@ -530,34 +328,39 @@ impl ExportWindow {
             export_options,
             inspector,
             build_targets_selector,
+            child_processes: Default::default(),
+            build_targets,
         }
     }
 
     pub fn open(&self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::open_modal(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
+    }
+
+    fn kill_child_processes(&mut self) {
+        for mut child_process in self.child_processes.drain(..) {
+            let _ = child_process.kill();
+        }
     }
 
     pub fn close_and_destroy(&mut self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::close(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::remove(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.window, WindowMessage::Close);
+        ui.send(self.window, WidgetMessage::Remove);
         self.log_message_receiver = None;
         self.build_result_receiver = None;
+        self.kill_child_processes();
     }
 
     fn clear_log(&self, ui: &UserInterface) {
-        for child in ui.node(self.log).children() {
-            ui.send_message(WidgetMessage::remove(*child, MessageDirection::ToWidget));
+        for child in ui[self.log].children() {
+            ui.send(*child, WidgetMessage::Remove);
         }
     }
 
@@ -567,9 +370,12 @@ impl ExportWindow {
         ui: &mut UserInterface,
         sender: &MessageSender,
         resource_manager: ResourceManager,
+        settings: &BuildSettings,
     ) {
         if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.export {
+                self.kill_child_processes();
+
                 let (tx, rx) = mpsc::channel();
                 Log::add_listener(tx);
                 self.log_message_receiver = Some(rx);
@@ -577,11 +383,7 @@ impl ExportWindow {
                 let (tx, rx) = mpsc::channel();
                 self.build_result_receiver = Some(rx);
 
-                ui.send_message(WidgetMessage::enabled(
-                    self.export,
-                    MessageDirection::ToWidget,
-                    false,
-                ));
+                ui.send(self.export, WidgetMessage::Enabled(false));
 
                 self.clear_log(ui);
 
@@ -592,77 +394,70 @@ impl ExportWindow {
                     std::thread::Builder::new()
                         .name("ExportWorkerThread".to_string())
                         .spawn(move || {
-                            tx.send(export(export_options, cancel_flag, resource_manager))
-                                .expect("Channel must exist!")
+                            tx.send(fyrox_build_tools::export::export(
+                                export_options,
+                                cancel_flag,
+                                resource_manager,
+                            ))
+                            .expect("Channel must exist!")
                         }),
                 );
             } else if message.destination() == self.cancel {
                 self.close_and_destroy(ui);
             }
-        } else if let Some(ListViewMessage::SelectionChanged(selection)) = message.data() {
-            if message.destination() == self.target_platform_list
-                && message.direction() == MessageDirection::FromWidget
-            {
-                if let Some(index) = selection.first().cloned() {
-                    match index {
-                        0 => self.export_options.target_platform = TargetPlatform::PC,
-                        1 => self.export_options.target_platform = TargetPlatform::WebAssembly,
-                        2 => self.export_options.target_platform = TargetPlatform::Android,
-                        _ => Log::err("Unhandled platform index!"),
-                    }
-
-                    // TODO: move this to settings.
-                    let build_targets = match self.export_options.target_platform {
-                        TargetPlatform::PC => vec!["default".to_string()],
-                        TargetPlatform::WebAssembly => vec!["wasm32-unknown-unknown".to_string()],
-                        TargetPlatform::Android => {
-                            vec![
-                                "armv7-linux-androideabi".to_string(),
-                                "aarch64-linux-android".to_string(),
-                            ]
-                        }
-                    };
-
-                    self.export_options.build_targets = build_targets;
-
-                    let ui_items = self
-                        .export_options
-                        .build_targets
-                        .iter()
-                        .map(|name| make_dropdown_list_option(&mut ui.build_ctx(), name))
-                        .collect::<Vec<_>>();
-
-                    ui.send_message(DropdownListMessage::items(
-                        self.build_targets_selector,
-                        MessageDirection::ToWidget,
-                        ui_items,
-                    ));
+        } else if let Some(ListViewMessage::Selection(selection)) =
+            message.data_from(self.target_platform_list)
+        {
+            if let Some(index) = selection.first().cloned() {
+                match index {
+                    0 => self.export_options.target_platform = TargetPlatform::PC,
+                    1 => self.export_options.target_platform = TargetPlatform::WebAssembly,
+                    2 => self.export_options.target_platform = TargetPlatform::Android,
+                    _ => Log::err("Unhandled platform index!"),
                 }
-            }
-        } else if let Some(InspectorMessage::PropertyChanged(args)) = message.data() {
-            if message.destination() == self.inspector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                PropertyAction::from_field_kind(&args.value).apply(
-                    &args.path(),
-                    &mut self.export_options,
-                    &mut |result| {
-                        Log::verify(result);
-                    },
+
+                let build_targets = match self.export_options.target_platform {
+                    TargetPlatform::PC => &settings.pc_build_targets,
+                    TargetPlatform::WebAssembly => &settings.wasm_build_targets,
+                    TargetPlatform::Android => &settings.android_build_targets,
+                };
+
+                if let Some(first_build_target) = build_targets.first().cloned() {
+                    self.export_options.build_target = first_build_target;
+                }
+                self.build_targets = build_targets.clone();
+
+                let ui_items = self
+                    .build_targets
+                    .iter()
+                    .map(|name| make_dropdown_list_option(&mut ui.build_ctx(), name))
+                    .collect::<Vec<_>>();
+
+                ui.send(
+                    self.build_targets_selector,
+                    DropdownListMessage::Items(ui_items),
                 );
-                sender.send(Message::ForceSync);
             }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
-            if message.destination() == self.build_targets_selector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.export_options.selected_build_target = *index;
-            }
+        } else if let Some(InspectorMessage::PropertyChanged(args)) =
+            message.data_from(self.inspector)
+        {
+            PropertyAction::from_field_action(&args.action).apply(
+                &args.path(),
+                &mut self.export_options,
+                &mut |result| {
+                    Log::verify(result);
+                },
+            );
+            sender.send(Message::ForceSync);
+        } else if let Some(DropdownListMessage::Selection(Some(index))) =
+            message.data_from(self.build_targets_selector)
+        {
+            self.export_options.build_target = self.build_targets[*index].clone();
         }
     }
 
     pub fn sync_to_model(&self, ui: &mut UserInterface) {
-        if let Some(inspector) = ui.try_get_of_type::<Inspector>(self.inspector) {
+        if let Ok(inspector) = ui.try_get(self.inspector) {
             let ctx = inspector.context().clone();
             if let Err(sync_errors) = ctx.sync(
                 &self.export_options,
@@ -697,33 +492,22 @@ impl ExportWindow {
                 .with_text(format!("> {}", message.content))
                 .build(ctx);
 
-                ui.send_message(WidgetMessage::link(
-                    entry,
-                    MessageDirection::ToWidget,
-                    self.log,
-                ));
-
-                ui.send_message(ScrollViewerMessage::scroll_to_end(
-                    self.log_scroll_viewer,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(entry, WidgetMessage::link_with(self.log));
+                ui.send(self.log_scroll_viewer, ScrollViewerMessage::ScrollToEnd);
             }
         }
 
         if let Some(receiver) = self.build_result_receiver.as_ref() {
             if let Ok(result) = receiver.try_recv() {
                 match result {
-                    Ok(_) => {
+                    Ok(mut output) => {
                         Log::info("Build finished!");
+                        self.child_processes.append(&mut output.child_processes);
                     }
                     Err(err) => Log::err(format!("Build failed! Reason: {err}")),
                 }
 
-                ui.send_message(WidgetMessage::enabled(
-                    self.export,
-                    MessageDirection::ToWidget,
-                    true,
-                ));
+                ui.send(self.export, WidgetMessage::Enabled(true));
             }
         }
     }

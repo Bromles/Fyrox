@@ -19,30 +19,33 @@
 // SOFTWARE.
 
 use crate::{
-    asset::item::AssetItem,
+    asset::{
+        item::AssetItem, item::AssetItemMessage, preview::cache::IconRequest,
+        selector::AssetSelectorMixin,
+    },
     fyrox::{
         asset::{manager::ResourceManager, state::LoadError, Resource, TypedResourceData},
         core::{
-            color::Color, parking_lot::Mutex, pool::Handle, reflect::prelude::*,
-            type_traits::prelude::*, uuid::uuid, visitor::prelude::*, PhantomDataSendSync,
+            color::Color, log::Log, parking_lot::Mutex, pool::Handle, reflect::prelude::*,
+            uuid::uuid, visitor::prelude::*, PhantomDataSendSync,
         },
-        graph::BaseSceneGraph,
+        graph::SceneGraph,
         gui::{
             brush::Brush,
-            button::{ButtonBuilder, ButtonMessage},
-            define_constructor,
+            button::{Button, ButtonMessage},
             draw::{CommandTexture, Draw, DrawingContext},
             grid::{Column, GridBuilder, Row},
-            image::ImageBuilder,
+            image::{Image, ImageBuilder, ImageMessage},
             inspector::{
                 editors::{
                     PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
                     PropertyEditorMessageContext, PropertyEditorTranslationContext,
                 },
-                FieldKind, InspectorError, PropertyChanged,
+                FieldAction, InspectorError, PropertyChanged,
             },
-            message::{MessageDirection, UiMessage},
-            text::{TextBuilder, TextMessage},
+            message::{MessageData, MessageDirection, UiMessage},
+            text::{Text, TextBuilder, TextMessage},
+            utils::{make_asset_preview_tooltip, ImageButtonBuilder},
             widget::{Widget, WidgetBuilder, WidgetMessage},
             BuildContext, Control, Thickness, UiNode, UserInterface, VerticalAlignment,
         },
@@ -50,14 +53,14 @@ use crate::{
     load_image,
     message::MessageSender,
     plugins::inspector::EditorEnvironment,
-    Message,
+    utils, Message,
 };
 use std::{
     any::TypeId,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
     path::Path,
-    sync::Arc,
+    sync::{mpsc::Sender, Arc},
 };
 
 fn resource_path<T>(resource_manager: &ResourceManager, resource: &Option<Resource<T>>) -> String
@@ -81,6 +84,7 @@ where
 {
     Value(Option<Resource<T>>),
 }
+impl<T: TypedResourceData> MessageData for ResourceFieldMessage<T> {}
 
 impl<T: TypedResourceData> Clone for ResourceFieldMessage<T> {
     fn clone(&self) -> Self {
@@ -103,13 +107,6 @@ where
     }
 }
 
-impl<T> ResourceFieldMessage<T>
-where
-    T: TypedResourceData,
-{
-    define_constructor!(ResourceFieldMessage:Value => fn value(Option<Resource<T>>), layout: false);
-}
-
 pub type ResourceLoaderCallback<T> = Arc<
     Mutex<
         dyn for<'a> Fn(&'a ResourceManager, &'a Path) -> Option<Result<Resource<T>, LoadError>>
@@ -117,24 +114,27 @@ pub type ResourceLoaderCallback<T> = Arc<
     >,
 >;
 
-#[derive(Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "5179b3b9-855f-43a6-b23a-831129fee1cf"
+)]
 pub struct ResourceField<T>
 where
     T: TypedResourceData,
 {
     widget: Widget,
-    name: Handle<UiNode>,
-    #[visit(skip)]
-    #[reflect(hidden)]
-    resource_manager: ResourceManager,
+    name: Handle<Text>,
+    selector_mixin: AssetSelectorMixin<T>,
     #[visit(skip)]
     #[reflect(hidden)]
     resource: Option<Resource<T>>,
-    locate: Handle<UiNode>,
+    locate: Handle<Button>,
     #[visit(skip)]
     #[reflect(hidden)]
     sender: MessageSender,
+    image: Handle<Image>,
+    image_preview: Handle<Image>,
 }
 
 impl<T> Debug for ResourceField<T>
@@ -154,10 +154,12 @@ where
         Self {
             widget: self.widget.clone(),
             name: self.name,
-            resource_manager: self.resource_manager.clone(),
+            selector_mixin: self.selector_mixin.clone(),
             resource: self.resource.clone(),
             locate: self.locate,
             sender: self.sender.clone(),
+            image: self.image,
+            image_preview: self.image_preview,
         }
     }
 }
@@ -179,12 +181,6 @@ where
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.widget
-    }
-}
-
-impl<T: TypedResourceData> TypeUuidProvider for ResourceField<T> {
-    fn type_uuid() -> Uuid {
-        uuid!("5179b3b9-855f-43a6-b23a-831129fee1cf")
     }
 }
 
@@ -212,38 +208,64 @@ where
             if message.destination() == self.handle() {
                 if let Some(item) = ui.node(*dropped).cast::<AssetItem>() {
                     if let Some(value) = item.resource::<T>() {
-                        ui.send_message(ResourceFieldMessage::value(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                            Some(value),
-                        ));
+                        ui.send(self.handle(), ResourceFieldMessage::Value(Some(value)));
                     }
                 }
             }
         } else if let Some(ResourceFieldMessage::Value(resource)) = message.data() {
-            if &self.resource != resource
-                && message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
+            if &self.resource != resource && message.is_for(self.handle()) {
                 self.resource.clone_from(resource);
 
-                ui.send_message(TextMessage::text(
+                ui.send(
                     self.name,
-                    MessageDirection::ToWidget,
-                    resource_path(&self.resource_manager, resource),
-                ));
+                    TextMessage::Text(resource_path(
+                        &self.selector_mixin.resource_manager,
+                        resource,
+                    )),
+                );
 
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
             if message.destination() == self.locate {
                 if let Some(resource) = self.resource.as_ref() {
-                    if let Some(path) = self.resource_manager.resource_path(resource.as_ref()) {
+                    if let Some(path) = self
+                        .selector_mixin
+                        .resource_manager
+                        .resource_path(resource.as_ref())
+                    {
                         self.sender.send(Message::ShowInAssetBrowser(path));
                     }
                 }
             }
+        } else if let Some(AssetItemMessage::Icon {
+            texture,
+            flip_y,
+            color,
+        }) = message.data_for(self.handle)
+        {
+            for widget in [self.image, self.image_preview] {
+                ui.send(widget, ImageMessage::Texture(texture.clone()));
+                ui.send(widget, ImageMessage::Flip(*flip_y));
+                ui.send(
+                    widget,
+                    WidgetMessage::Background(Brush::Solid(*color).into()),
+                )
+            }
         }
+
+        self.selector_mixin
+            .handle_ui_message(self.resource.as_ref(), ui, message);
+    }
+
+    fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
+        self.selector_mixin
+            .preview_ui_message(ui, message, |resource| {
+                UiMessage::for_widget(
+                    self.handle,
+                    ResourceFieldMessage::Value(resource.try_cast::<T>()),
+                )
+            });
     }
 }
 
@@ -276,54 +298,63 @@ where
     pub fn build(
         self,
         ctx: &mut BuildContext,
+        icon_request_sender: Sender<IconRequest>,
         resource_manager: ResourceManager,
-    ) -> Handle<UiNode> {
+    ) -> Handle<ResourceField<T>> {
+        let (image_preview_tooltip, image_preview) = make_asset_preview_tooltip(None, ctx);
+
         let name;
         let locate;
+        let select;
+        let image;
         let field = ResourceField {
             widget: self
                 .widget_builder
+                .with_preview_messages(true)
                 .with_child(
                     GridBuilder::new(
                         WidgetBuilder::new()
-                            .with_child(
-                                ImageBuilder::new(
+                            .with_child({
+                                image = ImageBuilder::new(
                                     WidgetBuilder::new()
                                         .on_column(0)
                                         .with_width(16.0)
                                         .with_height(16.0)
-                                        .with_margin(Thickness::uniform(1.0)),
+                                        .with_margin(Thickness::uniform(1.0))
+                                        .with_tooltip(image_preview_tooltip),
                                 )
-                                .with_opt_texture(load_image!(
-                                    "../../../../resources/sound_source.png"
-                                ))
-                                .build(ctx),
-                            )
+                                .with_sync_with_texture_size(false)
+                                .build(ctx);
+                                image
+                            })
                             .with_child({
                                 name = TextBuilder::new(
                                     WidgetBuilder::new()
                                         .on_column(1)
-                                        .with_margin(Thickness::uniform(1.0))
-                                        .with_vertical_alignment(VerticalAlignment::Center),
+                                        .with_margin(Thickness::uniform(3.0)),
                                 )
+                                .with_vertical_text_alignment(VerticalAlignment::Center)
                                 .with_text(resource_path(&resource_manager, &self.resource))
                                 .build(ctx);
                                 name
                             })
                             .with_child({
-                                locate = ButtonBuilder::new(
-                                    WidgetBuilder::new()
-                                        .with_width(24.0)
-                                        .on_column(2)
-                                        .with_margin(Thickness::uniform(1.0)),
-                                )
-                                .with_text("<<")
-                                .build(ctx);
+                                locate = ImageButtonBuilder::default()
+                                    .on_column(2)
+                                    .with_image_size(14.0)
+                                    .with_image(load_image!("../../../../resources/locate.png"))
+                                    .with_tooltip("Show In Asset Browser")
+                                    .build_button(ctx);
                                 locate
+                            })
+                            .with_child({
+                                select = utils::make_pick_button(3, ctx);
+                                select
                             }),
                     )
                     .add_column(Column::auto())
                     .add_column(Column::stretch())
+                    .add_column(Column::auto())
                     .add_column(Column::auto())
                     .add_row(Row::auto())
                     .build(ctx),
@@ -331,13 +362,29 @@ where
                 .with_allow_drop(true)
                 .build(ctx),
             name,
-            resource_manager,
-            resource: self.resource,
+            selector_mixin: AssetSelectorMixin::new(
+                select,
+                icon_request_sender.clone(),
+                resource_manager,
+            ),
+            resource: self.resource.clone(),
             locate,
             sender: self.sender,
+            image,
+            image_preview,
         };
 
-        ctx.add_node(UiNode::new(field))
+        let handle = ctx.add(field);
+
+        if let Some(resource) = self.resource.as_ref() {
+            Log::verify(icon_request_sender.send(IconRequest {
+                widget_handle: handle.to_base(),
+                resource: resource.clone().into_untyped(),
+                force_update: false,
+            }));
+        }
+
+        handle
     }
 }
 
@@ -385,11 +432,15 @@ where
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Option<Resource<T>>>()?;
         let environment = EditorEnvironment::try_get_from(&ctx.environment)?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: ResourceFieldBuilder::new(WidgetBuilder::new(), self.sender.clone())
+        Ok(PropertyEditorInstance::simple(
+            ResourceFieldBuilder::new(WidgetBuilder::new(), self.sender.clone())
                 .with_resource(value.clone())
-                .build(ctx.build_context, environment.resource_manager.clone()),
-        })
+                .build(
+                    ctx.build_context,
+                    environment.icon_request_sender.clone(),
+                    environment.resource_manager.clone(),
+                ),
+        ))
     }
 
     fn create_message(
@@ -398,10 +449,9 @@ where
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Option<Resource<T>>>()?;
 
-        Ok(Some(ResourceFieldMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            ResourceFieldMessage::Value(value.clone()),
         )))
     }
 
@@ -412,7 +462,7 @@ where
             {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }
@@ -427,13 +477,16 @@ mod test {
     use fyrox::asset::manager::ResourceManager;
     use fyrox::resource::model::Model;
     use fyrox::{gui::test::test_widget_deletion, gui::widget::WidgetBuilder};
+    use std::sync::mpsc::channel;
     use std::sync::Arc;
 
     #[test]
     fn test_deletion() {
+        let (sender, _) = channel();
         test_widget_deletion(|ctx| {
             ResourceFieldBuilder::<Model>::new(WidgetBuilder::new(), Default::default()).build(
                 ctx,
+                sender,
                 ResourceManager::new(Arc::new(FsResourceIo), Default::default()),
             )
         });

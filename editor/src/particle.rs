@@ -18,6 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use fyrox::gui::button::Button;
+use fyrox::gui::check_box::CheckBox;
+use fyrox::gui::grid::Grid;
+use fyrox::gui::numeric::NumericUpDown;
+use fyrox::gui::stack_panel::StackPanel;
 use fyrox::gui::widget::WidgetMessage;
 
 use crate::fyrox::graph::SceneGraph;
@@ -28,34 +33,34 @@ use crate::fyrox::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::{CheckBoxBuilder, CheckBoxMessage},
         grid::{Column, GridBuilder, Row},
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         numeric::{NumericUpDownBuilder, NumericUpDownMessage},
         text::TextBuilder,
         widget::WidgetBuilder,
-        BuildContext, Thickness, UiNode, VerticalAlignment,
+        BuildContext, Thickness, VerticalAlignment,
     },
     scene::{node::Node, particle_system::ParticleSystem},
 };
 use crate::{
     scene::{GameScene, Selection},
-    send_sync_message, Message, FIXED_TIMESTEP,
+    Message, FIXED_TIMESTEP,
 };
 
 pub struct ParticleSystemPreviewControlPanel {
-    pub root_widget: Handle<UiNode>,
-    preview: Handle<UiNode>,
-    play: Handle<UiNode>,
-    pause: Handle<UiNode>,
-    stop: Handle<UiNode>,
-    rewind: Handle<UiNode>,
-    time: Handle<UiNode>,
-    set_time: Handle<UiNode>,
+    pub root_widget: Handle<Grid>,
+    preview: Handle<CheckBox>,
+    play: Handle<Button>,
+    pause: Handle<Button>,
+    stop: Handle<Button>,
+    rewind: Handle<Button>,
+    time: Handle<NumericUpDown<f32>>,
+    set_time: Handle<Button>,
     particle_systems_state: Vec<(Handle<Node>, Node)>,
     desired_playback_time: f32,
 }
 
 impl ParticleSystemPreviewControlPanel {
-    pub fn new(inspector_head: Handle<UiNode>, ctx: &mut BuildContext) -> Self {
+    pub fn new(inspector_head: Handle<StackPanel>, ctx: &mut BuildContext) -> Self {
         let preview;
         let play;
         let pause;
@@ -194,11 +199,8 @@ impl ParticleSystemPreviewControlPanel {
         .add_column(Column::stretch())
         .build(ctx);
 
-        ctx.send_message(WidgetMessage::link(
-            root_widget,
-            MessageDirection::ToWidget,
-            inspector_head,
-        ));
+        ctx.inner()
+            .send(root_widget, WidgetMessage::link_with(inspector_head));
 
         Self {
             root_widget,
@@ -218,32 +220,33 @@ impl ParticleSystemPreviewControlPanel {
         &mut self,
         message: &Message,
         editor_selection: &Selection,
-        game_scene: &mut GameScene,
+        mut game_scene: Option<&mut GameScene>,
         engine: &mut Engine,
     ) {
-        if let Message::DoCommand(_)
-        | Message::UndoCurrentSceneCommand
-        | Message::RedoCurrentSceneCommand = message
-        {
-            self.leave_preview_mode(game_scene, engine);
+        if let Some(game_scene) = game_scene.as_mut() {
+            if let Message::DoCommand(_)
+            | Message::UndoCurrentSceneCommand
+            | Message::RedoCurrentSceneCommand = message
+            {
+                self.leave_preview_mode(game_scene, engine);
+            }
         }
 
         if let Message::SelectionChanged { .. } = message {
-            let scene = &engine.scenes[game_scene.scene];
-            if let Some(selection) = editor_selection.as_graph() {
-                let any_particle_system_selected = selection
-                    .nodes
-                    .iter()
-                    .any(|n| scene.graph.try_get_of_type::<ParticleSystem>(*n).is_some());
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(WidgetMessage::visibility(
-                        self.root_widget,
-                        MessageDirection::ToWidget,
-                        any_particle_system_selected,
-                    ));
-            }
+            let any_particle_system_selected = if let Some(game_scene) = game_scene {
+                let scene = &engine.scenes[game_scene.scene];
+                editor_selection.as_graph().is_some_and(|s| {
+                    s.nodes
+                        .iter()
+                        .any(|n| scene.graph.try_get_of_type::<ParticleSystem>(*n).is_ok())
+                })
+            } else {
+                false
+            };
+            engine.user_interfaces.first().send(
+                self.root_widget,
+                WidgetMessage::Visibility(any_particle_system_selected),
+            );
         }
     }
 
@@ -264,7 +267,7 @@ impl ParticleSystemPreviewControlPanel {
                 if scene
                     .graph
                     .try_get_of_type::<ParticleSystem>(node_handle)
-                    .is_some()
+                    .is_ok()
                 {
                     self.particle_systems_state
                         .push((node_handle, scene.graph[node_handle].clone_box()));
@@ -284,11 +287,10 @@ impl ParticleSystemPreviewControlPanel {
 
             assert!(node_overrides.remove(&particle_system_handle));
         }
-
-        send_sync_message(
-            engine.user_interfaces.first(),
-            CheckBoxMessage::checked(self.preview, MessageDirection::ToWidget, Some(false)),
-        );
+        engine
+            .user_interfaces
+            .first()
+            .send_sync(self.preview, CheckBoxMessage::Check(Some(false)));
     }
 
     pub fn is_in_preview_mode(&self) -> bool {
@@ -307,7 +309,7 @@ impl ParticleSystemPreviewControlPanel {
                 let scene = &mut engine.scenes[game_scene.scene];
 
                 for &node in &selection.nodes {
-                    if let Some(particle_system) =
+                    if let Ok(particle_system) =
                         scene.graph.try_get_mut_of_type::<ParticleSystem>(node)
                     {
                         if message.destination() == self.play {
@@ -324,23 +326,18 @@ impl ParticleSystemPreviewControlPanel {
                         }
                     }
                 }
-            } else if let Some(CheckBoxMessage::Check(Some(value))) = message.data() {
-                if message.destination() == self.preview
-                    && message.direction() == MessageDirection::FromWidget
-                {
-                    if *value {
-                        self.enter_preview_mode(editor_selection, game_scene, engine);
-                    } else {
-                        self.leave_preview_mode(game_scene, engine);
-                    }
-                }
-            } else if let Some(NumericUpDownMessage::Value(desired_playback_time)) = message.data()
+            } else if let Some(CheckBoxMessage::Check(Some(value))) =
+                message.data_from(self.preview)
             {
-                if message.destination() == self.time
-                    && message.direction() == MessageDirection::FromWidget
-                {
-                    self.desired_playback_time = *desired_playback_time;
+                if *value {
+                    self.enter_preview_mode(editor_selection, game_scene, engine);
+                } else {
+                    self.leave_preview_mode(game_scene, engine);
                 }
+            } else if let Some(NumericUpDownMessage::Value(desired_playback_time)) =
+                message.data_from(self.time)
+            {
+                self.desired_playback_time = *desired_playback_time;
             }
         }
     }

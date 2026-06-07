@@ -33,7 +33,7 @@ use crate::{
         Engine, EngineInitParams, GraphicsContext, GraphicsContextParams, SerializationContext,
     },
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
+    event_loop::{ControlFlow, EventLoop},
     plugin::Plugin,
     utils::translate_event,
     window::WindowAttributes,
@@ -43,11 +43,13 @@ use fyrox_core::pool::Handle;
 use fyrox_resource::io::FsResourceIo;
 use fyrox_ui::constructor::new_widget_constructor_container;
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::time::Duration;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
+use winit::event_loop::ActiveEventLoop;
 
 #[derive(Parser, Debug, Default)]
 #[clap(author, version, about, long_about = None)]
@@ -102,6 +104,7 @@ impl Executor {
             serialization_context,
             task_pool,
             widget_constructors: Arc::new(new_widget_constructor_container()),
+            dyn_type_constructors: Default::default(),
         })
         .unwrap();
 
@@ -130,6 +133,7 @@ impl Executor {
                 vsync: true,
                 msaa_sample_count: None,
                 graphics_server_constructor: Default::default(),
+                named_objects: false,
             },
         )
     }
@@ -205,6 +209,9 @@ impl Executor {
 
     /// Runs the executor - starts your game.
     pub fn run(self) {
+        Log::info("Initializing resource registry.");
+        self.engine.resource_manager.update_or_load_registry();
+
         let engine = self.engine;
         let event_loop = self.event_loop;
         let throttle_threshold = self.throttle_threshold;
@@ -262,15 +269,17 @@ fn run_headless(
     let mut last_throttle_frame_number = 0usize;
     let is_running = Cell::new(true);
 
-    engine.enable_plugins(
-        override_scene,
-        true,
-        ApplicationLoopController::Headless {
-            running: &is_running,
-        },
-    );
-
     while is_running.get() {
+        if !engine.plugins_enabled && engine.resource_manager.registry_is_loaded() {
+            engine.enable_plugins(
+                override_scene,
+                true,
+                ApplicationLoopController::Headless {
+                    running: &is_running,
+                },
+            );
+        }
+
         register_scripted_scenes(&mut engine);
 
         game_loop_iteration(
@@ -312,21 +321,51 @@ fn run_normal(
     let mut frame_counter = 0usize;
     let mut last_throttle_frame_number = 0usize;
 
-    engine.enable_plugins(
-        override_scene,
-        true,
-        ApplicationLoopController::WindowTarget(&event_loop),
-    );
+    let override_scene = override_scene.map(|s| s.to_string());
 
-    run_executor(event_loop, move |event, window_target| {
-        window_target.set_control_flow(ControlFlow::Wait);
+    enum GraphicsEvent {
+        GraphicsContextInitialized,
+        GraphicsContextDestroyed,
+    }
 
-        engine.handle_os_event_by_plugins(
+    let mut graphics_event_queue = VecDeque::new();
+
+    run_executor(event_loop, move |event, active_event_loop| {
+        active_event_loop.set_control_flow(ControlFlow::Wait);
+
+        engine.handle_os_events(
             &event,
             fixed_time_step,
-            ApplicationLoopController::WindowTarget(window_target),
+            ApplicationLoopController::ActiveEventLoop(active_event_loop),
             &mut lag,
         );
+
+        if !engine.plugins_enabled && engine.resource_manager.registry_is_loaded() {
+            engine.enable_plugins(
+                override_scene.as_deref(),
+                true,
+                ApplicationLoopController::ActiveEventLoop(active_event_loop),
+            );
+
+            while let Some(graphics_event) = graphics_event_queue.pop_front() {
+                match graphics_event {
+                    GraphicsEvent::GraphicsContextInitialized => {
+                        engine.handle_graphics_context_created_by_plugins(
+                            fixed_time_step,
+                            ApplicationLoopController::ActiveEventLoop(active_event_loop),
+                            &mut lag,
+                        );
+                    }
+                    GraphicsEvent::GraphicsContextDestroyed => {
+                        engine.handle_graphics_context_destroyed_by_plugins(
+                            fixed_time_step,
+                            ApplicationLoopController::ActiveEventLoop(active_event_loop),
+                            &mut lag,
+                        );
+                    }
+                }
+            }
+        }
 
         let scripted_scenes = register_scripted_scenes(&mut engine);
         for scripted_scene in scripted_scenes {
@@ -336,30 +375,38 @@ fn run_normal(
         match event {
             Event::Resumed => {
                 engine
-                    .initialize_graphics_context(window_target)
+                    .initialize_graphics_context(active_event_loop)
                     .expect("Unable to initialize graphics context!");
 
-                engine.handle_graphics_context_created_by_plugins(
-                    fixed_time_step,
-                    ApplicationLoopController::WindowTarget(window_target),
-                    &mut lag,
-                );
+                if engine.plugins_enabled {
+                    engine.handle_graphics_context_created_by_plugins(
+                        fixed_time_step,
+                        ApplicationLoopController::ActiveEventLoop(active_event_loop),
+                        &mut lag,
+                    );
+                } else {
+                    graphics_event_queue.push_back(GraphicsEvent::GraphicsContextInitialized);
+                }
             }
             Event::Suspended => {
                 engine
                     .destroy_graphics_context()
                     .expect("Unable to destroy graphics context!");
 
-                engine.handle_graphics_context_destroyed_by_plugins(
-                    fixed_time_step,
-                    ApplicationLoopController::WindowTarget(window_target),
-                    &mut lag,
-                );
+                if engine.plugins_enabled {
+                    engine.handle_graphics_context_destroyed_by_plugins(
+                        fixed_time_step,
+                        ApplicationLoopController::ActiveEventLoop(active_event_loop),
+                        &mut lag,
+                    );
+                } else {
+                    graphics_event_queue.push_back(GraphicsEvent::GraphicsContextDestroyed);
+                }
             }
             Event::AboutToWait => {
                 game_loop_iteration(
                     &mut engine,
-                    ApplicationLoopController::WindowTarget(window_target),
+                    ApplicationLoopController::ActiveEventLoop(active_event_loop),
                     &mut previous,
                     &mut lag,
                     fixed_time_step,
@@ -371,7 +418,7 @@ fn run_normal(
             }
             Event::WindowEvent { event, .. } => {
                 match event {
-                    WindowEvent::CloseRequested => window_target.exit(),
+                    WindowEvent::CloseRequested => active_event_loop.exit(),
                     WindowEvent::Resized(size) => {
                         if let Err(e) = engine.set_frame_size(size.into()) {
                             Log::writeln(
@@ -383,7 +430,7 @@ fn run_normal(
                     WindowEvent::RedrawRequested => {
                         engine.handle_before_rendering_by_plugins(
                             fixed_time_step,
-                            ApplicationLoopController::WindowTarget(window_target),
+                            ApplicationLoopController::ActiveEventLoop(active_event_loop),
                             &mut lag,
                         );
 
@@ -471,9 +518,10 @@ fn game_loop_iteration(
     }
 }
 
+#[allow(deprecated)] // TODO
 fn run_executor<F>(event_loop: EventLoop<()>, callback: F)
 where
-    F: FnMut(Event<()>, &EventLoopWindowTarget<()>) + 'static,
+    F: FnMut(Event<()>, &ActiveEventLoop) + 'static,
 {
     #[cfg(target_arch = "wasm32")]
     {

@@ -19,18 +19,7 @@
 // SOFTWARE.
 
 use crate::{
-    border::BorderBuilder,
-    core::{
-        combine_uuids,
-        pool::Handle,
-        reflect::prelude::*,
-        reflect::Reflect,
-        uuid::{uuid, Uuid},
-        visitor::prelude::*,
-        TypeUuidProvider,
-    },
-    decorator::DecoratorBuilder,
-    define_constructor,
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
     dropdown_list::{DropdownList, DropdownListBuilder, DropdownListMessage},
     inspector::{
         editors::{
@@ -38,19 +27,16 @@ use crate::{
             PropertyEditorDefinitionContainer, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        make_expander_container, FieldKind, Inspector, InspectorBuilder, InspectorContext,
-        InspectorEnvironment, InspectorError, InspectorMessage, PropertyChanged, PropertyFilter,
+        make_expander_container, FieldAction, Inspector, InspectorBuilder, InspectorContext,
+        InspectorContextArgs, InspectorEnvironment, InspectorError, InspectorMessage,
+        PropertyChanged, PropertyFilter,
     },
-    message::{MessageDirection, UiMessage},
-    text::TextBuilder,
+    message::{MessageData, UiMessage},
+    utils::make_dropdown_list_option,
     widget::{Widget, WidgetBuilder},
-    BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
-    VerticalAlignment,
+    BuildContext, Control, Thickness, UiNode, UserInterface,
 };
-
-use crate::inspector::InspectorContextArgs;
-use fyrox_core::ComponentProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::{
     any::TypeId,
     fmt::{Debug, Formatter},
@@ -62,27 +48,26 @@ use strum::VariantNames;
 
 const LOCAL_SYNC_FLAG: u64 = 0xFF;
 
-pub trait InspectableEnum: Debug + Reflect + Clone + TypeUuidProvider + Send + 'static {}
+pub trait InspectableEnum: Debug + Reflect + Clone + Send + 'static {}
 
-impl<T: Debug + Reflect + Clone + TypeUuidProvider + Send + 'static> InspectableEnum for T {}
+impl<T: Debug + Reflect + Clone + Send + 'static> InspectableEnum for T {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnumPropertyEditorMessage {
     Variant(usize),
     PropertyChanged(PropertyChanged),
 }
+impl MessageData for EnumPropertyEditorMessage {}
 
-impl EnumPropertyEditorMessage {
-    define_constructor!(EnumPropertyEditorMessage:Variant => fn variant(usize), layout: false);
-    define_constructor!(EnumPropertyEditorMessage:PropertyChanged => fn property_changed(PropertyChanged), layout: false);
-}
-
-#[derive(Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "0dbefddc-70fa-45a9-96f0-8fe25f6c1669"
+)]
 pub struct EnumPropertyEditor<T: InspectableEnum> {
     pub widget: Widget,
     pub variant_selector: Handle<UiNode>,
-    pub inspector: Handle<UiNode>,
+    pub inspector: Handle<Inspector>,
     #[visit(skip)]
     #[reflect(hidden)]
     pub definition: EnumPropertyEditorDefinition<T>,
@@ -92,9 +77,6 @@ pub struct EnumPropertyEditor<T: InspectableEnum> {
     #[visit(skip)]
     #[reflect(hidden)]
     pub environment: Option<Arc<dyn InspectorEnvironment>>,
-    #[visit(skip)]
-    #[reflect(hidden)]
-    pub sync_flag: u64,
     #[visit(skip)]
     #[reflect(hidden)]
     pub layer_index: usize,
@@ -110,6 +92,9 @@ pub struct EnumPropertyEditor<T: InspectableEnum> {
     #[visit(skip)]
     #[reflect(hidden)]
     pub base_path: String,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    pub has_parent_object: bool,
 }
 
 impl<T: InspectableEnum> Debug for EnumPropertyEditor<T> {
@@ -127,12 +112,12 @@ impl<T: InspectableEnum> Clone for EnumPropertyEditor<T> {
             definition: self.definition.clone(),
             definition_container: self.definition_container.clone(),
             environment: self.environment.clone(),
-            sync_flag: self.sync_flag,
             layer_index: self.layer_index,
             generate_property_string_values: self.generate_property_string_values,
             filter: self.filter.clone(),
             name_column_width: self.name_column_width,
             base_path: self.base_path.clone(),
+            has_parent_object: self.has_parent_object,
         }
     }
 }
@@ -151,79 +136,45 @@ impl<T: InspectableEnum> DerefMut for EnumPropertyEditor<T> {
     }
 }
 
-impl<T> TypeUuidProvider for EnumPropertyEditor<T>
-where
-    T: InspectableEnum,
-{
-    fn type_uuid() -> Uuid {
-        combine_uuids(
-            uuid!("0dbefddc-70fa-45a9-96f0-8fe25f6c1669"),
-            T::type_uuid(),
-        )
-    }
-}
-
 impl<T: InspectableEnum> Control for EnumPropertyEditor<T> {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(EnumPropertyEditorMessage::Variant(variant)) =
-            message.data::<EnumPropertyEditorMessage>()
-        {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-            {
-                let variant = (self.definition.variant_generator)(*variant);
+        if let Some(EnumPropertyEditorMessage::Variant(variant)) = message.data_for(self.handle) {
+            let variant = (self.definition.variant_generator)(*variant);
 
-                let ctx = InspectorContext::from_object(InspectorContextArgs {
-                    object: &variant,
-                    ctx: &mut ui.build_ctx(),
-                    definition_container: self.definition_container.clone(),
-                    environment: self.environment.clone(),
-                    sync_flag: self.sync_flag,
-                    layer_index: self.layer_index,
-                    generate_property_string_values: self.generate_property_string_values,
-                    filter: self.filter.clone(),
-                    name_column_width: self.name_column_width,
-                    base_path: self.base_path.clone(),
-                });
+            let ctx = InspectorContext::from_object(InspectorContextArgs {
+                object: &variant,
+                ctx: &mut ui.build_ctx(),
+                definition_container: self.definition_container.clone(),
+                environment: self.environment.clone(),
+                layer_index: self.layer_index,
+                generate_property_string_values: self.generate_property_string_values,
+                filter: self.filter.clone(),
+                name_column_width: self.name_column_width,
+                hide_name_column: false,
+                base_path: self.base_path.clone(),
+                has_parent_object: self.has_parent_object,
+            });
 
-                ui.send_message(InspectorMessage::context(
-                    self.inspector,
-                    MessageDirection::ToWidget,
-                    ctx,
-                ));
-
-                ui.send_message(message.reverse());
-            }
+            ui.send(self.inspector, InspectorMessage::Context(ctx));
+            ui.try_send_response(message);
         } else if let Some(InspectorMessage::PropertyChanged(property_changed)) =
-            message.data::<InspectorMessage>()
+            message.data_from(self.inspector)
         {
-            if message.destination() == self.inspector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                ui.send_message(EnumPropertyEditorMessage::property_changed(
-                    self.handle,
-                    MessageDirection::FromWidget,
-                    property_changed.clone(),
-                ))
-            }
+            ui.post(
+                self.handle,
+                EnumPropertyEditorMessage::PropertyChanged(property_changed.clone()),
+            )
         }
     }
 
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
-        if message.direction() == MessageDirection::FromWidget
-            && message.destination() == self.variant_selector
-            && message.flags != LOCAL_SYNC_FLAG
-        {
-            if let Some(DropdownListMessage::SelectionChanged(Some(index))) =
-                message.data::<DropdownListMessage>()
+        if message.flags != LOCAL_SYNC_FLAG {
+            if let Some(DropdownListMessage::Selection(Some(index))) =
+                message.data_from(self.variant_selector)
             {
-                ui.send_message(EnumPropertyEditorMessage::variant(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    *index,
-                ));
+                ui.send(self.handle, EnumPropertyEditorMessage::Variant(*index));
             }
         }
     }
@@ -233,7 +184,6 @@ pub struct EnumPropertyEditorBuilder {
     widget_builder: WidgetBuilder,
     definition_container: Option<Arc<PropertyEditorDefinitionContainer>>,
     environment: Option<Arc<dyn InspectorEnvironment>>,
-    sync_flag: u64,
     variant_selector: Handle<UiNode>,
     layer_index: usize,
     generate_property_string_values: bool,
@@ -246,7 +196,6 @@ impl EnumPropertyEditorBuilder {
             widget_builder,
             definition_container: None,
             environment: None,
-            sync_flag: 0,
             variant_selector: Handle::NONE,
             layer_index: 0,
             generate_property_string_values: false,
@@ -259,11 +208,6 @@ impl EnumPropertyEditorBuilder {
         definition_container: Arc<PropertyEditorDefinitionContainer>,
     ) -> Self {
         self.definition_container = Some(definition_container);
-        self
-    }
-
-    pub fn with_sync_flag(mut self, sync_flag: u64) -> Self {
-        self.sync_flag = sync_flag;
         self
     }
 
@@ -302,7 +246,8 @@ impl EnumPropertyEditorBuilder {
         value: &T,
         name_column_width: f32,
         base_path: String,
-    ) -> Handle<UiNode> {
+        has_parent_object: bool,
+    ) -> Handle<EnumPropertyEditor<T>> {
         let definition_container = self
             .definition_container
             .unwrap_or_else(|| Arc::new(PropertyEditorDefinitionContainer::with_default_editors()));
@@ -312,12 +257,13 @@ impl EnumPropertyEditorBuilder {
             ctx,
             definition_container: definition_container.clone(),
             environment: self.environment.clone(),
-            sync_flag: self.sync_flag,
             layer_index: self.layer_index,
             generate_property_string_values: self.generate_property_string_values,
             filter: self.filter.clone(),
             name_column_width,
+            hide_name_column: false,
             base_path: base_path.clone(),
+            has_parent_object,
         });
 
         let inspector = InspectorBuilder::new(WidgetBuilder::new())
@@ -335,15 +281,15 @@ impl EnumPropertyEditorBuilder {
             definition: definition.clone(),
             definition_container,
             environment: self.environment,
-            sync_flag: self.sync_flag,
             layer_index: self.layer_index,
             generate_property_string_values: self.generate_property_string_values,
             filter: self.filter,
             name_column_width,
             base_path,
+            has_parent_object,
         };
 
-        ctx.add_node(UiNode::new(editor))
+        ctx.add(editor)
     }
 }
 
@@ -431,32 +377,18 @@ where
         .with_items(
             names
                 .into_iter()
-                .map(|name| {
-                    DecoratorBuilder::new(
-                        BorderBuilder::new(
-                            WidgetBuilder::new().with_child(
-                                TextBuilder::new(WidgetBuilder::new())
-                                    .with_vertical_text_alignment(VerticalAlignment::Center)
-                                    .with_horizontal_text_alignment(HorizontalAlignment::Center)
-                                    .with_text(name)
-                                    .build(ctx.build_context),
-                            ),
-                        )
-                        .with_corner_radius(4.0f32.into())
-                        .with_pad_by_corner_radius(false),
-                    )
-                    .build(ctx.build_context)
-                })
+                .map(|name| make_dropdown_list_option(ctx.build_context, &name))
                 .collect::<Vec<_>>(),
         )
         .with_close_on_selection(true)
-        .build(ctx.build_context);
+        .build(ctx.build_context)
+        .to_base();
 
         let editor;
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
-            ctx.property_info.description,
+            ctx.property_info.doc,
             variant_selector,
             {
                 editor = EnumPropertyEditorBuilder::new(WidgetBuilder::new())
@@ -464,7 +396,6 @@ where
                     .with_layer_index(ctx.layer_index + 1)
                     .with_definition_container(ctx.definition_container.clone())
                     .with_environment(ctx.environment.clone())
-                    .with_sync_flag(ctx.sync_flag)
                     .with_generate_property_string_values(ctx.generate_property_string_values)
                     .with_filter(ctx.filter)
                     .build(
@@ -473,14 +404,19 @@ where
                         value,
                         ctx.name_column_width,
                         ctx.base_path.clone(),
+                        ctx.has_parent_object,
                     );
                 editor
             },
             ctx.name_column_width,
+            ctx.hide_name_column,
             ctx.build_context,
         );
 
-        Ok(PropertyEditorInstance::Custom { container, editor })
+        Ok(PropertyEditorInstance::Custom {
+            container,
+            editor: editor.to_base(),
+        })
     }
 
     fn create_message(
@@ -503,19 +439,10 @@ where
 
         let variant_index = (self.index_generator)(value);
         if Some(variant_index) != *variant_selector_ref.selection {
-            let environment = ctx
-                .ui
-                .node(instance_ref.inspector)
-                .cast::<Inspector>()
-                .expect("Must be Inspector!")
-                .context()
-                .environment
-                .clone();
-
-            let mut selection_message = DropdownListMessage::selection(
+            let environment = ctx.ui[instance_ref.inspector].context().environment.clone();
+            let mut selection_message = UiMessage::for_widget(
                 instance_ref.variant_selector,
-                MessageDirection::ToWidget,
-                Some(variant_index),
+                DropdownListMessage::Selection(Some(variant_index)),
             );
             selection_message.flags = LOCAL_SYNC_FLAG;
             ctx.ui.send_message(selection_message);
@@ -527,29 +454,22 @@ where
                 ctx: &mut ctx.ui.build_ctx(),
                 definition_container: ctx.definition_container.clone(),
                 environment,
-                sync_flag: ctx.sync_flag,
                 layer_index: ctx.layer_index + 1,
                 generate_property_string_values: ctx.generate_property_string_values,
                 filter: ctx.filter,
                 name_column_width: ctx.name_column_width,
+                hide_name_column: false,
                 base_path: ctx.base_path.clone(),
+                has_parent_object: ctx.has_parent_object,
             });
 
-            Ok(Some(InspectorMessage::context(
+            Ok(Some(UiMessage::for_widget(
                 inspector,
-                MessageDirection::ToWidget,
-                context,
+                InspectorMessage::Context(context),
             )))
         } else {
             let layer_index = ctx.layer_index;
-            let inspector_ctx = ctx
-                .ui
-                .node(instance_ref.inspector)
-                .cast::<Inspector>()
-                .expect("Must be Inspector!")
-                .context()
-                .clone();
-
+            let inspector_ctx = ctx.ui[instance_ref.inspector].context().clone();
             if let Err(e) = inspector_ctx.sync(
                 value,
                 ctx.ui,
@@ -571,14 +491,12 @@ where
                 EnumPropertyEditorMessage::PropertyChanged(property_changed) => {
                     Some(PropertyChanged {
                         name: ctx.name.to_string(),
-
-                        value: FieldKind::Inspectable(Box::new(property_changed.clone())),
+                        action: FieldAction::InspectableAction(Box::new(property_changed.clone())),
                     })
                 }
                 EnumPropertyEditorMessage::Variant(index) => Some(PropertyChanged {
                     name: ctx.name.to_string(),
-
-                    value: FieldKind::object((self.variant_generator)(*index)),
+                    action: FieldAction::object((self.variant_generator)(*index)),
                 }),
             };
         }

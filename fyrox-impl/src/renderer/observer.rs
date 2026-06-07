@@ -18,24 +18,27 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#![allow(missing_docs)] // TODO
+//! An observer holds all the information required to render a scene from a particular point of view.
+//! Contains all information for rendering, effectively decouples rendering entities from scene
+//! entities. See [`Observer`] docs for more info.
 
-use crate::renderer::utils::CubeMapFaceDescriptor;
 use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector2, Vector3},
         math::{frustum::Frustum, Rect},
         pool::Handle,
     },
+    graphics::gpu_texture::CubeMapFace,
+    renderer::utils::CubeMapFaceDescriptor,
     scene::{
         camera::{Camera, ColorGradingLut, Exposure, PerspectiveProjection, Projection},
         collider::BitMask,
         node::Node,
         probe::ReflectionProbe,
-        Scene,
+        EnvironmentLightingSource, Scene,
     },
 };
-use fyrox_graphics::gpu_texture::CubeMapFace;
+use fyrox_core::color::Color;
 use fyrox_texture::TextureResource;
 
 /// Observer position contains all the data, that describes an observer position in 3D space. It
@@ -52,10 +55,12 @@ pub struct ObserverPosition {
     pub view_matrix: Matrix4<f32>,
     /// Projection matrix of the observer.
     pub projection_matrix: Matrix4<f32>,
+    /// Combination of the view and projection matrix.
     pub view_projection_matrix: Matrix4<f32>,
 }
 
 impl ObserverPosition {
+    /// Creates a new observer position from a scene camera.
     pub fn from_camera(camera: &Camera) -> Self {
         Self {
             translation: camera.global_position(),
@@ -78,6 +83,8 @@ pub struct ObserversCollection {
 }
 
 impl ObserversCollection {
+    /// Creates a new observers collection from a scene. This method collects all observers that
+    /// need to render the scene (which includes camera and reflection probes).
     pub fn from_scene(scene: &Scene, frame_size: Vector2<f32>) -> Self {
         let mut observers = Self::default();
         for node in scene.graph.linear_iter() {
@@ -113,7 +120,11 @@ impl ObserversCollection {
                         let view_projection_matrix = projection_matrix * view_matrix;
                         observers.reflection_probes.push(Observer {
                             handle: node.handle(),
-                            cube_map_face: Some(cube_face.face),
+                            reflection_probe_data: Some(ReflectionProbeData {
+                                cube_map_face: cube_face.face,
+                                environment_lighting_source: *probe.environment_lighting_source,
+                                ambient_lighting_color: *probe.ambient_lighting_color,
+                            }),
                             render_target: Some(probe.render_target().clone()),
                             position: ObserverPosition {
                                 translation,
@@ -132,6 +143,7 @@ impl ObserversCollection {
                             viewport: Rect::new(0, 0, resolution as i32, resolution as i32),
                             frustum: Frustum::from_view_projection_matrix(view_projection_matrix)
                                 .unwrap_or_default(),
+                            hdr_adaptation_speed: 1.0,
                         })
                     }
                 }
@@ -141,22 +153,57 @@ impl ObserversCollection {
     }
 }
 
+/// The data used by the renderer when it's rendering a reflection probe.
+pub struct ReflectionProbeData {
+    /// Cube map face of a cube render target to which to render a scene.
+    pub cube_map_face: CubeMapFace,
+    /// Environment lighting source of the reflection probe. See [`EnvironmentLightingSource`] docs
+    /// for more info.
+    pub environment_lighting_source: EnvironmentLightingSource,
+    /// Ambient lighting color of the reflection probe.
+    pub ambient_lighting_color: Color,
+}
+
+/// An observer holds all the information required to render a scene from a particular point of view.
+/// Contains all information for rendering, effectively decouples rendering entities from scene
+/// entities. Observer can be constructed from an arbitrary set of data or from scene entities,
+/// such as cameras, reflection probes.
 pub struct Observer {
+    /// The handle of a scene node (camera, reflection probe, etc.) that was used to create this
+    /// Observer.
     pub handle: Handle<Node>,
-    pub cube_map_face: Option<CubeMapFace>,
+    /// Additional data used by reflection probes only.
+    pub reflection_probe_data: Option<ReflectionProbeData>,
+    /// Render target to which to render the scene.
     pub render_target: Option<TextureResource>,
+    /// Position of the observer. See [`ObserverPosition`] docs for more info.
     pub position: ObserverPosition,
+    /// Environment map which will be used for IBL and reflections. If not set, then scene's skybox
+    /// will be used as an environment map.
     pub environment_map: Option<TextureResource>,
+    /// A set of switches that defines which "layers" of the scene will be rendered.
     pub render_mask: BitMask,
+    /// Projection mode that will be used to project the scene on screen's 2D plane.
     pub projection: Projection,
+    /// Optional color grading lookup table. See [`ColorGradingLut`] docs for more info.
     pub color_grading_lut: Option<ColorGradingLut>,
+    /// A flag, that defines whether the color grading enabled or not.
     pub color_grading_enabled: bool,
+    /// Exposure settings that will be applied to scene's HDR image to convert it to the final
+    /// low dynamic range image that will be shown on a display.
     pub exposure: Exposure,
+    /// Viewport rectangle in screen space. Defines a porting of the screen that needs to be rendered.
     pub viewport: Rect<i32>,
+    /// Frustum of the observer, it can be used for frustum culling.
     pub frustum: Frustum,
+    /// Defines the speed of automatic adaptation for the current frame luminance. In other words,
+    /// it defines how fast the reaction to the new frame brightness will be. The lower the value,
+    /// the longer it will take to adjust the exposure for the new brightness level.
+    pub hdr_adaptation_speed: f32,
 }
 
 impl Observer {
+    /// Creates a new observer from a scene camera.
     pub fn from_camera(camera: &Camera, mut frame_size: Vector2<f32>) -> Self {
         if let Some(render_target) = camera.render_target() {
             if let Some(size) = render_target
@@ -179,7 +226,8 @@ impl Observer {
             exposure: camera.exposure(),
             viewport: camera.viewport_pixels(frame_size),
             frustum: camera.frustum(),
-            cube_map_face: None,
+            reflection_probe_data: None,
+            hdr_adaptation_speed: camera.hdr_adaptation_speed(),
         }
     }
 }

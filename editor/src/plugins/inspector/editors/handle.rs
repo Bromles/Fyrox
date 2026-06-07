@@ -18,18 +18,17 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::scene::selector::{AllowedType, SelectedHandle};
+use crate::scene::selector::{AllowedType, NodeSelectorWindow, SelectedHandle};
 use crate::{
     fyrox::{
         core::{
             color::Color, pool::ErasedHandle, pool::Handle, reflect::prelude::*,
-            type_traits::prelude::*, visitor::prelude::*,
+            visitor::prelude::*, SafeLock,
         },
-        graph::BaseSceneGraph,
+        graph::SceneGraph,
         gui::{
             brush::Brush,
             button::{ButtonBuilder, ButtonMessage},
-            define_constructor,
             draw::{CommandTexture, Draw, DrawingContext},
             grid::{Column, GridBuilder, Row},
             image::ImageBuilder,
@@ -38,7 +37,7 @@ use crate::{
                     PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
                     PropertyEditorMessageContext, PropertyEditorTranslationContext,
                 },
-                FieldKind, InspectorError, PropertyChanged,
+                FieldAction, InspectorError, PropertyChanged,
             },
             message::MessageDirection,
             style::{resource::StyleResourceExt, Style},
@@ -56,6 +55,11 @@ use crate::{
     Message, UiMessage, UiNode, UserInterface, VerticalAlignment,
 };
 use fyrox::core::PhantomDataSendSync;
+use fyrox::gui::button::Button;
+use fyrox::gui::image::Image;
+use fyrox::gui::message::MessageData;
+use fyrox::gui::text::Text;
+use fyrox::gui::window::WindowAlignment;
 use std::{
     any::TypeId,
     fmt::{Debug, Formatter},
@@ -66,6 +70,7 @@ use std::{
 pub enum HandlePropertyEditorMessage<T: Reflect> {
     Value(Handle<T>),
 }
+impl<T: Reflect> MessageData for HandlePropertyEditorMessage<T> {}
 
 impl<T: Reflect> Clone for HandlePropertyEditorMessage<T> {
     fn clone(&self) -> Self {
@@ -91,31 +96,29 @@ impl<T: Reflect> PartialEq for HandlePropertyEditorMessage<T> {
     }
 }
 
-impl<T: Reflect> HandlePropertyEditorMessage<T> {
-    define_constructor!(HandlePropertyEditorMessage:Value => fn value(Handle<T>), layout: false);
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HandlePropertyEditorNameMessage(pub Option<String>);
+impl MessageData for HandlePropertyEditorNameMessage {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HandlePropertyEditorHierarchyMessage(pub HierarchyNode);
+impl MessageData for HandlePropertyEditorHierarchyMessage {}
 
-#[derive(Visit, Reflect, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "3ceca8c1-c365-4f03-a413-062f8f3cd685")]
+#[derive(Visit, Reflect)]
+#[reflect(type_uuid = "3ceca8c1-c365-4f03-a413-062f8f3cd685")]
 #[reflect(derived_type = "UiNode")]
 pub struct HandlePropertyEditor<T: Reflect> {
     widget: Widget,
-    text: Handle<UiNode>,
-    locate: Handle<UiNode>,
-    select: Handle<UiNode>,
-    make_unassigned: Handle<UiNode>,
+    text: Handle<Text>,
+    locate: Handle<Button>,
+    select: Handle<Button>,
+    make_unassigned: Handle<Button>,
     value: Handle<T>,
     #[visit(skip)]
     #[reflect(hidden)]
     sender: MessageSender,
-    selector: Handle<UiNode>,
-    pick: Handle<UiNode>,
+    selector: Handle<NodeSelectorWindow>,
+    pick: Handle<Button>,
 }
 
 impl<T: Reflect> Debug for HandlePropertyEditor<T> {
@@ -171,102 +174,79 @@ impl<T: Reflect> Control for HandlePropertyEditor<T> {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(msg) = message.data::<HandlePropertyEditorNameMessage>() {
+        if let Some(msg) = message.data_for::<HandlePropertyEditorNameMessage>(self.handle()) {
             let value = &msg.0;
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                // Handle messages from the editor, it will respond to requests and provide
-                // node names in efficient way.
-                let value = if let Some(value) = value {
-                    Some(value.as_str())
-                } else if self.value.is_none() {
-                    Some("Unassigned")
+
+            // Handle messages from the editor, it will respond to requests and provide
+            // node names in efficient way.
+            let value = if let Some(value) = value {
+                Some(value.as_str())
+            } else if self.value.is_none() {
+                Some("Unassigned")
+            } else {
+                None
+            };
+
+            if let Some(value) = value {
+                ui.send(
+                    self.text,
+                    TextMessage::Text(format!("{} ({})", value, self.value)),
+                );
+
+                let color = if self.value.is_none() {
+                    ui.style.property(Style::BRUSH_WARNING)
                 } else {
-                    None
+                    ui.style.property(Style::BRUSH_FOREGROUND)
                 };
+                ui.send(self.text, WidgetMessage::Foreground(color));
+            } else {
+                ui.send(
+                    self.text,
+                    TextMessage::Text(format!("<Invalid handle!> ({})", self.value)),
+                );
 
-                if let Some(value) = value {
-                    ui.send_message(TextMessage::text(
-                        self.text,
-                        MessageDirection::ToWidget,
-                        format!("{} ({})", value, self.value),
-                    ));
-
-                    let color = if self.value.is_none() {
-                        ui.style.property(Style::BRUSH_WARNING)
-                    } else {
-                        ui.style.property(Style::BRUSH_FOREGROUND)
-                    };
-                    ui.send_message(WidgetMessage::foreground(
-                        self.text,
-                        MessageDirection::ToWidget,
-                        color,
-                    ));
-                } else {
-                    ui.send_message(TextMessage::text(
-                        self.text,
-                        MessageDirection::ToWidget,
-                        format!("<Invalid handle!> ({})", self.value),
-                    ));
-
-                    ui.send_message(WidgetMessage::foreground(
-                        self.text,
-                        MessageDirection::ToWidget,
-                        ui.style.property(Style::BRUSH_ERROR),
-                    ));
-                };
-            }
+                ui.send(
+                    self.text,
+                    WidgetMessage::Foreground(ui.style.property(Style::BRUSH_ERROR)),
+                );
+            };
         }
 
-        if let Some(msg) = message.data::<HandlePropertyEditorHierarchyMessage>() {
+        if let Some(msg) = message.data_for::<HandlePropertyEditorHierarchyMessage>(self.handle()) {
             let value = &msg.0;
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                ui.send_message(NodeSelectorMessage::hierarchy(
-                    self.selector,
-                    MessageDirection::ToWidget,
-                    value.clone(),
-                ));
-
-                ui.send_message(NodeSelectorMessage::selection(
-                    self.selector,
-                    MessageDirection::ToWidget,
-                    vec![SelectedHandle {
-                        handle: self.value.into(),
-                        inner_type_id: TypeId::of::<T>(),
-                        derived_type_ids: T::derived_types().to_vec(),
-                    }],
-                ));
-            }
+            ui.send(self.selector, NodeSelectorMessage::Hierarchy(value.clone()));
+            ui.send(
+                self.selector,
+                NodeSelectorMessage::Selection(vec![SelectedHandle {
+                    handle: self.value.into(),
+                    inner_type_id: TypeId::of::<T>(),
+                    derived_type_ids: T::type_info().derived_types.to_vec(),
+                }]),
+            );
         }
 
-        if let Some(msg) = message.data::<HandlePropertyEditorMessage<T>>() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    HandlePropertyEditorMessage::Value(handle) => {
-                        if self.value != *handle {
-                            self.value = *handle;
-                            ui.send_message(message.reverse());
-                        }
-
-                        // Sync name in any case, because it may be changed.
-                        request_name_sync(&self.sender, self.handle, self.value.into());
+        if let Some(msg) = message.data_for::<HandlePropertyEditorMessage<T>>(self.handle()) {
+            match msg {
+                HandlePropertyEditorMessage::Value(handle) => {
+                    if self.value != *handle {
+                        self.value = *handle;
+                        ui.try_send_response(message);
                     }
+
+                    // Sync name in any case, because it may be changed.
+                    request_name_sync(&self.sender, self.handle, self.value.into());
                 }
             }
         } else if let Some(WidgetMessage::Drop(dropped)) = message.data() {
             if message.destination() == self.handle() {
                 if let Some(item) = ui.node(*dropped).cast::<SceneItem>() {
-                    ui.send_message(HandlePropertyEditorMessage::<T>::value(
+                    ui.send(
                         self.handle(),
-                        MessageDirection::ToWidget,
-                        // TODO: Do type check here.
-                        item.entity_handle.into(),
-                    ))
+                        HandlePropertyEditorMessage::<T>::Value(
+                            // TODO: Do type check here.
+                            item.entity_handle.into(),
+                        ),
+                    )
                 }
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
@@ -279,11 +259,10 @@ impl<T: Reflect> Control for HandlePropertyEditor<T> {
                     handle: self.value.into(),
                 });
             } else if message.destination == self.make_unassigned {
-                ui.send_message(HandlePropertyEditorMessage::value(
+                ui.send(
                     self.handle,
-                    MessageDirection::ToWidget,
-                    Handle::<T>::NONE,
-                ));
+                    HandlePropertyEditorMessage::Value(Handle::<T>::NONE),
+                );
             } else if message.destination == self.pick {
                 let node_selector = NodeSelectorWindowBuilder::new(
                     WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(400.0))
@@ -300,12 +279,14 @@ impl<T: Reflect> Control for HandlePropertyEditor<T> {
                 )
                 .build(&mut ui.build_ctx());
 
-                ui.send_message(WindowMessage::open_modal(
+                ui.send(
                     node_selector,
-                    MessageDirection::ToWidget,
-                    true,
-                    true,
-                ));
+                    WindowMessage::Open {
+                        alignment: WindowAlignment::Center,
+                        modal: true,
+                        focus_content: true,
+                    },
+                );
 
                 self.sender
                     .send(Message::ProvideSceneHierarchy { view: self.handle });
@@ -316,27 +297,19 @@ impl<T: Reflect> Control for HandlePropertyEditor<T> {
     }
 
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
-        if let Some(NodeSelectorMessage::Selection(selection)) = message.data() {
-            if message.destination() == self.selector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                if let Some(suitable) = selection.iter().find(|selected| {
-                    selected.inner_type_id == TypeId::of::<T>()
-                        || selected.derived_type_ids.contains(&TypeId::of::<T>())
-                }) {
-                    ui.send_message(HandlePropertyEditorMessage::<T>::value(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                        suitable.handle.into(),
-                    ));
-                }
+        if let Some(NodeSelectorMessage::Selection(selection)) = message.data_from(self.selector) {
+            if let Some(suitable) = selection.iter().find(|selected| {
+                selected.inner_type_id == TypeId::of::<T>()
+                    || selected.derived_type_ids.contains(&TypeId::of::<T>())
+            }) {
+                ui.send(
+                    self.handle,
+                    HandlePropertyEditorMessage::<T>::Value(suitable.handle.into()),
+                );
             }
         } else if let Some(WindowMessage::Close) = message.data() {
             if message.destination() == self.selector {
-                ui.send_message(WidgetMessage::remove(
-                    self.selector,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.selector, WidgetMessage::Remove);
             }
         }
     }
@@ -348,15 +321,34 @@ struct HandlePropertyEditorBuilder<T: Reflect> {
     sender: MessageSender,
 }
 
-fn make_icon(data: &[u8], color: Color, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_icon(data: &[u8], color: Color, ctx: &mut BuildContext) -> Handle<Image> {
     ImageBuilder::new(
         WidgetBuilder::new()
-            .with_width(16.0)
-            .with_height(16.0)
-            .with_margin(Thickness::uniform(1.0))
+            .with_width(12.0)
+            .with_height(12.0)
+            .with_margin(Thickness::uniform(3.0))
             .with_background(Brush::Solid(color).into()),
     )
     .with_opt_texture(load_image_internal(data))
+    .build(ctx)
+}
+
+fn make_button(
+    ctx: &mut BuildContext,
+    data: &[u8],
+    color: Color,
+    column: usize,
+    tooltip: &str,
+) -> Handle<Button> {
+    ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::uniform(1.0))
+            .with_tooltip(make_simple_tooltip(ctx, tooltip))
+            .with_width(20.0)
+            .with_height(20.0)
+            .on_column(column),
+    )
+    .with_content(make_icon(data, color, ctx))
     .build(ctx)
 }
 
@@ -374,91 +366,42 @@ impl<T: Reflect> HandlePropertyEditorBuilder<T> {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        let text;
-        let locate;
-        let select;
-        let make_unassigned;
-        let pick;
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<HandlePropertyEditor<T>> {
+        let text = TextBuilder::new(
+            WidgetBuilder::new()
+                .on_column(0)
+                .with_vertical_alignment(VerticalAlignment::Center),
+        )
+        .with_vertical_text_alignment(VerticalAlignment::Center)
+        .with_text(if self.value.is_none() {
+            "Unassigned".to_owned()
+        } else {
+            "Err: Desync!".to_owned()
+        })
+        .build(ctx);
+        let locate_img = include_bytes!("../../../../resources/locate.png");
+        let locate = make_button(ctx, locate_img, Color::repeat(180), 2, "Locate Object");
+        let select_img = include_bytes!("../../../../resources/select_in_wv.png");
+        let select = make_button(ctx, select_img, Color::repeat(180), 3, "Select Object");
+        let cross_img = include_bytes!("../../../../resources/cross.png");
+        let make_unassigned = make_button(
+            ctx,
+            cross_img,
+            Color::opaque(180, 0, 0),
+            4,
+            "Make Unassigned",
+        );
+        let pick_img = include_bytes!("../../../../resources/pick.png");
+        let pick = make_button(ctx, pick_img, Color::opaque(0, 180, 0), 1, "Set...");
         let grid = GridBuilder::new(
             WidgetBuilder::new()
-                .with_child({
-                    text = TextBuilder::new(WidgetBuilder::new().on_column(0))
-                        .with_vertical_text_alignment(VerticalAlignment::Center)
-                        .with_text(if self.value.is_none() {
-                            "Unassigned".to_owned()
-                        } else {
-                            "Err: Desync!".to_owned()
-                        })
-                        .build(ctx);
-                    text
-                })
-                .with_child({
-                    pick = ButtonBuilder::new(
-                        WidgetBuilder::new()
-                            .with_tooltip(make_simple_tooltip(ctx, "Set..."))
-                            .with_width(20.0)
-                            .with_height(20.0)
-                            .on_column(1),
-                    )
-                    .with_content(make_icon(
-                        include_bytes!("../../../../resources/pick.png"),
-                        Color::opaque(0, 180, 0),
-                        ctx,
-                    ))
-                    .build(ctx);
-                    pick
-                })
-                .with_child({
-                    locate = ButtonBuilder::new(
-                        WidgetBuilder::new()
-                            .with_tooltip(make_simple_tooltip(ctx, "Locate Object"))
-                            .with_width(20.0)
-                            .with_height(20.0)
-                            .on_column(2),
-                    )
-                    .with_content(make_icon(
-                        include_bytes!("../../../../resources/locate.png"),
-                        Color::opaque(180, 180, 180),
-                        ctx,
-                    ))
-                    .build(ctx);
-                    locate
-                })
-                .with_child({
-                    select = ButtonBuilder::new(
-                        WidgetBuilder::new()
-                            .with_tooltip(make_simple_tooltip(ctx, "Select Object"))
-                            .with_width(20.0)
-                            .with_height(20.0)
-                            .on_column(3),
-                    )
-                    .with_content(make_icon(
-                        include_bytes!("../../../../resources/select_in_wv.png"),
-                        Color::opaque(180, 180, 180),
-                        ctx,
-                    ))
-                    .build(ctx);
-                    select
-                })
-                .with_child({
-                    make_unassigned = ButtonBuilder::new(
-                        WidgetBuilder::new()
-                            .with_tooltip(make_simple_tooltip(ctx, "Make Unassigned"))
-                            .with_width(20.0)
-                            .with_height(20.0)
-                            .on_column(4),
-                    )
-                    .with_content(make_icon(
-                        include_bytes!("../../../../resources/cross.png"),
-                        Color::opaque(180, 0, 0),
-                        ctx,
-                    ))
-                    .build(ctx);
-                    make_unassigned
-                }),
+                .with_child(text)
+                .with_child(pick)
+                .with_child(locate)
+                .with_child(select)
+                .with_child(make_unassigned),
         )
-        .add_row(Row::stretch())
+        .add_row(Row::auto())
         .add_column(Column::stretch())
         .add_column(Column::auto())
         .add_column(Column::auto())
@@ -487,7 +430,7 @@ impl<T: Reflect> HandlePropertyEditorBuilder<T> {
             pick,
         };
 
-        ctx.add_node(UiNode::new(editor))
+        ctx.add(editor)
     }
 }
 
@@ -523,15 +466,15 @@ impl<T: Reflect> PropertyEditorDefinition for NodeHandlePropertyEditorDefinition
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Handle<T>>()?;
 
-        let sender = self.sender.lock().unwrap().clone();
+        let sender = self.sender.safe_lock().unwrap().clone();
 
         let editor = HandlePropertyEditorBuilder::new(WidgetBuilder::new(), sender.clone())
             .with_value(*value)
             .build(ctx.build_context);
 
-        request_name_sync(&sender, editor, ErasedHandle::from(*value));
+        request_name_sync(&sender, editor.to_base(), ErasedHandle::from(*value));
 
-        Ok(PropertyEditorInstance::Simple { editor })
+        Ok(PropertyEditorInstance::simple(editor))
     }
 
     fn create_message(
@@ -540,10 +483,9 @@ impl<T: Reflect> PropertyEditorDefinition for NodeHandlePropertyEditorDefinition
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Handle<T>>()?;
 
-        Ok(Some(HandlePropertyEditorMessage::value(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            *value,
+            HandlePropertyEditorMessage::Value(*value),
         )))
     }
 
@@ -554,7 +496,7 @@ impl<T: Reflect> PropertyEditorDefinition for NodeHandlePropertyEditorDefinition
             {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(*value),
+                    action: FieldAction::object(*value),
                 });
             }
         }

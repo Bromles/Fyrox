@@ -19,18 +19,14 @@
 // SOFTWARE.
 
 use crate::{
-    core::{
-        pool::Handle, reflect::prelude::*, type_traits::prelude::*, uuid_provider,
-        visitor::prelude::*, PhantomDataSendSync,
-    },
-    define_constructor,
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*, PhantomDataSendSync},
     inspector::{
         editors::{
             PropertyEditorBuildContext, PropertyEditorDefinition,
             PropertyEditorDefinitionContainer, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        make_expander_container, CollectionChanged, FieldKind, InspectorEnvironment,
+        make_expander_container, CollectionAction, FieldAction, InspectorEnvironment,
         InspectorError, PropertyChanged,
     },
     inspector::{make_property_margin, PropertyFilter},
@@ -40,15 +36,13 @@ use crate::{
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
 
-use fyrox_graph::BaseSceneGraph;
+use crate::message::{DeliveryMode, MessageData};
+use fyrox_graph::SceneGraph;
 use std::sync::Arc;
-use std::{
-    any::TypeId,
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-};
+use std::{any::TypeId, fmt::Debug};
 
 #[derive(Clone, Debug, PartialEq, Visit, Reflect, Default)]
+#[reflect(type_uuid = "5c6e4785-8e2d-441f-8478-523900394b93")]
 pub struct Item {
     pub editor_instance: PropertyEditorInstance,
 }
@@ -57,21 +51,19 @@ pub struct Item {
 pub enum ArrayEditorMessage {
     ItemChanged { index: usize, message: UiMessage },
 }
+impl MessageData for ArrayEditorMessage {}
 
-impl ArrayEditorMessage {
-    define_constructor!(ArrayEditorMessage:ItemChanged => fn item_changed(index: usize, message: UiMessage), layout: false);
-}
-
-#[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "5c6e4785-8e2d-441f-8478-523900394b93"
+)]
 pub struct ArrayEditor {
     pub widget: Widget,
     pub items: Vec<Item>,
 }
 
 crate::define_widget_deref!(ArrayEditor);
-
-uuid_provider!(ArrayEditor = "5c6e4785-8e2d-441f-8478-523900394b93");
 
 impl Control for ArrayEditor {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -82,12 +74,13 @@ impl Control for ArrayEditor {
             .iter()
             .position(|i| i.editor_instance.editor() == message.destination())
         {
-            ui.send_message(ArrayEditorMessage::item_changed(
+            ui.post(
                 self.handle,
-                MessageDirection::FromWidget,
-                index,
-                message.clone(),
-            ));
+                ArrayEditorMessage::ItemChanged {
+                    index,
+                    message: message.clone(),
+                },
+            );
         }
     }
 }
@@ -122,12 +115,13 @@ fn create_items<'a, 'b, T, I>(
     definition_container: Arc<PropertyEditorDefinitionContainer>,
     property_info: &FieldRef<'a, 'b>,
     ctx: &mut BuildContext,
-    sync_flag: u64,
     layer_index: usize,
     generate_property_string_values: bool,
     filter: PropertyFilter,
     name_column_width: f32,
+    hide_name_column: bool,
     base_path: String,
+    has_parent_object: bool,
 ) -> Result<Vec<Item>, InspectorError>
 where
     T: Reflect,
@@ -149,7 +143,6 @@ where
                 max_value: property_info.max_value,
                 step: property_info.step,
                 precision: property_info.precision,
-                description: property_info.description,
                 tag: property_info.tag,
                 doc: property_info.doc,
             };
@@ -167,12 +160,13 @@ where
                         property_info: &proxy_property_info,
                         environment: environment.clone(),
                         definition_container: definition_container.clone(),
-                        sync_flag,
                         layer_index: layer_index + 1,
                         generate_property_string_values,
                         filter: filter.clone(),
                         name_column_width,
+                        hide_name_column,
                         base_path: format!("{base_path}[{index}]"),
+                        has_parent_object,
                     })?;
 
             if let PropertyEditorInstance::Simple { editor } = editor {
@@ -250,10 +244,11 @@ where
         self,
         ctx: &mut BuildContext,
         property_info: &FieldRef<'a, '_>,
-        sync_flag: u64,
         name_column_width: f32,
+        hide_name_column: bool,
         base_path: String,
-    ) -> Result<Handle<UiNode>, InspectorError> {
+        has_parent_object: bool,
+    ) -> Result<Handle<ArrayEditor>, InspectorError> {
         let definition_container = self
             .definition_container
             .unwrap_or_else(|| Arc::new(PropertyEditorDefinitionContainer::with_default_editors()));
@@ -266,12 +261,13 @@ where
                 definition_container,
                 property_info,
                 ctx,
-                sync_flag,
                 self.layer_index + 1,
                 self.generate_property_string_values,
                 self.filter,
                 name_column_width,
+                hide_name_column,
                 base_path,
+                has_parent_object,
             )?
         } else {
             Vec::new()
@@ -286,7 +282,7 @@ where
             items,
         };
 
-        Ok(ctx.add_node(UiNode::new(ce)))
+        Ok(ctx.add(ce))
     }
 }
 
@@ -301,7 +297,7 @@ where
 
 impl<T, const N: usize> ArrayPropertyEditorDefinition<T, N>
 where
-    T: Reflect,
+    T: Reflect + Clone,
 {
     pub fn new() -> Self {
         Self::default()
@@ -310,7 +306,7 @@ where
 
 impl<T, const N: usize> Default for ArrayPropertyEditorDefinition<T, N>
 where
-    T: Reflect,
+    T: Reflect + Clone,
 {
     fn default() -> Self {
         Self {
@@ -321,7 +317,7 @@ where
 
 impl<T, const N: usize> PropertyEditorDefinition for ArrayPropertyEditorDefinition<T, N>
 where
-    T: Reflect,
+    T: Reflect + Clone,
 {
     fn value_type_id(&self) -> TypeId {
         TypeId::of::<[T; N]>()
@@ -337,8 +333,8 @@ where
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
-            ctx.property_info.description,
-            Handle::NONE,
+            ctx.property_info.doc,
+            Handle::<UiNode>::NONE,
             {
                 editor = ArrayEditorBuilder::new(
                     WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
@@ -352,17 +348,22 @@ where
                 .build(
                     ctx.build_context,
                     ctx.property_info,
-                    ctx.sync_flag,
                     ctx.name_column_width,
+                    ctx.hide_name_column,
                     ctx.base_path.clone(),
+                    ctx.has_parent_object,
                 )?;
                 editor
             },
             ctx.name_column_width,
+            false,
             ctx.build_context,
         );
 
-        Ok(PropertyEditorInstance::Custom { container, editor })
+        Ok(PropertyEditorInstance::Custom {
+            container,
+            editor: editor.to_base(),
+        })
     }
 
     fn create_message(
@@ -370,7 +371,6 @@ where
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let PropertyEditorMessageContext {
-            sync_flag,
             instance,
             ui,
             layer_index,
@@ -380,7 +380,9 @@ where
             definition_container,
             environment,
             name_column_width,
+            hide_name_column,
             base_path,
+            has_parent_object,
         } = ctx;
 
         let instance_ref = if let Some(instance) = ui.node(instance).cast::<ArrayEditor>() {
@@ -413,7 +415,6 @@ where
                     max_value: property_info.max_value,
                     step: property_info.step,
                     precision: property_info.precision,
-                    description: property_info.description,
                     tag: property_info.tag,
                     doc: property_info.doc,
                 };
@@ -430,17 +431,20 @@ where
                             property_info: &proxy_property_info,
                             environment: environment.clone(),
                             definition_container: definition_container.clone(),
-                            sync_flag,
                             instance: item.editor_instance.editor(),
                             layer_index: layer_index + 1,
                             ui,
                             generate_property_string_values,
                             filter: filter.clone(),
                             name_column_width,
+                            hide_name_column,
                             base_path: format!("{base_path}[{index}]"),
+                            has_parent_object,
                         })?
                 {
-                    ui.send_message(message.with_flags(ctx.sync_flag))
+                    // TODO: Refactor `create_message` into `create_messages` to support multiple
+                    // messages. Otherwise this looks like a hack.
+                    ui.send_message(message.with_delivery_mode(DeliveryMode::SyncOnly))
                 }
             }
         }
@@ -459,18 +463,20 @@ where
                     return Some(PropertyChanged {
                         name: ctx.name.to_string(),
 
-                        value: FieldKind::Collection(Box::new(CollectionChanged::ItemChanged {
-                            index: *index,
-                            property: definition
-                                .property_editor
-                                .translate_message(PropertyEditorTranslationContext {
-                                    environment: ctx.environment.clone(),
-                                    name: "",
-                                    message,
-                                    definition_container: ctx.definition_container.clone(),
-                                })?
-                                .value,
-                        })),
+                        action: FieldAction::CollectionAction(Box::new(
+                            CollectionAction::ItemChanged {
+                                index: *index,
+                                action: definition
+                                    .property_editor
+                                    .translate_message(PropertyEditorTranslationContext {
+                                        environment: ctx.environment.clone(),
+                                        name: "",
+                                        message,
+                                        definition_container: ctx.definition_container.clone(),
+                                    })?
+                                    .action,
+                            },
+                        )),
                     });
                 }
             }

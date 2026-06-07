@@ -53,19 +53,16 @@ use fyrox_core::{
     num_traits::Bounded,
     reflect::prelude::*,
     sparse::AtomicIndex,
-    uuid,
     uuid::Uuid,
-    uuid_provider,
     visitor::{Visit, VisitResult, Visitor},
-    TypeUuidProvider,
 };
 use fyrox_resource::{
     embedded_data_source, io::ResourceIo, manager::BuiltInResource, options::ImportOptions,
-    untyped::ResourceKind, Resource, ResourceData, TEXTURE_RESOURCE_UUID,
+    untyped::ResourceKind, Resource, ResourceData,
 };
 use image::{ColorType, DynamicImage, ImageError, ImageFormat, Pixel};
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
@@ -79,7 +76,8 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
 pub mod loader;
 
 /// Texture kind.
-#[derive(Copy, Clone, Debug, Reflect)]
+#[derive(Copy, Clone, Debug, Reflect, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "542eb785-875b-43ce-b73a-a25024535f48")]
 pub enum TextureKind {
     /// 1D texture.
     Line {
@@ -225,13 +223,8 @@ impl Visit for TextureKind {
 
 /// Data storage of a texture.
 #[derive(Default, Clone, Reflect)]
+#[reflect(type_uuid = "4b9c2b23-46cd-4f7f-bf13-07b0bebe5538")]
 pub struct TextureBytes(Vec<u8>);
-
-impl Visit for TextureBytes {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        self.0.visit(name, visitor)
-    }
-}
 
 impl Debug for TextureBytes {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -261,6 +254,7 @@ impl DerefMut for TextureBytes {
 
 /// Actual texture data.
 #[derive(Debug, Clone, Reflect)]
+#[reflect(type_uuid = "02c23a44-55fa-411a-bc39-eb7a5eadf15c")]
 pub struct Texture {
     kind: TextureKind,
     bytes: TextureBytes,
@@ -285,23 +279,13 @@ pub struct Texture {
     pub cache_index: Arc<AtomicIndex>,
 }
 
-impl TypeUuidProvider for Texture {
-    fn type_uuid() -> Uuid {
-        TEXTURE_RESOURCE_UUID
-    }
-}
-
 impl ResourceData for Texture {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let color_type = match self.pixel_kind {
             TexturePixelKind::R8 => ColorType::L8,
             TexturePixelKind::Luminance8 => ColorType::L8,
-            TexturePixelKind::RGB8 => ColorType::Rgb8,
-            TexturePixelKind::RGBA8 => ColorType::Rgba8,
+            TexturePixelKind::RGB8 | TexturePixelKind::SRGB8 => ColorType::Rgb8,
+            TexturePixelKind::RGBA8 | TexturePixelKind::SRGBA8 => ColorType::Rgba8,
             TexturePixelKind::RG8 => ColorType::La8,
             TexturePixelKind::LuminanceAlpha8 => ColorType::La8,
             TexturePixelKind::R16 => ColorType::L16,
@@ -363,17 +347,16 @@ impl Visit for Texture {
         self.anisotropy.visit("Anisotropy", &mut region)?;
         self.s_wrap_mode.visit("SWrapMode", &mut region)?;
         self.t_wrap_mode.visit("TWrapMode", &mut region)?;
-        let _ = self.t_wrap_mode.visit("RWrapMode", &mut region);
+        self.t_wrap_mode.visit("RWrapMode", &mut region)?;
         self.mip_count.visit("MipCount", &mut region)?;
         self.kind.visit("Kind", &mut region)?;
         let mut bytes_view = PodVecView::from_pod_vec(&mut self.bytes);
-        let _ = bytes_view.visit("Data", &mut region);
-
-        let _ = self.base_level.visit("BaseLevel", &mut region);
-        let _ = self.max_level.visit("MaxLevel", &mut region);
-        let _ = self.min_lod.visit("MinLod", &mut region);
-        let _ = self.max_lod.visit("MaxLod", &mut region);
-        let _ = self.lod_bias.visit("LodBias", &mut region);
+        bytes_view.visit("Data", &mut region)?;
+        self.base_level.visit("BaseLevel", &mut region)?;
+        self.max_level.visit("MaxLevel", &mut region)?;
+        self.min_lod.visit("MinLod", &mut region)?;
+        self.max_lod.visit("MaxLod", &mut region)?;
+        self.lod_bias.visit("LodBias", &mut region)?;
 
         Ok(())
     }
@@ -415,6 +398,7 @@ impl Default for Texture {
 #[derive(
     Default, Copy, Clone, Deserialize, Serialize, Debug, Reflect, AsRefStr, EnumString, VariantNames,
 )]
+#[reflect(type_uuid = "8fa17c0e-6889-4540-b396-97db4dc952aa")]
 pub enum MipFilter {
     /// Simple nearest filter, it is the fastest filter available, but it produces noisy mip levels and
     /// in most cases it is not advised to use it. Consider its performance as 1x.
@@ -432,8 +416,6 @@ pub enum MipFilter {
     /// [`Self::Nearest`].
     Lanczos,
 }
-
-uuid_provider!(MipFilter = "8fa17c0e-6889-4540-b396-97db4dc952aa");
 
 impl MipFilter {
     fn into_filter_type(self) -> fr::FilterType {
@@ -465,6 +447,7 @@ impl MipFilter {
 /// )
 /// ```
 #[derive(Clone, Deserialize, Serialize, Debug, Reflect)]
+#[reflect(type_uuid = "c70e89c9-2245-4736-99d9-f3fe9c1c5d3c")]
 pub struct TextureImportOptions {
     #[serde(default)]
     pub(crate) minification_filter: TextureMinificationFilter,
@@ -670,26 +653,46 @@ impl TextureImportOptions {
     }
 }
 
-lazy_static! {
-    /// Placeholder texture.
-    pub static ref PLACEHOLDER: BuiltInResource<Texture> = BuiltInResource::new("__PlaceholderTexture", embedded_data_source!("default.png"),
+/// Placeholder texture.
+pub static PLACEHOLDER: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Default Texture",
+        embedded_data_source!("default.png"),
         |data| {
             TextureResource::load_from_memory(
                 uuid!("58b0e112-a21a-481f-b305-a2dc5a8bea1f"),
                 ResourceKind::External,
                 data,
-                Default::default()
+                Default::default(),
             )
             .unwrap()
-        });
-}
+        },
+    )
+});
+
+/// Pure color texture.
+pub static PURE_COLOR: LazyLock<BuiltInResource<Texture>> = LazyLock::new(|| {
+    BuiltInResource::new(
+        "Pure Color Texture",
+        embedded_data_source!("pure_color.png"),
+        |data| {
+            TextureResource::load_from_memory(
+                uuid!("9709eef2-305c-44da-91e5-6f293d74408a"),
+                ResourceKind::External,
+                data,
+                Default::default(),
+            )
+            .unwrap()
+        },
+    )
+});
 
 /// Type alias for texture resources.
 pub type TextureResource = Resource<Texture>;
 
 /// Extension trait for texture resources.
 pub trait TextureResourceExtension: Sized {
-    /// Creates new render target for a scene. This method automatically configures GPU texture
+    /// Creates new render target. This method automatically configures GPU texture
     /// to correct settings, after render target was created, it must not be modified, otherwise
     /// result is undefined.
     fn new_render_target(width: u32, height: u32) -> Self;
@@ -698,6 +701,12 @@ pub trait TextureResourceExtension: Sized {
     /// to correct settings. After the render target was created, it must not be modified. Otherwise
     /// the result is undefined. Cube map contains six images
     fn new_cube_render_target(resolution: u32) -> Self;
+
+    /// Creates new render target with the specified pixel kind. This method automatically configures GPU texture
+    /// to correct settings, after render target was created, it must not be modified, otherwise
+    /// result is undefined.
+    fn new_render_target_with_format(width: u32, height: u32, pixel_kind: TexturePixelKind)
+        -> Self;
 
     /// Tries to load a texture from given data. Use this method if you want to
     /// load a texture from embedded data.
@@ -740,12 +749,16 @@ pub trait TextureResourceExtension: Sized {
 
 impl TextureResourceExtension for TextureResource {
     fn new_render_target(width: u32, height: u32) -> Self {
+        Self::new_render_target_with_format(width, height, TexturePixelKind::RGBA8)
+    }
+
+    fn new_cube_render_target(size: u32) -> Self {
         Resource::new_ok(
             Default::default(),
             Default::default(),
             Texture {
                 // Render target will automatically set width and height before rendering.
-                kind: TextureKind::Rectangle { width, height },
+                kind: TextureKind::Cube { size },
                 bytes: Default::default(),
                 pixel_kind: TexturePixelKind::RGBA8,
                 minification_filter: TextureMinificationFilter::Linear,
@@ -768,15 +781,19 @@ impl TextureResourceExtension for TextureResource {
         )
     }
 
-    fn new_cube_render_target(size: u32) -> Self {
+    fn new_render_target_with_format(
+        width: u32,
+        height: u32,
+        pixel_kind: TexturePixelKind,
+    ) -> Self {
         Resource::new_ok(
             Default::default(),
             Default::default(),
             Texture {
                 // Render target will automatically set width and height before rendering.
-                kind: TextureKind::Cube { size },
+                kind: TextureKind::Rectangle { width, height },
                 bytes: Default::default(),
-                pixel_kind: TexturePixelKind::RGBA8,
+                pixel_kind,
                 minification_filter: TextureMinificationFilter::Linear,
                 magnification_filter: TextureMagnificationFilter::Linear,
                 s_wrap_mode: TextureWrapMode::Repeat,
@@ -848,8 +865,10 @@ impl TextureResourceExtension for TextureResource {
     AsRefStr,
     Visit,
     Eq,
+    Default,
 )]
 #[repr(u32)]
+#[reflect(type_uuid = "824f5b6c-8957-42db-9ebc-ef2a5dece5ab")]
 pub enum TextureMagnificationFilter {
     /// Returns the value of the texture element that is nearest to the center of the pixel
     /// being textured.
@@ -857,15 +876,8 @@ pub enum TextureMagnificationFilter {
 
     /// Returns the weighted average of the four texture elements that are closest to the
     /// center of the pixel being textured.
+    #[default]
     Linear = 1,
-}
-
-uuid_provider!(TextureMagnificationFilter = "824f5b6c-8957-42db-9ebc-ef2a5dece5ab");
-
-impl Default for TextureMagnificationFilter {
-    fn default() -> Self {
-        Self::Linear
-    }
 }
 
 /// The texture minifying function is used whenever the pixel being textured maps to an area
@@ -885,8 +897,10 @@ impl Default for TextureMagnificationFilter {
     AsRefStr,
     Visit,
     Eq,
+    Default,
 )]
 #[repr(u32)]
+#[reflect(type_uuid = "0ec9e072-6d0a-47b2-a9c2-498cac4de22b")]
 pub enum TextureMinificationFilter {
     /// Returns the value of the texture element that is nearest to the center of the pixel
     /// being textured.
@@ -916,10 +930,9 @@ pub enum TextureMinificationFilter {
     /// and uses the Linear criterion (a weighted average of the four texture elements that
     /// are closest to the center of the pixel) to produce a texture value from each mipmap.
     /// The final texture value is a weighted average of those two values.
+    #[default]
     LinearMipMapLinear = 5,
 }
-
-uuid_provider!(TextureMinificationFilter = "0ec9e072-6d0a-47b2-a9c2-498cac4de22b");
 
 impl TextureMinificationFilter {
     /// Returns true if minification filter is using mip mapping, false - otherwise.
@@ -931,12 +944,6 @@ impl TextureMinificationFilter {
             | TextureMinificationFilter::NearestMipMapLinear
             | TextureMinificationFilter::LinearMipMapNearest => true,
         }
-    }
-}
-
-impl Default for TextureMinificationFilter {
-    fn default() -> Self {
-        Self::LinearMipMapLinear
     }
 }
 
@@ -956,11 +963,14 @@ impl Default for TextureMinificationFilter {
     AsRefStr,
     Visit,
     Eq,
+    Default,
 )]
 #[repr(u32)]
+#[reflect(type_uuid = "e360d139-4374-4323-a66d-d192809d9d87")]
 pub enum TextureWrapMode {
     /// Causes the integer part of a coordinate to be ignored; GPU uses only the fractional part,
     /// thereby creating a repeating pattern.
+    #[default]
     Repeat = 0,
 
     /// Causes a coordinates to be clamped to the range range, where N is the size of the texture
@@ -982,16 +992,9 @@ pub enum TextureWrapMode {
     MirrorClampToEdge = 4,
 }
 
-uuid_provider!(TextureWrapMode = "e360d139-4374-4323-a66d-d192809d9d87");
-
-impl Default for TextureWrapMode {
-    fn default() -> Self {
-        Self::Repeat
-    }
-}
-
 /// Texture kind defines pixel format of texture.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Reflect)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Reflect, Visit, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "dcca9b9c-dd1e-412c-922f-074703d35781")]
 #[repr(u32)]
 pub enum TexturePixelKind {
     /// 1 byte red.
@@ -1088,6 +1091,9 @@ pub enum TexturePixelKind {
 
     /// Red component as 2-byte, half-precision float.
     R16F = 24,
+
+    SRGBA8 = 25,
+    SRGB8 = 26,
 }
 
 impl TexturePixelKind {
@@ -1118,6 +1124,8 @@ impl TexturePixelKind {
             22 => Ok(Self::RGB16F),
             23 => Ok(Self::R32F),
             24 => Ok(Self::R16F),
+            25 => Ok(Self::SRGBA8),
+            26 => Ok(Self::SRGB8),
             _ => Err(format!("Invalid texture kind {id}!")),
         }
     }
@@ -1131,8 +1139,13 @@ impl TexturePixelKind {
     pub fn size_in_bytes(&self) -> Option<usize> {
         match self {
             Self::R8 | Self::Luminance8 => Some(1),
-            Self::RGB8 | Self::BGR8 => Some(3),
-            Self::RGBA8 | Self::RG16 | Self::BGRA8 | Self::LuminanceAlpha16 | Self::R32F => Some(4),
+            Self::RGB8 | Self::SRGB8 | Self::BGR8 => Some(3),
+            Self::RGBA8
+            | Self::SRGBA8
+            | Self::RG16
+            | Self::BGRA8
+            | Self::LuminanceAlpha16
+            | Self::R32F => Some(4),
             Self::RG8 | Self::R16 | Self::LuminanceAlpha8 | Self::Luminance16 | Self::R16F => {
                 Some(2)
             }
@@ -1227,10 +1240,13 @@ fn ceil_div_4(x: u32) -> u32 {
     VariantNames,
     EnumString,
     AsRefStr,
+    Default,
 )]
 #[repr(u32)]
+#[reflect(type_uuid = "fbdcc081-d0b8-4b62-9925-2de6c013fbf5")]
 pub enum CompressionOptions {
     /// An image will be stored without compression if it is not already compressed.
+    #[default]
     NoCompression = 0,
 
     /// An image will be encoded via DXT1 (BC1) compression with low quality if is not
@@ -1246,14 +1262,6 @@ pub enum CompressionOptions {
     /// This option is faster than `NoCompression` speed by lower requirements of memory
     /// bandwidth.
     Quality = 2,
-}
-
-uuid_provider!(CompressionOptions = "fbdcc081-d0b8-4b62-9925-2de6c013fbf5");
-
-impl Default for CompressionOptions {
-    fn default() -> Self {
-        Self::NoCompression
-    }
 }
 
 fn transmute_slice<T>(bytes: &[u8]) -> &'_ [T] {
@@ -1365,8 +1373,11 @@ fn bytes_in_mip_level(kind: TextureKind, pixel_kind: TexturePixelKind, mip: usiz
         | TexturePixelKind::Luminance16
         | TexturePixelKind::RG8
         | TexturePixelKind::R16F => 2 * pixel_count,
-        TexturePixelKind::RGB8 | TexturePixelKind::BGR8 => 3 * pixel_count,
+        TexturePixelKind::RGB8 | TexturePixelKind::SRGB8 | TexturePixelKind::BGR8 => {
+            3 * pixel_count
+        }
         TexturePixelKind::RGBA8
+        | TexturePixelKind::SRGBA8
         | TexturePixelKind::BGRA8
         | TexturePixelKind::RG16
         | TexturePixelKind::LuminanceAlpha16

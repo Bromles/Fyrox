@@ -27,7 +27,7 @@
 use crate::{
     core::{
         algebra::Vector2, color::Color, math::Rect, math::Vector2Ext, pool::Handle,
-        reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*,
+        reflect::prelude::*, visitor::prelude::*,
     },
     draw::{CommandTexture, Draw, DrawingContext},
     message::UiMessage,
@@ -35,14 +35,13 @@ use crate::{
     BuildContext, Control, UiNode, UserInterface,
 };
 
-use fyrox_core::uuid_provider;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
-/// Primitive is a simplest shape, that consists of one or multiple lines of the same thickness.
+/// Primitive is the simplest shape, that consists of one or multiple lines of the same thickness.
 #[derive(Clone, Debug, PartialEq, Visit, Reflect, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "766be1b3-6d1c-4466-bcf3-7093017c9e31")]
 pub enum Primitive {
     /// Solid triangle primitive.
     Triangle {
@@ -93,8 +92,6 @@ pub enum Primitive {
         rect: Rect<f32>,
     },
 }
-
-uuid_provider!(Primitive = "766be1b3-6d1c-4466-bcf3-7093017c9e31");
 
 impl Default for Primitive {
     fn default() -> Self {
@@ -170,15 +167,16 @@ impl Primitive {
 /// # };
 /// # use fyrox_ui::style::resource::StyleResourceExt;
 /// # use fyrox_ui::style::Style;
+/// # use fyrox_ui::vector_image::VectorImage;
 /// #
 /// fn make_cross_vector_image(
 ///     ctx: &mut BuildContext,
 ///     size: f32,
 ///     thickness: f32,
-/// ) -> Handle<UiNode> {
+/// ) -> Handle<VectorImage> {
 ///     VectorImageBuilder::new(
 ///         WidgetBuilder::new()
-///             // Color of the image is defined by the foreground brush of the base widget.
+///             // The color of the image is defined by the foreground brush of the base widget.
 ///             .with_foreground(ctx.style.property(Style::BRUSH_BRIGHT)),
 ///     )
 ///     .with_primitives(vec![
@@ -199,12 +197,15 @@ impl Primitive {
 ///
 /// Keep in mind that all primitives located in local coordinates. The color of the vector image can be changed by
 /// setting a new foreground brush.
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "7e535b65-0178-414e-b310-e208afc0eeb5"
+)]
 pub struct VectorImage {
     /// Base widget of the image.
     pub widget: Widget,
-    /// Current set of primitives that will be drawn.
+    /// The current set of primitives that will be drawn.
     pub primitives: InheritableVariable<Vec<Primitive>>,
 }
 
@@ -214,6 +215,7 @@ impl ConstructorProvider<UiNode, UserInterface> for VectorImage {
             .with_variant("Vector Image", |ui| {
                 VectorImageBuilder::new(WidgetBuilder::new())
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Visual")
@@ -221,8 +223,6 @@ impl ConstructorProvider<UiNode, UserInterface> for VectorImage {
 }
 
 crate::define_widget_deref!(VectorImage);
-
-uuid_provider!(VectorImage = "7e535b65-0178-414e-b310-e208afc0eeb5");
 
 impl Control for VectorImage {
     fn measure_override(&self, _ui: &UserInterface, _available_size: Vector2<f32>) -> Vector2<f32> {
@@ -330,17 +330,21 @@ impl VectorImageBuilder {
     }
 
     /// Builds the vector image widget.
-    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
-        let image = VectorImage {
+    pub fn build_vector_image(self, ctx: &BuildContext) -> VectorImage {
+        VectorImage {
             widget: self.widget_builder.build(ctx),
             primitives: self.primitives.into(),
-        };
-        UiNode::new(image)
+        }
+    }
+
+    /// Builds the vector image widget.
+    pub fn build_node(self, ctx: &BuildContext) -> UiNode {
+        UiNode::new(self.build_vector_image(ctx))
     }
 
     /// Finishes vector image building and adds it to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(self.build_node(ctx))
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<VectorImage> {
+        ctx.add(self.build_vector_image(ctx))
     }
 }
 

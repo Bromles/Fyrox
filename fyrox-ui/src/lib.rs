@@ -23,25 +23,25 @@
 //!
 //! ## Basic Concepts
 //!
-//! FyroxUI is quite complex UI library and before using it, you should understand basic concepts of it. Especially,
+//! FyroxUI is quite a complex UI library and before using it, you should understand basic concepts of it. Especially,
 //! if you're got used to immediate-mode UIs.
 //!
 //! ### Stateful
 //!
 //! **Stateful UI* means that we can create and destroy widgets when we need to, it is the opposite approach of
 //! **immediate-mode** or **stateless UIs** when you don't have long-lasting state for your widgets
-//! (usually stateless UI hold its state only for one or few frames).
+//! (usually stateless UI holds its state only for one or few frames).
 //!
-//! Stateful UI is much more powerful and flexible, it allows you to have complex layout system without having to
+//! Stateful UI is much more powerful and flexible, it allows you to have a complex layout system without having to
 //! create hacks to create complex layout as you'd do in immediate-mode UIs. It is also much faster in terms of
 //! performance. Stateful UI is a must for complex user interfaces that requires rich layout and high performance.
 //!
 //! ### Node-based architecture
 //!
 //! Every user interface could be represented as a set of small blocks that have hierarchical bonding between each
-//! other. For example a button could be represented using two parts: a background and a foreground. Usually the background
+//! other. For example, a button could be represented using two parts: a background and a foreground. Usually the background
 //! is just a simple rectangle (either a vector or bitmap), and a foreground is a text. The text (the foreground widget)
-//! is a child object of the rectangle (the background widget). These two widgets forms another, more complex widget that
+//! is a child object of the rectangle (the background widget). These two widgets form another, more complex widget that
 //! we call button.
 //!
 //! Such approach allows us to modify the look of the button as we wish, we can create a button with image background,
@@ -50,21 +50,21 @@
 //!
 //! ### Composition
 //!
-//! Every widget in the engine uses composition to build more complex widgets. All widgets (and respective builders) contains
-//! `Widget` instance inside, it provides basic functionality the widget such as layout information, hierarchy, default
-//! foreground and background brushes (their usage depends on derived widget), render and layout transform and so on.
+//! Every widget in the engine uses composition to build more complex widgets. All widgets (and respective builders) contain
+//! `Widget` instance inside, it provides basic functionality for the widget such as layout information, hierarchy, default
+//! foreground and background brushes (their usage depends on derived widget), render and layout transform, and so on.
 //!
 //! ### Message passing
 //!
 //! The engine uses message passing mechanism for UI logic. What does that mean? Let's see at the button from the
-//! previous section and imagine we want to change its text. To do that we need to explicitly "tell" the button's text
+//! previous section and imagine we want to change its text. To do that, we need to explicitly "tell" the button's text
 //! widget to change its content to something new. This is done by sending a message to the widget.
 //!
-//! There is no "classic" callbacks to handle various types of messages, which may come from widgets. Instead, you should write
+//! There are no "classic" callbacks to handle various types of messages, which may come from widgets. Instead, you should write
 //! your own message dispatcher where you'll handle all messages. Why so? At first - decoupling, in this case business logic
 //! is decoupled from the UI. You just receive messages one-by-one and do specific logic. The next reason is that any
 //! callback would require context capturing which could be somewhat restrictive - since you need to share context with the
-//! UI, it would force you to wrap it in `Rc<RefCell<..>>`/`Arc<Mutex<..>>`.
+//! UI, it would force you to wrap it in `Rc<RefCell<...>>`/`Arc<Mutex<...>>`.
 //!
 //! ### Message routing strategies
 //!
@@ -72,11 +72,11 @@
 //! will "travel" across the tree of nodes.
 //!
 //! 1. Bubble - a message starts its way from a widget and goes up on hierarchy until it reaches the root node of the hierarchy.
-//! Nodes that lies outside that path won't receive the message. This is the most important message routing strategy, that
+//! Nodes that lie outside that path won't receive the message. This is the most important message routing strategy that
 //! is used for **every** node by default.
-//! 2. Direct - a message passed directly to every node that are capable to handle it. There is actual routing in this
+//! 2. Direct - a message passed directly to every node that is capable of handle it. There is actual routing in this
 //! case. Direct routing is used in rare cases when you need to catch a message outside its normal "bubble" route. It is **off**
-//! by default for every widget, but can be enabled on per-widget instance basis.
+//! by default for every widget, but can be enabled on a per-widget instance basis.
 //!
 //! ## Widgets Overview
 //!
@@ -85,76 +85,76 @@
 //!
 //! ### Containers
 //!
-//! The Container widgets primary purpose is to contain other widgets. They are mostly used as a tool to layout the UI in
+//! The Container widgets' primary purpose is to contain other widgets. They are mostly used as a tool to lay out the UI in
 //! visually different ways.
 //!
-//! * [`crate::stack_panel::StackPanel`]: The Stack Panel arranges widgets in a linear fashion, either vertically or horizontally
+//! * [`stack_panel::StackPanel`]: The Stack Panel arranges widgets in a linear fashion, either vertically or horizontally
 //! depending on how it's setup.
-//! * [`crate::wrap_panel::WrapPanel`]: The Wrap Panel arranges widgets in a linear fashion but if it overflows the widgets are
-//! continued adjacent to the first line. Can arrange widgets either vertically or horizontally depending on how it's setup.
-//! * [`crate::grid::Grid`]: The Grid arranges widgets into rows and columns with given size constraints.
-//! * [`crate::canvas::Canvas`]: The Canvas arranges widgets at their desired positions; it has infinite size and does not restrict
-//! their children widgets position and size.
-//! * [`crate::window::Window`]: The Window holds other widgets in a panel that can be configured at setup to be move-able,
+//! * [`wrap_panel::WrapPanel`]: The Wrap Panel arranges widgets in a linear fashion, but if it overflows, the widgets are
+//! continued adjacent to the first line. Can arrange widgets either vertically or horizontally depending on how its setup.
+//! * [`grid::Grid`]: The Grid arranges widgets into rows and columns with given size constraints.
+//! * [`Canvas`]: The Canvas arranges widgets at their desired positions; it has infinite size and does not restrict
+//! their children's widgets' position and size.
+//! * [`window::Window`]: The Window holds other widgets in a panel that can be configured at setup to be move-able,
 //! expanded and contracted via user input, exited, and have a displayed label. The window has a title bar to assist with these
 //! features.
-//! * [`crate::messagebox::MessageBox`]: The Message Box is a Window that has been streamlined to show standard confirmation/information
+//! * [`messagebox::MessageBox`]: The Message Box is a Window that has been streamlined to show standard confirmation/information
 //! dialogues, for example, closing a document with unsaved changes. It has a title, some text, and a fixed set of buttons (Yes, No,
 //! Cancel in different combinations).
-//! * [`crate::menu::Menu`]: The Menu is a root container for Menu Items, an example could be a menu strip with File, Edit, View, etc
+//! * [`menu::Menu`]: The Menu is a root container for Menu Items, an example could be a menu strip with File, Edit, View, etc
 //! items.
-//! * [`crate::popup::Popup`]: The Popup is a panel that locks input to its content while it is open. A simple example of it could be a
+//! * [`popup::Popup`]: The Popup is a panel that locks input to its content while it is open. A simple example of it could be a
 //! context menu.
-//! * [`crate::scroll_viewer::ScrollViewer`]: The ScrollViewer is a wrapper for Scroll Panel that adds two scroll bars to it.
-//! * [`crate::scroll_panel::ScrollPanel`]: The Scroll Panel is a panel that allows you apply some offset to children widgets. It
+//! * [`scroll_viewer::ScrollViewer`]: The ScrollViewer is a wrapper for Scroll Panel that adds two scroll bars to it.
+//! * [`scroll_panel::ScrollPanel`]: The Scroll Panel is a panel that allows you to apply some offset to children widgets. It
 //! is used to create "scrollable" area in conjunction with the Scroll Viewer.
-//! * [`crate::expander::Expander`]: The Expander handles hiding and showing multiple panels of widgets in an according style UI element.
+//! * [`expander::Expander`]: The Expander handles hiding and showing multiple panels of widgets in an according style UI element.
 //! Multiple panels can be shown or hidden at any time based on user input.
-//! * [`crate::tab_control::TabControl`]: The Tab Control handles hiding several panels of widgets, only showing the one that the user
+//! * [`tab_control::TabControl`]: The Tab Control handles hiding several panels of widgets, only showing the one that the user
 //! has selected.
-//! * [`crate::dock::DockingManager`]: The Docking manager allows you to dock windows and hold them in-place.
-//! * [`crate::tree::Tree`]: The Tree allows you to create views for hierarchical data.
-//! * [`crate::screen::Screen`]: The Screen widgets always has its bounds match the current screen size
+//! * [`dock::DockingManager`]: The Docking manager allows you to dock windows and hold them in-place.
+//! * [`tree::Tree`]: The Tree allows you to create views for hierarchical data.
+//! * [`screen::Screen`]: The Screen widgets always has its bounds match the current screen size,
 //! thus making it possible to create widget hierarchy that always fits the screen bounds.
 //!
 //!
 //! ### Visual
 //!
-//! The Visual widgets primary purpose is to provide the user feedback generally without the user directly interacting with them.
+//! The Visual widgets' primary purpose is to provide the user feedback generally without the user directly interacting with them.
 //!
-//! * [`crate::text::Text`]: The Text widget is used to display a string to the user.
-//! * [`crate::image::Image`]: The Image widget is used to display a pixel image to the user.
-//! * [`crate::vector_image::VectorImage`]: The Vector Image is used to render vector instructions as a graphical element.
-//! * [`crate::rect::RectEditor`]: The Rect allows you to specify numeric values for X, Y, Width, and Height of a rectangle.
-//! * [`crate::progress_bar::ProgressBar`]: The Progress Bar shows a bar whose fill state can be adjusted to indicate visually how full
-//! something is, for example how close to 100% is a loading process.
-//! * [`crate::decorator::Decorator`]: The Decorator is used to style any widget. It has support for different styles depending on various
+//! * [`text::Text`]: The Text widget is used to display a string to the user.
+//! * [`image::Image`]: The Image widget is used to display a pixel image to the user.
+//! * [`vector_image::VectorImage`]: The Vector Image is used to render vector instructions as a graphical element.
+//! * [`rect::RectEditor`]: The Rect allows you to specify numeric values for X, Y, Width, and Height of a rectangle.
+//! * [`progress_bar::ProgressBar`]: The Progress Bar shows a bar whose fill state can be adjusted to indicate visually how full
+//! something is, for example, how close to 100% is a loading process.
+//! * [`decorator::Decorator`]: The Decorator is used to style any widget. It has support for different styles depending on various
 //! events like mouse hover or click.
-//! * [`crate::border::Border`]: The Border widget is used in conjunction with the Decorator widget to provide configurable boarders to
+//! * [`border::Border`]: The Border widget is used in conjunction with the Decorator widget to provide configurable boarders to
 //! any widget for styling purposes.
 //!
 //! ### Controls
 //!
-//! Control widgets primary purpose is to provide users with intractable UI elements to control some aspect of the program.
+//! Control widgets' primary purpose is to provide users with interactable UI elements to control some aspect of the program.
 //!
-//! * [`crate::border::Border`]: The Button provides a press-able control that can contain other UI elements, for example a Text
+//! * [`button::Button`]: The Button provides a press-able control that can contain other UI elements, for example, a Text
 //! or Image Widget.
-//! * [`crate::check_box::CheckBox`]: The Check Box is a toggle-able control that can contain other UI elements, for example a Text
+//! * [`check_box::CheckBox`]: The Checkbox is a toggle-able control that can contain other UI elements, for example, a Text
 //! or Image Widget.
-//! * [`crate::text_box::TextBox`]: The Text Box is a control that allows the editing of text.
-//! * [`crate::scroll_bar::ScrollBar`]: The Scroll Bar provides a scroll bar like control that can be used on it's own as a data input or with
+//! * [`text_box::TextBox`]: The Text Box is a control that allows the editing of text.
+//! * [`scroll_bar::ScrollBar`]: The Scroll Bar provides a scroll bar like control that can be used on its own as a data input or with
 //! certain other widgets to provide content scrolling capabilities.
-//! * [`crate::numeric::NumericUpDown`]: The Numeric Field provides the ability to adjust a number via increment and decrement buttons or direct
+//! * [`numeric::NumericUpDown`]: The Numeric Field provides the ability to adjust a number via increment and decrement buttons or direct
 //! input. The number can be constrained to remain inside a specific range or have a specific step.
-//! * [`crate::range::RangeEditor`]: The Range allows the user to edit a numeric range - specify its begin and end values.
-//! * [`crate::list_view::ListView`]: The List View provides a control where users can select from a list of items.
-//! * [`crate::dropdown_list::DropdownList`]: The Drop-down List is a control which shows the currently selected item and provides a drop-down
+//! * [`range::RangeEditor`]: The Range allows the user to edit a numeric range - specify its beginning and end values.
+//! * [`list_view::ListView`]: The List View provides a control where users can select from a list of items.
+//! * [`dropdown_list::DropdownList`]: The Drop-down List is a control which shows the currently selected item and provides a drop-down
 //! list to select an item.
-//! * [`crate::file_browser::FileBrowser`]: The File Browser is a tree view of the file system allowing the user to select a file or folder.
-//! * [`crate::curve::CurveEditor`]: The CurveEditor allows editing parametric curves - adding points, and setting up transitions (constant,
+//! * [`file_browser::FileBrowser`]: The File Browser is a tree view of the file system allowing the user to select a file or folder.
+//! * [`curve::CurveEditor`]: The CurveEditor allows editing parametric curves - adding points, and setting up transitions (constant,
 //! linear, cubic) between them.
-//! * [`crate::inspector::Inspector`]: The Inspector automatically creates and handles the input of UI elements based on a populated Inspector
-//! Context given to it allowing the user to adjust values of a variety of models without manually creating UI's for each type.
+//! * [`inspector::Inspector`]: The Inspector automatically creates and handles the input of UI elements based on a populated Inspector
+//! Context given to it, allowing the user to adjust values of a variety of models without manually creating UI for each type.
 //!
 //! ## Examples
 //!
@@ -187,8 +187,26 @@
 //! ```
 //!
 //! **Important**: This example **does not** include any drawing or OS event processing! It is because this
-//! crate is OS- and GAPI-agnostic and do not create native OS windows and cannot draw anything on screen.
+//! crate is OS- and GAPI-agnostic and does not create native OS windows and cannot draw anything on screen.
 //! For more specific examples, please see `examples` of the crate.
+//!
+//! ## Keyboard Focus
+//!
+//! Widgets can receive keyboard events, but only one widget at a time can have the keyboard focus.
+//! The focused widget is automatically highlighted by the UI library using a rounded rectangle of
+//! bright-blue color. Such highlighting can be disabled by setting a [`Style::BRUSH_HIGHLIGHT`]
+//! property at the root style of your [`UserInterface`] instance.
+//!
+//! ```rust
+//! use fyrox_core::color::Color;
+//! use fyrox_ui::brush::Brush;
+//! use fyrox_ui::style::Style;
+//! use fyrox_ui::UserInterface;
+//!
+//! fn disable_highlighting(ui: &mut UserInterface) {
+//!     ui.style().data_ref().set(Style::BRUSH_HIGHLIGHT, Brush::Solid(Color::TRANSPARENT));
+//! }
+//! ```
 
 #![forbid(unsafe_code)]
 #![allow(irrefutable_let_patterns)]
@@ -200,7 +218,9 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::doc_lazy_continuation)]
 #![allow(clippy::mutable_key_type)]
+#![allow(mismatched_lifetime_syntaxes)]
 
+pub use bbcode::*;
 pub use copypasta;
 pub use fyrox_core as core;
 use message::TouchPhase;
@@ -208,6 +228,7 @@ use message::TouchPhase;
 pub mod absm;
 mod alignment;
 pub mod animation;
+mod bbcode;
 pub mod bit;
 pub mod border;
 pub mod brush;
@@ -229,6 +250,7 @@ pub mod font;
 pub mod formatted_text;
 pub mod grid;
 pub mod image;
+pub mod input;
 pub mod inspector;
 pub mod key;
 pub mod list_view;
@@ -247,6 +269,7 @@ pub mod popup;
 pub mod progress_bar;
 pub mod range;
 pub mod rect;
+pub mod resources;
 pub mod screen;
 pub mod scroll_bar;
 pub mod scroll_panel;
@@ -256,6 +279,7 @@ pub mod selector;
 pub mod stack_panel;
 pub mod style;
 pub mod tab_control;
+pub mod test;
 pub mod text;
 pub mod text_box;
 mod thickness;
@@ -278,40 +302,52 @@ use crate::{
     core::{
         algebra::{Matrix3, Vector2},
         color::Color,
+        futures::future::join_all,
+        log::Log,
         math::Rect,
-        pool::{Handle, Pool},
+        parking_lot::Mutex,
+        pool::{Handle, ObjectOrVariant, Pool, Ticket},
         reflect::prelude::*,
-        uuid::uuid,
+        uuid::{uuid, Uuid},
         visitor::prelude::*,
+        SafeLock,
     },
-    core::{parking_lot::Mutex, pool::Ticket, uuid::Uuid, uuid_provider, TypeUuidProvider},
     draw::{CommandTexture, Draw, DrawingContext},
-    font::FontResource,
-    font::BUILT_IN_FONT,
+    font::{FontResource, BUILT_IN_FONT},
     message::{
         ButtonState, CursorIcon, KeyboardModifiers, MessageDirection, MouseButton, OsEvent,
         UiMessage,
     },
+    message::{DeliveryMode, MessageData, RoutingStrategy},
     popup::{Placement, PopupMessage},
-    widget::{Widget, WidgetBuilder, WidgetMessage},
+    style::{
+        resource::{StyleResource, StyleResourceExt},
+        Style, DEFAULT_STYLE,
+    },
+    widget::{Widget, WidgetBuilder, WidgetMaterial, WidgetMessage},
 };
 use copypasta::ClipboardContext;
 use fxhash::{FxHashMap, FxHashSet};
+pub use fyrox_animation as generic_animation;
+use fyrox_graph::{NodeHandleMap, NodeMapping, NodeWrapper, PrefabData, SceneGraph};
 use fyrox_resource::{
-    io::FsResourceIo, io::ResourceIo, manager::ResourceManager, untyped::UntypedResource, Resource,
-    ResourceData,
+    io::{FsResourceIo, ResourceIo},
+    manager::ResourceManager,
+    untyped::UntypedResource,
+    Resource, ResourceData,
 };
+use fyrox_texture::TextureResource;
 use serde::{Deserialize, Serialize};
 use std::{
     any::TypeId,
     cell::{Ref, RefCell, RefMut},
     collections::{btree_set::BTreeSet, hash_map::Entry, VecDeque},
     error::Error,
-    fmt::{Debug, Formatter},
+    fmt::{Debug, Formatter, Write},
     ops::{Deref, DerefMut, Index, IndexMut},
     path::Path,
     sync::{
-        mpsc::{self, Receiver, Sender, TryRecvError},
+        mpsc::{self, Receiver, Sender},
         Arc,
     },
 };
@@ -320,26 +356,16 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
 pub use alignment::*;
 pub use build::*;
 pub use control::*;
-use fyrox_core::futures::future::join_all;
-use fyrox_core::log::Log;
-use fyrox_graph::{
-    AbstractSceneGraph, AbstractSceneNode, BaseSceneGraph, NodeHandleMap, NodeMapping, PrefabData,
-    SceneGraph, SceneGraphNode,
-};
+use fyrox_core::algebra::Point2;
+use fyrox_core::blank_reflect_ref;
+use fyrox_core::dyntype::{DynTypeConstructorContainer, DynTypeContainer};
+use fyrox_core::pool::PoolError;
+pub use fyrox_texture as texture;
 pub use node::*;
 pub use thickness::*;
 
-use crate::constructor::new_widget_constructor_container;
-use crate::message::RoutingStrategy;
-use crate::style::resource::{StyleResource, StyleResourceExt};
-use crate::style::{Style, DEFAULT_STYLE};
-use crate::widget::WidgetMaterial;
-pub use fyrox_animation as generic_animation;
-use fyrox_core::pool::{BorrowAs, ErasedHandle};
-use fyrox_resource::untyped::ResourceKind;
-pub use fyrox_texture as texture;
-
 #[derive(Default, Clone, Reflect, Debug)]
+#[reflect(type_uuid = "1eb64a98-295d-46ed-8fca-ba06e80eec6a")]
 pub(crate) struct RcUiNodeHandleInner {
     handle: Handle<UiNode>,
     #[reflect(hidden)]
@@ -367,10 +393,7 @@ impl Visit for RcUiNodeHandleInner {
 impl Drop for RcUiNodeHandleInner {
     fn drop(&mut self) {
         if let Some(sender) = self.sender.as_ref() {
-            let _ = sender.send(WidgetMessage::remove(
-                self.handle,
-                MessageDirection::ToWidget,
-            ));
+            let _ = sender.send(UiMessage::for_widget(self.handle, WidgetMessage::Remove));
         } else {
             Log::warn(format!(
                 "There's no message sender for shared handle {}. The object \
@@ -382,15 +405,15 @@ impl Drop for RcUiNodeHandleInner {
 }
 
 /// Reference counted handle to a widget. It is used to automatically destroy the widget it points
-/// to when the reference counter reaches zero. It's main usage in the library is to store handles
-/// to context menus, that could be shared across multiple widgets.
-#[derive(Clone, Default, Visit, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "9111a53b-05dc-4c75-aab1-71d5b1c93311")]
+/// to when the reference counter reaches zero. Its main usage in the library is to store handles
+/// to context menus that could be shared across multiple widgets.
+#[derive(Clone, Default, Visit, Reflect)]
+#[reflect(type_uuid = "9111a53b-05dc-4c75-aab1-71d5b1c93311")]
 pub struct RcUiNodeHandle(Arc<Mutex<RcUiNodeHandleInner>>);
 
 impl Debug for RcUiNodeHandle {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let handle = self.0.lock().handle;
+        let handle = self.0.safe_lock().handle;
 
         writeln!(
             f,
@@ -404,8 +427,8 @@ impl Debug for RcUiNodeHandle {
 
 impl PartialEq for RcUiNodeHandle {
     fn eq(&self, other: &Self) -> bool {
-        let a = self.0.lock().handle;
-        let b = other.0.lock().handle;
+        let a = self.0.safe_lock().handle;
+        let b = other.0.safe_lock().handle;
         a == b
     }
 }
@@ -413,9 +436,9 @@ impl PartialEq for RcUiNodeHandle {
 impl RcUiNodeHandle {
     /// Creates a new reference counted widget handle.
     #[inline]
-    pub fn new(handle: Handle<UiNode>, sender: Sender<UiMessage>) -> Self {
+    pub fn new(handle: Handle<impl ObjectOrVariant<UiNode>>, sender: Sender<UiMessage>) -> Self {
         Self(Arc::new(Mutex::new(RcUiNodeHandleInner {
-            handle,
+            handle: handle.to_base(),
             sender: Some(sender),
         })))
     }
@@ -423,7 +446,7 @@ impl RcUiNodeHandle {
     /// Returns the inner handle.
     #[inline]
     pub fn handle(&self) -> Handle<UiNode> {
-        self.0.lock().handle
+        self.0.safe_lock().handle
     }
 }
 
@@ -443,6 +466,7 @@ impl RcUiNodeHandle {
     EnumString,
     VariantNames,
 )]
+#[reflect(type_uuid = "1c6ad1b0-3f4c-48be-87dd-6929cb3577bf")]
 pub enum Orientation {
     /// Vertical orientation. This is default value.
     #[default]
@@ -450,8 +474,6 @@ pub enum Orientation {
     /// Horizontal orientation.
     Horizontal,
 }
-
-uuid_provider!(Orientation = "1c6ad1b0-3f4c-48be-87dd-6929cb3577bf");
 
 #[derive(Default, Clone)]
 pub struct NodeStatistics(pub FxHashMap<&'static str, isize>);
@@ -508,6 +530,7 @@ impl NodeStatistics {
 }
 
 #[derive(Visit, Reflect, Debug, Clone)]
+#[reflect(type_uuid = "9f9d5633-1568-4611-8709-3eeb615b7c0f")]
 pub struct DragContext {
     pub is_dragging: bool,
     pub drag_node: Handle<UiNode>,
@@ -527,6 +550,7 @@ impl Default for DragContext {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Visit, Reflect)]
+#[reflect(type_uuid = "46ffe412-b7d9-41c9-b56a-3bcacdaf33b2")]
 pub struct MouseState {
     pub left: ButtonState,
     pub right: ButtonState,
@@ -545,17 +569,18 @@ impl Default for MouseState {
 }
 
 #[derive(Copy, Clone, Visit, Reflect, Debug, Default)]
+#[reflect(type_uuid = "2f1add9c-5019-4922-9045-0bd5ca2fd63a")]
 pub struct RestrictionEntry {
     /// Handle to UI node to which picking must be restricted to.
     pub handle: Handle<UiNode>,
 
-    /// A flag that tells UI to stop iterating over picking stack.
+    /// A flag that tells the UI to stop iterating over picking stack.
     /// There are two use cases: chain of menus (popups) and set of modal windows. In case of
-    /// menus you need to restrict picking to an entire chain, but leave possibility to select
-    /// any menu in the chain. In case of multiple modal windows you need to restrict picking
+    ///  menus, you need to restrict picking to an entire chain, but leave the possibility to select
+    /// any menu in the chain. In the case of multiple modal windows, you need to restrict picking
     /// individually per window, not allowing to pick anything behind modal window, but still
-    /// save restrictions in the entire chain of modal windows so if topmost closes, restriction
-    /// will be on previous one and so on.
+    /// save restrictions in the entire chain of modal windows, so if topmost closes, restriction
+    /// will be on the previous one and so on.
     pub stop: bool,
 }
 
@@ -566,9 +591,9 @@ pub struct TooltipEntry {
     pub shown: bool,
     /// Time remaining until this entry should disappear (in seconds).
     pub disappear_timer: f32,
-    /// Maximum time that it should be kept for
+    /// The Maximum time that it should be kept for
     /// This is stored here as well, because when hovering
-    /// over the tooltip, we don't know the time it should stay for and
+    /// over the tooltip, we don't know the time it should stay for, and
     /// so we use this to refresh the timer.
     pub max_time: f32,
 }
@@ -589,11 +614,14 @@ impl TooltipEntry {
 pub enum LayoutEvent {
     MeasurementInvalidated(Handle<UiNode>),
     ArrangementInvalidated(Handle<UiNode>),
+    VisualInvalidated(Handle<UiNode>),
     VisibilityChanged(Handle<UiNode>),
     ZIndexChanged(Handle<UiNode>),
+    TransformChanged(Handle<UiNode>),
 }
 
 #[derive(Clone, Debug, Visit, Reflect, Default)]
+#[reflect(type_uuid = "30bc5bc5-6592-48d8-8647-9bdbbb977ffb")]
 struct DoubleClickEntry {
     timer: f32,
     click_count: u32,
@@ -653,21 +681,20 @@ pub struct UiUpdateSwitches {
 
 pub type WidgetPool = Pool<UiNode, WidgetContainer>;
 
-impl<T: Control> BorrowAs<UiNode, WidgetContainer> for Handle<T> {
-    type Target = T;
-
-    fn borrow_as_ref(self, pool: &WidgetPool) -> Option<&T> {
-        pool.try_borrow(self.transmute())
-            .and_then(|n| ControlAsAny::as_any(n.0.deref()).downcast_ref::<T>())
-    }
-
-    fn borrow_as_mut(self, pool: &mut WidgetPool) -> Option<&mut T> {
-        pool.try_borrow_mut(self.transmute())
-            .and_then(|n| ControlAsAny::as_any_mut(n.0.deref_mut()).downcast_mut::<T>())
-    }
+#[derive(Default, Debug, Clone, Reflect, Visit)]
+#[reflect(type_uuid = "b426e937-4050-4539-8041-ade4222539c8")]
+pub enum RenderMode {
+    /// The UI will be re-rendered on every frame. This is the default behavior.
+    #[default]
+    EveryFrame,
+    /// The UI will be re-rendered only if there was any message with [`MessageDirection::ToWidget`]
+    /// sent to it. This option can be useful for offscreen rending of a user interface that changes
+    /// infrequently.
+    OnChanges,
 }
 
-#[derive(Reflect, Debug)]
+#[derive(Reflect)]
+#[reflect(type_uuid = "0d065c93-ef9c-4dd2-9fe7-e2b33c1a21b6")]
 pub struct UserInterface {
     screen_size: Vector2<f32>,
     nodes: WidgetPool,
@@ -703,7 +730,6 @@ pub struct UserInterface {
     layout_events_receiver: Receiver<LayoutEvent>,
     #[reflect(hidden)]
     layout_events_sender: Sender<LayoutEvent>,
-    need_update_global_transform: bool,
     #[reflect(hidden)]
     z_index_update_set: FxHashSet<Handle<UiNode>>,
     #[reflect(hidden)]
@@ -713,6 +739,62 @@ pub struct UserInterface {
     pub double_click_time_slice: f32,
     pub tooltip_appear_delay: f32,
     pub standard_material: WidgetMaterial,
+    /// Optional render target of the user interface. The UI will be rendered in such target with
+    /// and the target size will be set to the screen size of the user interface.
+    pub render_target: Option<TextureResource>,
+    /// Render mode of the user interface. See [`RenderMode`] docs for more info.
+    pub render_mode: RenderMode,
+    /// A flag that indicates that the UI should be rendered. It is only taken into account if
+    /// the render mode is set to [`RenderMode::OnChanges`].
+    pub need_render: bool,
+    pub user_data: DynTypeContainer,
+}
+
+impl Reflect for &'static mut UserInterface {
+    blank_reflect_ref!("7ce82d16-d0ed-4d1b-b61e-b389e3d84c8a");
+}
+
+impl Debug for UserInterface {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserInterface")
+            .field("screen_size", &self.screen_size)
+            .field("drawing_context", &self.drawing_context)
+            .field("visual_debug", &self.visual_debug)
+            .field("root_canvas", &self.root_canvas)
+            .field("picked_node", &self.picked_node)
+            .field("prev_picked_node", &self.prev_picked_node)
+            .field("captured_node", &self.captured_node)
+            .field("keyboard_focus_node", &self.keyboard_focus_node)
+            .field("cursor_position", &self.cursor_position)
+            .field("style", &self.style)
+            .field("receiver", &self.receiver)
+            .field("sender", &self.sender)
+            .field("stack", &self.stack)
+            .field("picking_stack", &self.picking_stack)
+            .field("bubble_queue", &self.bubble_queue)
+            .field("drag_context", &self.drag_context)
+            .field("mouse_state", &self.mouse_state)
+            .field("keyboard_modifiers", &self.keyboard_modifiers)
+            .field("cursor_icon", &self.cursor_icon)
+            .field("active_tooltip", &self.active_tooltip)
+            .field("methods_registry", &self.methods_registry)
+            .field("clipboard", &self.clipboard)
+            .field("layout_events_receiver", &self.layout_events_receiver)
+            .field("layout_events_sender", &self.layout_events_sender)
+            .field("z_index_update_set", &self.z_index_update_set)
+            .field("default_font", &self.default_font)
+            .field("double_click_entries", &self.double_click_entries)
+            .field("double_click_time_slice", &self.double_click_time_slice)
+            .field("tooltip_appear_delay", &self.tooltip_appear_delay)
+            .field("standard_material", &self.standard_material)
+            .field("render_target", &self.render_target)
+            .field("render_mode", &self.render_mode)
+            .field("need_render", &self.need_render)
+            .field("user_data", &self.user_data)
+            .finish()?;
+        f.write_char('\n')?;
+        f.write_str(&self.summary())
+    }
 }
 
 impl Visit for UserInterface {
@@ -743,12 +825,12 @@ impl Visit for UserInterface {
         self.cursor_icon.visit("CursorIcon", &mut region)?;
         self.double_click_time_slice
             .visit("DoubleClickTimeSlice", &mut region)?;
-        let _ = self
-            .tooltip_appear_delay
-            .visit("TooltipAppearDelay", &mut region);
-        let _ = self
-            .standard_material
-            .visit("StandardMaterial", &mut region);
+        self.tooltip_appear_delay
+            .visit("TooltipAppearDelay", &mut region)?;
+        self.standard_material
+            .visit("StandardMaterial", &mut region)?;
+        self.render_mode.visit("RenderMode", &mut region)?;
+        Log::verify(self.user_data.visit("UserData", &mut region));
 
         if region.is_reading() {
             for node in self.nodes.iter() {
@@ -782,11 +864,7 @@ impl Clone for UserInterface {
             captured_node: self.captured_node,
             keyboard_focus_node: self.keyboard_focus_node,
             cursor_position: self.cursor_position,
-            style: StyleResource::new_ok(
-                Uuid::new_v4(),
-                ResourceKind::Embedded,
-                Style::dark_style(),
-            ),
+            style: DEFAULT_STYLE.resource.clone(),
             receiver,
             sender,
             stack: self.stack.clone(),
@@ -801,13 +879,16 @@ impl Clone for UserInterface {
             clipboard: Clipboard(ClipboardContext::new().ok().map(RefCell::new)),
             layout_events_receiver,
             layout_events_sender,
-            need_update_global_transform: self.need_update_global_transform,
             z_index_update_set: self.z_index_update_set.clone(),
             default_font: self.default_font.clone(),
             double_click_entries: self.double_click_entries.clone(),
             double_click_time_slice: self.double_click_time_slice,
             tooltip_appear_delay: self.tooltip_appear_delay,
             standard_material: Default::default(),
+            render_target: None,
+            render_mode: Default::default(),
+            need_render: self.need_render,
+            user_data: self.user_data.clone(),
         }
     }
 }
@@ -815,6 +896,20 @@ impl Clone for UserInterface {
 impl Default for UserInterface {
     fn default() -> Self {
         Self::new(Vector2::new(100.0, 100.0))
+    }
+}
+
+#[inline(always)]
+fn invalidate_recursive_up(
+    nodes: &Pool<UiNode, WidgetContainer>,
+    node: Handle<UiNode>,
+    callback: fn(&UiNode),
+) {
+    if let Ok(node_ref) = nodes.try_borrow(node) {
+        callback(node_ref);
+        if node_ref.parent().is_some() {
+            invalidate_recursive_up(nodes, node_ref.parent(), callback);
+        }
     }
 }
 
@@ -827,13 +922,6 @@ impl UiContainer {
     /// Creates a new user interface container.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Creates a new user interface container with the given user interface.
-    pub fn new_with_ui(ui: UserInterface) -> Self {
-        let mut pool = Pool::new();
-        let _ = pool.spawn(ui);
-        Self { pool }
     }
 
     /// Returns a reference to the first user interface in the container. Panics, if the container
@@ -870,12 +958,15 @@ impl UiContainer {
     }
 
     /// Tries to borrow a user interface using its handle.
-    pub fn try_get(&self, handle: Handle<UserInterface>) -> Option<&UserInterface> {
+    pub fn try_get(&self, handle: Handle<UserInterface>) -> Result<&UserInterface, PoolError> {
         self.pool.try_borrow(handle)
     }
 
     /// Tries to borrow a user interface using its handle.
-    pub fn try_get_mut(&mut self, handle: Handle<UserInterface>) -> Option<&mut UserInterface> {
+    pub fn try_get_mut(
+        &mut self,
+        handle: Handle<UserInterface>,
+    ) -> Result<&mut UserInterface, PoolError> {
         self.pool.try_borrow_mut(handle)
     }
 
@@ -891,7 +982,7 @@ impl UiContainer {
         self.pool.iter_mut()
     }
 
-    /// Adds a new user interface into container.
+    /// Adds a new user interface into the container.
     #[inline]
     pub fn add(&mut self, scene: UserInterface) -> Handle<UserInterface> {
         self.pool.spawn(scene)
@@ -903,7 +994,7 @@ impl UiContainer {
         self.pool.clear()
     }
 
-    /// Removes the given user interface from container. The user interface will be destroyed
+    /// Removes the given user interface from the container. The user interface will be destroyed
     /// immediately.
     #[inline]
     pub fn remove(&mut self, handle: Handle<UserInterface>) {
@@ -935,6 +1026,22 @@ impl UiContainer {
     }
 }
 
+impl<T: ObjectOrVariant<UiNode>> Index<Handle<T>> for UserInterface {
+    type Output = T;
+
+    #[inline]
+    fn index(&self, index: Handle<T>) -> &Self::Output {
+        self.try_get(index).unwrap()
+    }
+}
+
+impl<T: ObjectOrVariant<UiNode>> IndexMut<Handle<T>> for UserInterface {
+    #[inline]
+    fn index_mut(&mut self, index: Handle<T>) -> &mut Self::Output {
+        self.try_get_mut(index).unwrap()
+    }
+}
+
 impl Index<Handle<UserInterface>> for UiContainer {
     type Output = UserInterface;
 
@@ -953,7 +1060,7 @@ impl IndexMut<Handle<UserInterface>> for UiContainer {
 
 fn is_on_screen(node: &UiNode, nodes: &Pool<UiNode, WidgetContainer>) -> bool {
     // Crawl up on tree and check if current bounds are intersects with every screen bound
-    // of parents chain. This is needed because some control can move their children outside of
+    // of parents chain. This is needed because some control can move their children outside
     // their bounds (like scroll viewer, etc.) and single intersection test of parent bounds with
     // current bounds is not enough.
     let bounds = node.clip_bounds();
@@ -972,17 +1079,16 @@ fn draw_node(
     nodes: &Pool<UiNode, WidgetContainer>,
     node_handle: Handle<UiNode>,
     drawing_context: &mut DrawingContext,
+    mut enabled: bool,
 ) {
     let node = &nodes[node_handle];
-    if !node.is_globally_visible() {
+    if node.visual_valid.get() {
         return;
     }
 
-    if !is_on_screen(node, nodes) {
-        return;
-    }
+    enabled &= node.enabled();
 
-    let pushed = if !is_node_enabled(nodes, node_handle) {
+    let pushed = if !enabled {
         drawing_context.push_opacity(0.4);
         true
     } else if let Some(opacity) = node.opacity() {
@@ -996,30 +1102,22 @@ fn draw_node(
 
     // Draw
     {
-        let start_index = drawing_context.get_commands().len();
         node.draw(drawing_context);
-        let end_index = drawing_context.get_commands().len();
-        node.command_indices
-            .borrow_mut()
-            .extend(start_index..end_index);
+        drawing_context
+            .copy_render_data_and_clear(&mut node.render_data_set.borrow_mut().draw_result);
     }
 
     // Continue on children
     for &child_node in node.children().iter() {
-        // Do not continue render of top-most nodes - they'll be rendered in separate pass.
-        if !nodes[child_node].is_draw_on_top() {
-            draw_node(nodes, child_node, drawing_context);
-        }
+        draw_node(nodes, child_node, drawing_context, enabled);
     }
 
     // Post draw.
     {
-        let start_index = drawing_context.get_commands().len();
         node.post_draw(drawing_context);
-        let end_index = drawing_context.get_commands().len();
-        node.command_indices
-            .borrow_mut()
-            .extend(start_index..end_index);
+
+        drawing_context
+            .copy_render_data_and_clear(&mut node.render_data_set.borrow_mut().post_draw_result);
     }
 
     drawing_context.transform_stack.pop();
@@ -1027,21 +1125,8 @@ fn draw_node(
     if pushed {
         drawing_context.pop_opacity();
     }
-}
 
-fn is_node_enabled(nodes: &Pool<UiNode, WidgetContainer>, handle: Handle<UiNode>) -> bool {
-    let root_node = &nodes[handle];
-    let mut enabled = root_node.enabled();
-    let mut parent = root_node.parent();
-    while parent.is_some() {
-        let node = &nodes[parent];
-        if !node.enabled() {
-            enabled = false;
-            break;
-        }
-        parent = node.parent();
-    }
-    enabled
+    node.visual_valid.set(true);
 }
 
 #[derive(Debug)]
@@ -1063,6 +1148,16 @@ fn remap_handles(old_new_mapping: &NodeHandleMap<UiNode>, ui: &mut UserInterface
     }
 }
 
+struct VisualTransformUpdateData {
+    roots: FxHashSet<Handle<UiNode>>,
+    visited: Vec<bool>,
+}
+
+pub struct PollResult {
+    pub processed_messages: usize,
+    pub message: Option<UiMessage>,
+}
+
 impl UserInterface {
     pub fn new(screen_size: Vector2<f32>) -> UserInterface {
         let (sender, receiver) = mpsc::channel();
@@ -1075,8 +1170,7 @@ impl UserInterface {
         screen_size: Vector2<f32>,
     ) -> UserInterface {
         let (layout_events_sender, layout_events_receiver) = mpsc::channel();
-        let style =
-            StyleResource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, Style::dark_style());
+        let style = DEFAULT_STYLE.resource.clone();
         let mut ui = UserInterface {
             screen_size,
             sender,
@@ -1103,13 +1197,16 @@ impl UserInterface {
             clipboard: Clipboard(ClipboardContext::new().ok().map(RefCell::new)),
             layout_events_receiver,
             layout_events_sender,
-            need_update_global_transform: Default::default(),
             z_index_update_set: Default::default(),
             default_font: BUILT_IN_FONT.resource(),
             double_click_entries: Default::default(),
             double_click_time_slice: 0.5, // 500 ms is standard in most operating systems.
             tooltip_appear_delay: 0.55,
             standard_material: Default::default(),
+            render_target: None,
+            render_mode: Default::default(),
+            need_render: true,
+            user_data: Default::default(),
         };
         let root_node = UiNode::new(Canvas {
             widget: WidgetBuilder::new().build(&ui.build_ctx()),
@@ -1117,6 +1214,22 @@ impl UserInterface {
         ui.root_canvas = ui.add_node(root_node);
         ui.keyboard_focus_node = ui.root_canvas;
         ui
+    }
+
+    fn recursive_summary(&self, indent: usize, current: Handle<UiNode>, result: &mut String) {
+        for _ in 0..indent {
+            result.push_str("  ");
+        }
+        let Ok(node) = self.try_get(current) else {
+            use std::fmt::Write;
+            writeln!(result, "{}: Failed to get", current).unwrap();
+            return;
+        };
+        result.push_str(&node.summary());
+        result.push('\n');
+        for child in node.children() {
+            self.recursive_summary(indent + 1, *child, result);
+        }
     }
 
     pub fn set_tooltip_appear_delay(&mut self, appear_delay: f32) {
@@ -1140,7 +1253,8 @@ impl UserInterface {
     }
 
     #[inline]
-    pub fn capture_mouse(&mut self, node: Handle<UiNode>) -> bool {
+    pub fn capture_mouse(&mut self, node: Handle<impl ObjectOrVariant<UiNode>>) -> bool {
+        let node = node.to_base();
         if self.captured_node.is_none() {
             self.captured_node = node;
             true
@@ -1154,8 +1268,15 @@ impl UserInterface {
         self.captured_node = Handle::NONE;
     }
 
-    pub fn is_node_enabled(&self, handle: Handle<UiNode>) -> bool {
-        is_node_enabled(&self.nodes, handle)
+    #[inline]
+    pub fn is_node_enabled(&self, mut handle: Handle<UiNode>) -> bool {
+        while let Ok(node) = self.nodes.try_get(handle) {
+            if !node.enabled() {
+                return false;
+            }
+            handle = node.parent();
+        }
+        true
     }
 
     fn update_global_visibility(&mut self, from: Handle<UiNode>) {
@@ -1166,10 +1287,10 @@ impl UserInterface {
                 .nodes
                 .try_borrow_dependant_mut(node_handle, |n| n.parent());
 
-            if let Some(widget) = widget {
+            if let Ok(widget) = widget {
                 self.stack.extend_from_slice(widget.children());
 
-                let visibility = if let Some(parent) = parent {
+                let visibility = if let Ok(parent) = parent {
                     widget.visibility() && parent.is_globally_visible()
                 } else {
                     widget.visibility()
@@ -1190,6 +1311,8 @@ impl UserInterface {
     }
 
     fn update_visual_transform(&mut self, from: Handle<UiNode>) {
+        invalidate_recursive_up(&self.nodes, from, |n| n.visual_valid.set(false));
+
         self.stack.clear();
         self.stack.push(from);
         while let Some(node_handle) = self.stack.pop() {
@@ -1197,24 +1320,26 @@ impl UserInterface {
                 .nodes
                 .try_borrow_dependant_mut(node_handle, |n| n.parent());
 
-            let widget = widget.unwrap();
+            if let Ok(widget) = widget {
+                if widget.is_globally_visible() {
+                    self.stack.extend_from_slice(widget.children());
 
-            if widget.is_globally_visible() {
-                self.stack.extend_from_slice(widget.children());
+                    let mut layout_transform = *widget.layout_transform();
 
-                let mut layout_transform = widget.layout_transform;
+                    layout_transform[6] = widget.actual_local_position().x;
+                    layout_transform[7] = widget.actual_local_position().y;
 
-                layout_transform[6] = widget.actual_local_position().x;
-                layout_transform[7] = widget.actual_local_position().y;
+                    let visual_transform = if let Ok(parent) = parent {
+                        parent.visual_transform() * layout_transform * widget.render_transform()
+                    } else {
+                        layout_transform * widget.render_transform()
+                    };
 
-                let visual_transform = if let Some(parent) = parent {
-                    parent.visual_transform * layout_transform * widget.render_transform
-                } else {
-                    layout_transform * widget.render_transform
-                };
-
-                widget.visual_transform = visual_transform;
-                widget.on_visual_transform_changed();
+                    let old_transform =
+                        std::mem::replace(&mut widget.visual_transform, visual_transform);
+                    widget.on_visual_transform_changed(&old_transform, &visual_transform);
+                    widget.visual_valid.set(false);
+                }
             }
         }
     }
@@ -1227,49 +1352,78 @@ impl UserInterface {
         self.screen_size = screen_size;
     }
 
-    fn handle_layout_events(&mut self) {
-        fn invalidate_recursive_up(
-            nodes: &Pool<UiNode, WidgetContainer>,
-            node: Handle<UiNode>,
-            callback: fn(&UiNode),
-        ) {
-            if let Some(node_ref) = nodes.try_borrow(node) {
-                (callback)(node_ref);
-                if node_ref.parent().is_some() {
-                    invalidate_recursive_up(nodes, node_ref.parent(), callback);
-                }
-            }
-        }
-
+    fn handle_layout_events(&mut self, data: &mut VisualTransformUpdateData) {
         while let Ok(layout_event) = self.layout_events_receiver.try_recv() {
             match layout_event {
                 LayoutEvent::MeasurementInvalidated(node) => {
                     invalidate_recursive_up(&self.nodes, node, |node_ref| {
-                        node_ref.measure_valid.set(false)
+                        node_ref.measure_valid.set(false);
                     });
                 }
                 LayoutEvent::ArrangementInvalidated(node) => {
                     invalidate_recursive_up(&self.nodes, node, |node_ref| {
-                        node_ref.arrange_valid.set(false)
+                        node_ref.arrange_valid.set(false);
                     });
-                    self.need_update_global_transform = true;
+                }
+                LayoutEvent::VisualInvalidated(node) => {
+                    invalidate_recursive_up(&self.nodes, node, |node_ref| {
+                        node_ref.visual_valid.set(false);
+                    });
                 }
                 LayoutEvent::VisibilityChanged(node) => {
                     self.update_global_visibility(node);
                 }
                 LayoutEvent::ZIndexChanged(node) => {
-                    if let Some(node_ref) = self.nodes.try_borrow(node) {
+                    if let Ok(node_ref) = self.nodes.try_borrow(node) {
                         // Z index affects the location of the node in its parent's children list.
                         // Hash set will remove duplicate requests of z-index updates, thus improving
                         // performance.
                         self.z_index_update_set.insert(node_ref.parent);
                     }
                 }
+                LayoutEvent::TransformChanged(node) => {
+                    let is_visited = &mut data.visited[node.index() as usize];
+
+                    if *is_visited {
+                        continue;
+                    }
+
+                    *is_visited = true;
+
+                    data.roots.insert(node);
+
+                    // Mark the entire hierarchy as visited.
+                    fn traverse_recursive(
+                        graph: &UserInterface,
+                        from: Handle<UiNode>,
+                        func: &mut impl FnMut(Handle<UiNode>),
+                    ) {
+                        func(from);
+                        if let Ok(node) = graph.try_get_node(from) {
+                            for &child in node.children() {
+                                traverse_recursive(graph, child, func)
+                            }
+                        }
+                    }
+
+                    traverse_recursive(self, node, &mut |h| {
+                        data.visited[h.index() as usize] = true;
+
+                        // Remove a descendant from the list of potential roots.
+                        if h != node && data.roots.contains(&h) {
+                            data.roots.remove(&h);
+                        }
+                    })
+                }
             }
         }
 
         // Do z-index sorting.
         for node_handle in self.z_index_update_set.drain() {
+            invalidate_recursive_up(&self.nodes, node_handle, |node_ref| {
+                node_ref.visual_valid.set(false);
+            });
+
             let mbc = self.nodes.begin_multi_borrow();
             if let Ok(mut node) = mbc.try_get_mut(node_handle) {
                 node.children.sort_by_key(|handle| {
@@ -1288,24 +1442,37 @@ impl UserInterface {
     pub fn update_layout(&mut self, screen_size: Vector2<f32>) {
         self.screen_size = screen_size;
 
-        self.handle_layout_events();
+        let mut data = VisualTransformUpdateData {
+            roots: Default::default(),
+            visited: vec![false; self.nodes.get_capacity() as usize],
+        };
+
+        self.handle_layout_events(&mut data);
 
         self.measure_node(self.root_canvas, screen_size);
-        let arrangement_changed = self.arrange_node(
+        self.arrange_node(
             self.root_canvas,
             &Rect::new(0.0, 0.0, screen_size.x, screen_size.y),
         );
 
-        if self.need_update_global_transform {
-            self.update_visual_transform(self.root_canvas);
-            self.need_update_global_transform = false;
-        }
+        // Arrange step may produce changes that affects visual transform.
+        self.handle_layout_events(&mut data);
 
-        if arrangement_changed {
-            self.calculate_clip_bounds(
-                self.root_canvas,
-                Rect::new(0.0, 0.0, self.screen_size.x, self.screen_size.y),
-            );
+        for root in data.roots {
+            self.update_visual_transform(root);
+
+            // Recalculate clip bounds, because they depend on the visual transform.
+            if let Ok(root_ref) = self.try_get_node(root) {
+                self.calculate_clip_bounds(
+                    root,
+                    self.try_get_node(root_ref.parent())
+                        .ok()
+                        .map(|c| c.clip_bounds())
+                        .unwrap_or_else(|| {
+                            Rect::new(0.0, 0.0, self.screen_size.x, self.screen_size.y)
+                        }),
+                );
+            }
         }
     }
 
@@ -1334,20 +1501,29 @@ impl UserInterface {
 
         self.update_tooltips(dt);
 
-        if !self.drag_context.is_dragging {
-            // Try to fetch new cursor icon starting from current picked node. Traverse
-            // tree up until cursor with different value is found.
-            self.cursor_icon = CursorIcon::default();
-            let mut handle = self.picked_node;
-            while handle.is_some() {
-                let node = &self.nodes[handle];
-                if let Some(cursor) = node.cursor() {
-                    self.cursor_icon = cursor;
-                    break;
+        // Try to fetch new cursor icon starting from the current picked node. Traverse
+        // tree up until cursor with different value is found.
+        self.cursor_icon = CursorIcon::default();
+        let mut handle = self.picked_node;
+        while handle.is_some() {
+            let node = &self.nodes[handle];
+            if self.drag_context.is_dragging {
+                if handle != self.drag_context.drag_node {
+                    if node.accepts_drop(self.drag_context.drag_node, self) {
+                        self.cursor_icon = CursorIcon::Crosshair;
+                        break;
+                    } else {
+                        self.cursor_icon = CursorIcon::NoDrop;
+                    }
                 }
-                handle = node.parent();
+            } else if let Some(cursor) = node.cursor() {
+                self.cursor_icon = cursor;
+                break;
             }
+            handle = node.parent();
         }
+
+        self.draw();
     }
 
     pub fn style(&self) -> &StyleResource {
@@ -1358,16 +1534,12 @@ impl UserInterface {
         self.style = style;
 
         fn notify_depth_first(node: Handle<UiNode>, ui: &UserInterface) {
-            if let Some(node_ref) = ui.try_get(node) {
+            if let Ok(node_ref) = ui.try_get_node(node) {
                 for child in node_ref.children.iter() {
                     notify_depth_first(*child, ui);
                 }
 
-                ui.send_message(WidgetMessage::style(
-                    node,
-                    MessageDirection::ToWidget,
-                    ui.style.clone(),
-                ));
+                ui.send(node, WidgetMessage::Style(ui.style.clone()));
             }
         }
 
@@ -1382,36 +1554,73 @@ impl UserInterface {
         self.drawing_context.elapsed_time = elapsed_time;
     }
 
-    pub fn draw(&mut self) -> &DrawingContext {
+    fn draw(&mut self) {
+        self.drawing_context.clear();
+        draw_node(
+            &self.nodes,
+            self.root_canvas,
+            &mut self.drawing_context,
+            true,
+        );
+
+        // Merge all render data from all the widgets.
+        fn merge_recursively<F>(
+            node_handle: Handle<UiNode>,
+            nodes: &Pool<UiNode, WidgetContainer>,
+            drawing_context: &mut DrawingContext,
+            filter: &mut F,
+        ) where
+            F: FnMut(&UiNode) -> bool,
+        {
+            let node = &nodes[node_handle];
+
+            if !filter(node) {
+                return;
+            }
+
+            if !node.is_globally_visible() || !is_on_screen(node, nodes) {
+                return;
+            }
+
+            assert!(node.visual_valid.get());
+
+            drawing_context.append(&node.render_data_set.borrow().draw_result);
+
+            for child in node.children() {
+                merge_recursively(*child, nodes, drawing_context, filter);
+            }
+
+            drawing_context.append(&node.render_data_set.borrow().post_draw_result);
+        }
+
         self.drawing_context.clear();
 
-        for node in self.nodes.iter_mut() {
-            node.command_indices.get_mut().clear();
+        let mut topmost_nodes = Vec::new();
+        merge_recursively(
+            self.root_canvas,
+            &self.nodes,
+            &mut self.drawing_context,
+            &mut |node| {
+                // Skip topmost nodes. They'll be merged in a separate pass to be rendered on top.
+                if node.is_draw_on_top() {
+                    topmost_nodes.push(node.handle);
+                    false
+                } else {
+                    true
+                }
+            },
+        );
+
+        for topmost_node in topmost_nodes.drain(..) {
+            merge_recursively(
+                topmost_node,
+                &self.nodes,
+                &mut self.drawing_context,
+                &mut |_| true,
+            );
         }
 
-        // Draw everything except top-most nodes.
-        draw_node(&self.nodes, self.root_canvas, &mut self.drawing_context);
-
-        // Render top-most nodes in separate pass.
-        // TODO: This may give weird results because of invalid nesting.
-        self.stack.clear();
-        self.stack.push(self.root());
-        while let Some(node_handle) = self.stack.pop() {
-            let node = &self.nodes[node_handle];
-
-            if !is_on_screen(node, &self.nodes) {
-                continue;
-            }
-
-            if node.is_draw_on_top() {
-                draw_node(&self.nodes, node_handle, &mut self.drawing_context);
-            }
-            for &child in node.children() {
-                self.stack.push(child);
-            }
-        }
-
-        // Debug info rendered on top of other.
+        // Debug info rendered on top of others.
         if self.visual_debug {
             if self.picked_node.is_some() {
                 let bounds = self.nodes.borrow(self.picked_node).screen_bounds();
@@ -1438,23 +1647,26 @@ impl UserInterface {
             }
         }
 
-        if let Some(keyboard_focus_node) = self.nodes.try_borrow(self.keyboard_focus_node) {
-            if keyboard_focus_node.global_visibility && keyboard_focus_node.accepts_input {
-                let bounds = keyboard_focus_node.screen_bounds().inflate(1.0, 1.0);
+        if let Ok(keyboard_focus_node) = self.nodes.try_borrow(self.keyboard_focus_node) {
+            if keyboard_focus_node.global_visibility
+                && keyboard_focus_node.accepts_input
+                && is_on_screen(keyboard_focus_node, &self.nodes)
+            {
+                let bounds = keyboard_focus_node
+                    .screen_bounds()
+                    .clip_by(keyboard_focus_node.clip_bounds())
+                    .unwrap_or_default()
+                    .inflate(1.0, 1.0);
                 self.drawing_context.push_rounded_rect(&bounds, 1.0, 2.0, 6);
                 self.drawing_context.commit(
                     bounds,
-                    DEFAULT_STYLE
-                        .resource
-                        .get_or_default(Style::BRUSH_BRIGHT_BLUE),
+                    self.style.get_or_default(Style::BRUSH_HIGHLIGHT),
                     CommandTexture::None,
                     &self.standard_material,
                     None,
                 );
             }
         }
-
-        &self.drawing_context
     }
 
     pub fn clipboard(&self) -> Option<Ref<ClipboardContext>> {
@@ -1465,7 +1677,12 @@ impl UserInterface {
         self.clipboard.0.as_ref().map(|v| v.borrow_mut())
     }
 
-    pub fn arrange_node(&self, handle: Handle<UiNode>, final_rect: &Rect<f32>) -> bool {
+    pub fn arrange_node(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        final_rect: &Rect<f32>,
+    ) -> bool {
+        let handle = handle.to_base();
         let node = self.node(handle);
 
         if node.is_arrange_valid() && node.prev_arrange.get() == *final_rect {
@@ -1498,7 +1715,7 @@ impl UserInterface {
                 size.y = node.height();
             }
 
-            size = transform_size(size, &node.layout_transform);
+            size = transform_size(size, node.layout_transform());
 
             if !node.ignore_layout_rounding {
                 size.x = size.x.ceil();
@@ -1511,7 +1728,7 @@ impl UserInterface {
             size.y = size.y.min(final_rect.h());
 
             let transformed_rect =
-                Rect::new(0.0, 0.0, size.x, size.y).transform(&node.layout_transform);
+                Rect::new(0.0, 0.0, size.x, size.y).transform(node.layout_transform());
 
             size = transformed_rect.size;
 
@@ -1545,7 +1762,12 @@ impl UserInterface {
         true
     }
 
-    pub fn measure_node(&self, handle: Handle<UiNode>, available_size: Vector2<f32>) -> bool {
+    pub fn measure_node(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        available_size: Vector2<f32>,
+    ) -> bool {
+        let handle = handle.to_base();
         let node = self.node(handle);
 
         if node.is_measure_valid() && node.prev_measure.get() == available_size {
@@ -1573,7 +1795,7 @@ impl UserInterface {
                 },
             );
 
-            size = transform_size(size, &node.layout_transform);
+            size = transform_size(size, node.layout_transform());
 
             if size.x.is_finite() {
                 size.x = size.x.clamp(node.min_size().x, node.max_size().x);
@@ -1585,7 +1807,7 @@ impl UserInterface {
             let mut desired_size = node.measure_override(self, size);
 
             desired_size = Rect::new(0.0, 0.0, desired_size.x, desired_size.y)
-                .transform(&node.layout_transform)
+                .transform(node.layout_transform())
                 .size;
 
             if !node.width().is_nan() {
@@ -1620,18 +1842,18 @@ impl UserInterface {
         let mut clipped = true;
 
         let widget = self.nodes.borrow(node_handle);
+        let render_data_set = widget.render_data_set.borrow();
 
         if widget.is_globally_visible() {
             clipped = !widget.clip_bounds().contains(pt);
 
             if !clipped {
-                for command_index in widget.command_indices.borrow().iter() {
-                    if let Some(command) = self.drawing_context.get_commands().get(*command_index) {
-                        if let Some(geometry) = command.clipping_geometry.as_ref() {
-                            if geometry.is_contains_point(pt) {
-                                clipped = false;
-                                break;
-                            }
+                // TODO: Use post draw as well.
+                for command in render_data_set.draw_result.command_buffer.iter() {
+                    if let Some(geometry) = command.clipping_geometry.as_ref() {
+                        if geometry.is_contains_point(pt) {
+                            clipped = false;
+                            break;
                         }
                     }
                 }
@@ -1646,19 +1868,35 @@ impl UserInterface {
         clipped
     }
 
-    fn is_node_contains_point(&self, node_handle: Handle<UiNode>, pt: Vector2<f32>) -> bool {
+    fn is_node_contains_point(
+        &self,
+        node_handle: Handle<UiNode>,
+        screen_space_pt: Vector2<f32>,
+    ) -> bool {
         let widget = self.nodes.borrow(node_handle);
+
+        // Transform the probe position into the local space of the widget.
+        let local_space_pt = widget
+            .visual_transform()
+            .try_inverse()
+            .unwrap_or_default()
+            .transform_point(&Point2::from(screen_space_pt))
+            .coords;
 
         if !widget.is_globally_visible() {
             return false;
         }
 
-        if !self.is_node_clipped(node_handle, pt) {
-            for command_index in widget.command_indices.borrow().iter() {
-                if let Some(command) = self.drawing_context.get_commands().get(*command_index) {
-                    if self.drawing_context.is_command_contains_point(command, pt) {
-                        return true;
-                    }
+        let render_data_set = widget.render_data_set.borrow();
+
+        if !self.is_node_clipped(node_handle, screen_space_pt) {
+            // TODO: Use post draw as well.
+            for command in render_data_set.draw_result.command_buffer.iter() {
+                if render_data_set
+                    .draw_result
+                    .is_command_contains_point(command, local_space_pt)
+                {
+                    return true;
                 }
             }
         }
@@ -1722,7 +1960,7 @@ impl UserInterface {
         } else {
             // We have some picking restriction chain.
             // Go over picking stack and try each entry. This will help with picking
-            // in a series of popups, especially in menus where may be many open popups
+            // in a series of popups, especially in menus where there may be many open popups
             // at the same time.
             for root in self.picking_stack.iter().rev() {
                 if self.nodes.is_valid_handle(root.handle) {
@@ -1744,22 +1982,23 @@ impl UserInterface {
     /// is useful to understand if some event came from some node down by tree.
     pub fn is_node_child_of(
         &self,
-        node_handle: Handle<UiNode>,
-        root_handle: Handle<UiNode>,
+        node_handle: Handle<impl ObjectOrVariant<UiNode>>,
+        root_handle: Handle<impl ObjectOrVariant<UiNode>>,
     ) -> bool {
         self.nodes
-            .borrow(root_handle)
-            .has_descendant(node_handle, self)
+            .borrow(root_handle.to_base())
+            .has_descendant(node_handle.to_base(), self)
     }
 
     /// Checks if the specified node is a descendant of the hierarchy defined by a `root_handle` or
     /// the given handles are equal.
     pub fn has_descendant_or_equal(
         &self,
-        node_handle: Handle<UiNode>,
-        root_handle: Handle<UiNode>,
+        node_handle: Handle<impl ObjectOrVariant<UiNode>>,
+        root_handle: Handle<impl ObjectOrVariant<UiNode>>,
     ) -> bool {
-        root_handle == node_handle || self.is_node_child_of(node_handle, root_handle)
+        root_handle.to_base() == node_handle.to_base()
+            || self.is_node_child_of(node_handle, root_handle)
     }
 
     /// Recursively calculates clipping bounds for every node.
@@ -1793,9 +2032,110 @@ impl UserInterface {
         self.sender.send(message).unwrap()
     }
 
+    pub fn try_send_response(&self, message: &UiMessage) -> bool {
+        if message.is_sync() || message.direction() == MessageDirection::FromWidget {
+            false
+        } else {
+            self.send_message(message.reverse());
+            true
+        }
+    }
+
     pub fn send_messages<const N: usize>(&self, messages: [UiMessage; N]) {
         for message in messages {
             self.send_message(message)
+        }
+    }
+
+    pub fn send(&self, handle: Handle<impl ObjectOrVariant<UiNode>>, data: impl MessageData) {
+        self.sender
+            .send(
+                UiMessage::with_data(data)
+                    .with_destination(handle.transmute())
+                    .with_direction(MessageDirection::ToWidget),
+            )
+            .unwrap()
+    }
+
+    pub fn send_handled(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        data: impl MessageData,
+    ) {
+        self.sender
+            .send(
+                UiMessage::with_data(data)
+                    .with_destination(handle.transmute())
+                    .with_direction(MessageDirection::ToWidget)
+                    .with_handled(true),
+            )
+            .unwrap()
+    }
+
+    pub fn send_sync(&self, handle: Handle<impl ObjectOrVariant<UiNode>>, data: impl MessageData) {
+        self.sender
+            .send(
+                UiMessage::with_data(data)
+                    .with_destination(handle.transmute())
+                    .with_direction(MessageDirection::ToWidget)
+                    .with_delivery_mode(DeliveryMode::SyncOnly),
+            )
+            .unwrap()
+    }
+
+    pub fn send_with_flags<T: MessageData>(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        flags: u64,
+        data: T,
+    ) {
+        self.sender
+            .send(
+                UiMessage::with_data(data)
+                    .with_destination(handle.transmute())
+                    .with_direction(MessageDirection::ToWidget)
+                    .with_flags(flags),
+            )
+            .unwrap()
+    }
+
+    pub fn send_many<const N: usize, T: MessageData>(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        payload: [T; N],
+    ) {
+        for data in payload {
+            self.send(handle, data)
+        }
+    }
+
+    pub fn send_sync_many<const N: usize, T: MessageData>(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        payload: [T; N],
+    ) {
+        for data in payload {
+            self.send_sync(handle, data)
+        }
+    }
+
+    pub fn post<T: MessageData>(&self, handle: Handle<impl ObjectOrVariant<UiNode>>, data: T) {
+        self.sender
+            .send(
+                UiMessage::with_data(data)
+                    .with_destination(handle.transmute())
+                    .with_direction(MessageDirection::FromWidget),
+            )
+            .unwrap()
+    }
+
+    pub fn post_many<const N: usize, T: MessageData>(
+        &self,
+        handle: Handle<impl ObjectOrVariant<UiNode>>,
+        payload: [T; N],
+    ) {
+        for data in payload {
+            self.post(handle, data)
         }
     }
 
@@ -1803,9 +2143,9 @@ impl UserInterface {
     //
     // # Notes
     //
-    // Node will be topmost *only* on same hierarchy level! So if you have a floating
-    // window (for example) and a window embedded into some other control (yes this is
-    // possible) then floating window won't be the topmost.
+    // Node will be topmost *only* on the same hierarchy level! So if you have a floating
+    // window (for example) and a window embedded into some other control (yes, this is
+    // possible), then the floating window won't be the topmost.
     fn make_topmost(&mut self, node: Handle<UiNode>) {
         let parent = self.node(node).parent();
         if parent.is_some() {
@@ -1845,309 +2185,356 @@ impl UserInterface {
 
     /// Extracts UI event one-by-one from common queue. Each extracted event will go to *all*
     /// available nodes first and only then will be moved outside of this method. This is one
-    /// of most important methods which must be called each frame of your game loop, otherwise
-    /// UI will not respond to any kind of events and simply speaking will just not work.
-    pub fn poll_message(&mut self) -> Option<UiMessage> {
-        match self.receiver.try_recv() {
-            Ok(mut message) => {
-                // Destination node may be destroyed at the time we receive message,
-                // we have skip processing of such messages.
-                if !self.nodes.is_valid_handle(message.destination()) {
-                    return Some(message);
-                }
+    ///  of the most important methods which must be called each frame of your game loop, otherwise
+    /// the UI will not respond to any kind of events and simply speaking will just not work.
+    ///
+    /// # Routing Scheme
+    ///
+    /// The following scheme shows the full routing procedure for a single method call.
+    ///
+    /// ```text
+    ///
+    ///     poll_message                                                          return message;
+    ///           │                   Discard Message                                    ▲
+    ///           ├─────────────────────────────◄───────────────────────────┐            │
+    ///           │                                                         │   Delivery │
+    ///           │                                                         │   Mode     │
+    /// ┌─────────▼─────────┐  ┌─────────────────────────────────────┐      │    ┌───────┼──────┐
+    /// │Message            │  │ Destination                         │      │    │ Full Cycle?  │
+    /// │Queue              │  │ Widget Sub-Tree                     │      │    ├──────────────┤
+    /// │   ┌───────────┐   │  │                                     │      └────┼ Sync Only?   │
+    /// │   │  Message  │   │  │ Bubble Routing                      │           └───────▲──────┘
+    /// │   └───────────┘   │  │ ┌─────────────────────────────────┐ │                   │
+    /// │   ┌───────────┐   │  │ │   Root::handle_routed_message   ├─┼─────────►─────────┤
+    /// │   │  Message  │   │  │ └────────────────▲────────────────┘ │                   │
+    /// │   └───────────┘   │  │                 ...                 │                   │
+    /// │        ...        │  │ ┌────────────────┼────────────────┐ │                   │
+    /// │   ┌───────────┐   │  │ │  Parent::handle_routed_message  │ │                   │
+    /// │   │  Message  │   │  │ └────────────────▲────────────────┘ │                   │
+    /// │   └───────────┘   │  │                  │                  │                   │
+    /// │   ┌───────────┐   │  │ ┌────────────────┼────────────────┐ │  Direct Routing   │
+    /// │   │  Message  │   │  │ │  Widget::handle_routed_message  │ │  ┌────────────────┼────────────────┐
+    /// │   └─────────┬─┘   │  │ └────────────────▲────────────────┘ │  │  Widget::handle_routed_message  │
+    /// └─────────────┼─────┘  └──────────────────┼──────────────────┘  └────────────────▲────────────────┘
+    ///               │                           │                                      │
+    ///     pop_front │                  Routing  │                                      │
+    ///               │                  Strategy │                                      │
+    /// ┌─────────────┼───────────────┐   ┌──────────────────┐                           │
+    /// │Preview Set  │               │   │ Bubble Routing?  │                           │
+    /// │ ┌───────────▼─────────────┐ │   ├──────────────────┤                           │
+    /// │ │ Widget::preview_message │ │   │ Direct Routing?  ├───────────────────────────┘
+    /// │ └───────────┬─────────────┘ │   └──────────────────┘
+    /// │             │               │           │
+    /// │ ┌───────────▼─────────────┐ │           │
+    /// │ │ Widget::preview_message │ │           │
+    /// │ └───────────┬─────────────┘ │           │
+    /// │             │               │           │
+    /// │ ┌───────────▼─────────────┐ │           │
+    /// │ │ Widget::preview_message─┼─┼───────────┘
+    /// │ └─────────────────────────┘ │ To destination
+    /// └─────────────────────────────┘ widget
+    /// ```
+    ///
+    /// Keep in mind, that any number of widget may produce some other messages during this method
+    /// call. These messages will be put at the end of the queue.
+    ///
+    /// # Returns
+    ///
+    /// This method returns a [`PollResult`] with processed message number and the last processed message
+    /// that has [`DeliveryMode::FullCycle`]. See the diagram above for the explanation.
+    pub fn poll_message_queue(&mut self) -> PollResult {
+        let mut poll_result = PollResult {
+            processed_messages: 0,
+            message: None,
+        };
 
-                if message.need_perform_layout() {
-                    self.update_layout(self.screen_size);
-                }
-
-                for &handle in self.methods_registry.preview_message.iter() {
-                    if let Some(node_ref) = self.nodes.try_borrow(handle) {
-                        node_ref.preview_message(self, &mut message);
-                    }
-                }
-
-                match message.routing_strategy {
-                    RoutingStrategy::BubbleUp => self.bubble_message(&mut message),
-                    RoutingStrategy::Direct => {
-                        let (ticket, mut node) = self.nodes.take_reserve(message.destination());
-                        node.handle_routed_message(self, &mut message);
-                        self.nodes.put_back(ticket, node);
-                    }
-                }
-
-                if let Some(msg) = message.data::<WidgetMessage>() {
-                    match msg {
-                        WidgetMessage::Focus => {
-                            if self.nodes.is_valid_handle(message.destination())
-                                && message.direction() == MessageDirection::ToWidget
-                            {
-                                self.request_focus(message.destination());
-                            }
-                        }
-                        WidgetMessage::Unfocus => {
-                            if self.nodes.is_valid_handle(message.destination())
-                                && message.direction() == MessageDirection::ToWidget
-                            {
-                                self.request_focus(self.root_canvas);
-                            }
-                        }
-                        WidgetMessage::Topmost => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                self.make_topmost(message.destination());
-                            }
-                        }
-                        WidgetMessage::Lowermost => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                self.make_lowermost(message.destination());
-                            }
-                        }
-                        WidgetMessage::Unlink => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                self.unlink_node(message.destination());
-
-                                let node = &self.nodes[message.destination()];
-                                let new_position = node.screen_position();
-                                self.send_message(WidgetMessage::desired_position(
-                                    message.destination(),
-                                    MessageDirection::ToWidget,
-                                    new_position,
-                                ));
-                            }
-                        }
-                        &WidgetMessage::LinkWith(parent) => {
-                            if self.nodes.is_valid_handle(message.destination())
-                                && self.nodes.is_valid_handle(parent)
-                            {
-                                self.link_nodes(message.destination(), parent, false);
-                            }
-                        }
-                        &WidgetMessage::LinkWithReverse(parent) => {
-                            if self.nodes.is_valid_handle(message.destination())
-                                && self.nodes.is_valid_handle(parent)
-                            {
-                                self.link_nodes(message.destination(), parent, true);
-                            }
-                        }
-                        WidgetMessage::ReplaceChildren(children) => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                let old_children =
-                                    self.node(message.destination()).children().to_vec();
-                                for child in old_children.iter() {
-                                    if self.nodes.is_valid_handle(*child) {
-                                        if children.contains(child) {
-                                            self.unlink_node(*child);
-                                        } else {
-                                            self.remove_node(*child);
-                                        }
-                                    }
-                                }
-                                for &child in children.iter() {
-                                    if self.nodes.is_valid_handle(child) {
-                                        self.link_nodes(child, message.destination(), false);
-                                    }
-                                }
-                            }
-                        }
-                        WidgetMessage::Remove => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                self.remove_node(message.destination());
-                            }
-                        }
-                        WidgetMessage::ContextMenu(context_menu) => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                let node = self.nodes.borrow_mut(message.destination());
-                                node.set_context_menu(context_menu.clone());
-                            }
-                        }
-                        WidgetMessage::Tooltip(tooltip) => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                let node = self.nodes.borrow_mut(message.destination());
-                                node.set_tooltip(tooltip.clone());
-                            }
-                        }
-                        WidgetMessage::Center => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                let node = self.node(message.destination());
-                                let size = node.actual_initial_size();
-                                let parent = node.parent();
-                                let parent_size = if parent.is_some() {
-                                    self.node(parent).actual_initial_size()
-                                } else {
-                                    self.screen_size
-                                };
-
-                                self.send_message(WidgetMessage::desired_position(
-                                    message.destination(),
-                                    MessageDirection::ToWidget,
-                                    (parent_size - size).scale(0.5),
-                                ));
-                            }
-                        }
-                        WidgetMessage::RenderTransform(_) => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                self.update_visual_transform(message.destination());
-                            }
-                        }
-                        WidgetMessage::AdjustPositionToFit => {
-                            if self.nodes.is_valid_handle(message.destination()) {
-                                let node = self.node(message.destination());
-                                let mut position = node.actual_local_position();
-                                let size = node.actual_initial_size();
-                                let parent = node.parent();
-                                let parent_size = if parent.is_some() {
-                                    self.node(parent).actual_initial_size()
-                                } else {
-                                    self.screen_size
-                                };
-
-                                if position.x < 0.0 {
-                                    position.x = 0.0;
-                                }
-                                if position.x + size.x > parent_size.x {
-                                    position.x -= (position.x + size.x) - parent_size.x;
-                                }
-                                if position.y < 0.0 {
-                                    position.y = 0.0;
-                                }
-                                if position.y + size.y > parent_size.y {
-                                    position.y -= (position.y + size.y) - parent_size.y;
-                                }
-
-                                self.send_message(WidgetMessage::desired_position(
-                                    message.destination(),
-                                    MessageDirection::ToWidget,
-                                    position,
-                                ));
-                            }
-                        }
-                        WidgetMessage::Align {
-                            relative_to,
-                            horizontal_alignment,
-                            vertical_alignment,
-                            margin,
-                        } => {
-                            if let (Some(node), Some(relative_node)) = (
-                                self.try_get(message.destination()),
-                                self.try_get(*relative_to),
-                            ) {
-                                // Calculate new anchor point in screen coordinate system.
-                                let relative_node_screen_size = relative_node.screen_bounds().size;
-                                let relative_node_screen_position = relative_node.screen_position();
-                                let node_screen_size = node.screen_bounds().size;
-
-                                let mut screen_anchor_point = Vector2::default();
-                                match horizontal_alignment {
-                                    HorizontalAlignment::Stretch => {
-                                        // Do nothing.
-                                    }
-                                    HorizontalAlignment::Left => {
-                                        screen_anchor_point.x =
-                                            relative_node_screen_position.x + margin.left;
-                                    }
-                                    HorizontalAlignment::Center => {
-                                        screen_anchor_point.x = relative_node_screen_position.x
-                                            + (relative_node_screen_size.x
-                                                + node_screen_size.x
-                                                + margin.left
-                                                + margin.right)
-                                                * 0.5;
-                                    }
-                                    HorizontalAlignment::Right => {
-                                        screen_anchor_point.x = relative_node_screen_position.x
-                                            + relative_node_screen_size.x
-                                            - node_screen_size.x
-                                            - margin.right;
-                                    }
-                                }
-
-                                match vertical_alignment {
-                                    VerticalAlignment::Stretch => {
-                                        // Do nothing.
-                                    }
-                                    VerticalAlignment::Top => {
-                                        screen_anchor_point.y =
-                                            relative_node_screen_position.y + margin.top;
-                                    }
-                                    VerticalAlignment::Center => {
-                                        screen_anchor_point.y = relative_node_screen_position.y
-                                            + (relative_node_screen_size.y
-                                                + node_screen_size.y
-                                                + margin.top
-                                                + margin.bottom)
-                                                * 0.5;
-                                    }
-                                    VerticalAlignment::Bottom => {
-                                        screen_anchor_point.y = relative_node_screen_position.y
-                                            + (relative_node_screen_size.y
-                                                - node_screen_size.y
-                                                - margin.bottom);
-                                    }
-                                }
-
-                                if let Some(parent) = self.try_get(node.parent()) {
-                                    // Transform screen anchor point into the local coordinate system
-                                    // of the parent node.
-                                    let local_anchor_point =
-                                        parent.screen_to_local(screen_anchor_point);
-                                    self.send_message(WidgetMessage::desired_position(
-                                        message.destination(),
-                                        MessageDirection::ToWidget,
-                                        local_anchor_point,
-                                    ));
-                                }
-                            }
-                        }
-                        WidgetMessage::MouseUp { button, .. } => {
-                            if *button == MouseButton::Right && !message.handled() {
-                                if let Some(picked) = self.nodes.try_borrow(self.picked_node) {
-                                    // Get the context menu from the current node or a parent node
-                                    let (context_menu, target) = if picked.context_menu().is_some()
-                                    {
-                                        (picked.context_menu(), self.picked_node)
-                                    } else {
-                                        let parent_handle = picked.find_by_criteria_up(self, |n| {
-                                            n.context_menu().is_some()
-                                        });
-
-                                        if let Some(parent) = self.nodes.try_borrow(parent_handle) {
-                                            (parent.context_menu(), parent_handle)
-                                        } else {
-                                            (None, Handle::NONE)
-                                        }
-                                    };
-
-                                    // Display context menu
-                                    if let Some(context_menu) = context_menu {
-                                        self.send_message(PopupMessage::placement(
-                                            context_menu.handle(),
-                                            MessageDirection::ToWidget,
-                                            Placement::Cursor(target),
-                                        ));
-                                        self.send_message(PopupMessage::open(
-                                            context_menu.handle(),
-                                            MessageDirection::ToWidget,
-                                        ));
-                                        // Send Event messages to the widget that was clicked on,
-                                        // not to the widget that has the context menu.
-                                        self.send_message(PopupMessage::owner(
-                                            context_menu.handle(),
-                                            MessageDirection::ToWidget,
-                                            self.picked_node,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                Some(message)
+        while let Ok(message) = self.receiver.try_recv() {
+            poll_result.processed_messages += 1;
+            if let Some(message) = self.poll_single_message(message) {
+                poll_result.message = Some(message);
+                break;
             }
-            Err(e) => match e {
-                TryRecvError::Empty => None,
-                TryRecvError::Disconnected => unreachable!(),
-            },
+        }
+
+        poll_result
+    }
+
+    /// Same as [`Self::poll_message_queue`], but discards the number of processed message the last
+    /// processed message that has [`DeliveryMode::FullCycle`].
+    pub fn poll_message(&mut self) -> Option<UiMessage> {
+        self.poll_message_queue().message
+    }
+
+    fn poll_single_message(&mut self, mut message: UiMessage) -> Option<UiMessage> {
+        // The Destination node may be destroyed at the time we receive message,
+        // we have skip processing of such messages.
+        if !self.nodes.is_valid_handle(message.destination()) {
+            return Some(message);
+        }
+
+        if let RenderMode::OnChanges = self.render_mode {
+            self.need_render = true;
+        }
+
+        if message.need_perform_layout() {
+            self.update_layout(self.screen_size);
+        }
+
+        for &handle in self.methods_registry.preview_message.iter() {
+            if let Ok(node_ref) = self.nodes.try_borrow(handle) {
+                node_ref.preview_message(self, &mut message);
+            }
+        }
+
+        match message.routing_strategy {
+            RoutingStrategy::BubbleUp => self.bubble_message(&mut message),
+            RoutingStrategy::Direct => {
+                let (ticket, mut node) = self.nodes.take_reserve(message.destination());
+                node.handle_routed_message(self, &mut message);
+                self.nodes.put_back(ticket, node);
+            }
+        }
+
+        if let Some(msg) = message.data::<WidgetMessage>() {
+            match msg {
+                WidgetMessage::Focus
+                    if self.nodes.is_valid_handle(message.destination())
+                        && message.direction() == MessageDirection::ToWidget =>
+                {
+                    self.request_focus(message.destination());
+                }
+                WidgetMessage::Unfocus
+                    if self.nodes.is_valid_handle(message.destination())
+                        && message.direction() == MessageDirection::ToWidget =>
+                {
+                    self.request_focus(self.root_canvas);
+                }
+                WidgetMessage::Topmost if self.nodes.is_valid_handle(message.destination()) => {
+                    self.make_topmost(message.destination());
+                }
+                WidgetMessage::Lowermost if self.nodes.is_valid_handle(message.destination()) => {
+                    self.make_lowermost(message.destination());
+                }
+                WidgetMessage::Unlink if self.nodes.is_valid_handle(message.destination()) => {
+                    self.unlink_node(message.destination());
+
+                    let node = &self.nodes[message.destination()];
+                    let new_position = self.screen_to_root_canvas_space(node.screen_position());
+                    self.send(
+                        message.destination(),
+                        WidgetMessage::DesiredPosition(new_position),
+                    );
+                }
+                &WidgetMessage::LinkWith(parent)
+                    if self.nodes.is_valid_handle(message.destination())
+                        && self.nodes.is_valid_handle(parent) =>
+                {
+                    self.link_nodes(message.destination(), parent, false);
+                }
+                &WidgetMessage::LinkWithReverse(parent)
+                    if self.nodes.is_valid_handle(message.destination())
+                        && self.nodes.is_valid_handle(parent) =>
+                {
+                    self.link_nodes(message.destination(), parent, true);
+                }
+                WidgetMessage::ReplaceChildren(children)
+                    if self.nodes.is_valid_handle(message.destination()) =>
+                {
+                    let old_children = self.node(message.destination()).children().to_vec();
+                    for child in old_children.iter() {
+                        if self.nodes.is_valid_handle(*child) {
+                            if children.contains(child) {
+                                self.unlink_node(*child);
+                            } else {
+                                self.remove_node(*child);
+                            }
+                        }
+                    }
+                    for &child in children.iter() {
+                        if self.nodes.is_valid_handle(child) {
+                            self.link_nodes(child, message.destination(), false);
+                        }
+                    }
+                }
+                WidgetMessage::Remove if self.nodes.is_valid_handle(message.destination()) => {
+                    self.remove_node(message.destination());
+                }
+                WidgetMessage::ContextMenu(context_menu)
+                    if self.nodes.is_valid_handle(message.destination()) =>
+                {
+                    let node = self.nodes.borrow_mut(message.destination());
+                    node.set_context_menu(context_menu.clone());
+                }
+                WidgetMessage::Tooltip(tooltip)
+                    if self.nodes.is_valid_handle(message.destination()) =>
+                {
+                    let node = self.nodes.borrow_mut(message.destination());
+                    node.set_tooltip(tooltip.clone());
+                }
+                WidgetMessage::Center if self.nodes.is_valid_handle(message.destination()) => {
+                    let node = self.node(message.destination());
+                    let size = node.actual_initial_size();
+                    let parent = node.parent();
+                    let parent_size = if parent.is_some() {
+                        self.node(parent).actual_initial_size()
+                    } else {
+                        self.screen_size
+                    };
+
+                    self.send(
+                        message.destination(),
+                        WidgetMessage::DesiredPosition((parent_size - size).scale(0.5)),
+                    );
+                }
+                WidgetMessage::RenderTransform(_)
+                    if self.nodes.is_valid_handle(message.destination()) =>
+                {
+                    self.update_visual_transform(message.destination());
+                }
+                WidgetMessage::AdjustPositionToFit
+                    if self.nodes.is_valid_handle(message.destination()) =>
+                {
+                    let node = self.node(message.destination());
+                    let mut position = node.actual_local_position();
+                    let size = node.actual_initial_size();
+                    let parent = node.parent();
+                    let parent_size = if parent.is_some() {
+                        self.node(parent).actual_initial_size()
+                    } else {
+                        self.screen_size
+                    };
+
+                    if position.x < 0.0 {
+                        position.x = 0.0;
+                    }
+                    if position.x + size.x > parent_size.x {
+                        position.x -= (position.x + size.x) - parent_size.x;
+                    }
+                    if position.y < 0.0 {
+                        position.y = 0.0;
+                    }
+                    if position.y + size.y > parent_size.y {
+                        position.y -= (position.y + size.y) - parent_size.y;
+                    }
+
+                    self.send(
+                        message.destination(),
+                        WidgetMessage::DesiredPosition(position),
+                    );
+                }
+                WidgetMessage::Align {
+                    relative_to,
+                    horizontal_alignment,
+                    vertical_alignment,
+                    margin,
+                } => {
+                    if let (Ok(node), Ok(relative_node)) = (
+                        self.try_get_node(message.destination()),
+                        self.try_get_node(*relative_to),
+                    ) {
+                        // Calculate new anchor point in screen coordinate system.
+                        let relative_node_screen_size = relative_node.screen_bounds().size;
+                        let relative_node_screen_position = relative_node.screen_position();
+                        let node_screen_size = node.screen_bounds().size;
+
+                        let mut screen_anchor_point = Vector2::default();
+                        match horizontal_alignment {
+                            HorizontalAlignment::Stretch => {
+                                // Do nothing.
+                            }
+                            HorizontalAlignment::Left => {
+                                screen_anchor_point.x =
+                                    relative_node_screen_position.x + margin.left;
+                            }
+                            HorizontalAlignment::Center => {
+                                screen_anchor_point.x = relative_node_screen_position.x
+                                    + (relative_node_screen_size.x
+                                        + node_screen_size.x
+                                        + margin.left
+                                        + margin.right)
+                                        * 0.5;
+                            }
+                            HorizontalAlignment::Right => {
+                                screen_anchor_point.x = relative_node_screen_position.x
+                                    + relative_node_screen_size.x
+                                    - node_screen_size.x
+                                    - margin.right;
+                            }
+                        }
+
+                        match vertical_alignment {
+                            VerticalAlignment::Stretch => {
+                                // Do nothing.
+                            }
+                            VerticalAlignment::Top => {
+                                screen_anchor_point.y =
+                                    relative_node_screen_position.y + margin.top;
+                            }
+                            VerticalAlignment::Center => {
+                                screen_anchor_point.y = relative_node_screen_position.y
+                                    + (relative_node_screen_size.y
+                                        + node_screen_size.y
+                                        + margin.top
+                                        + margin.bottom)
+                                        * 0.5;
+                            }
+                            VerticalAlignment::Bottom => {
+                                screen_anchor_point.y = relative_node_screen_position.y
+                                    + (relative_node_screen_size.y
+                                        - node_screen_size.y
+                                        - margin.bottom);
+                            }
+                        }
+
+                        if let Ok(parent) = self.try_get_node(node.parent()) {
+                            // Transform screen anchor point into the local coordinate system
+                            // of the parent node.
+                            let local_anchor_point = parent.screen_to_local(screen_anchor_point);
+                            self.send(
+                                message.destination(),
+                                WidgetMessage::DesiredPosition(local_anchor_point),
+                            );
+                        }
+                    }
+                }
+                WidgetMessage::MouseUp { button, .. }
+                    if *button == MouseButton::Right && !message.handled() =>
+                {
+                    if let Ok(picked) = self.nodes.try_borrow(self.picked_node) {
+                        // Get the context menu from the current node or a parent node
+                        let (context_menu, target) = if picked.context_menu().is_some() {
+                            (picked.context_menu(), self.picked_node)
+                        } else {
+                            let parent_handle =
+                                picked.find_by_criteria_up(self, |n| n.context_menu().is_some());
+
+                            if let Ok(parent) = self.nodes.try_borrow(parent_handle) {
+                                (parent.context_menu(), parent_handle)
+                            } else {
+                                (None, Handle::NONE)
+                            }
+                        };
+
+                        // Display context menu
+                        if let Some(context_menu) = context_menu {
+                            self.send(
+                                context_menu.handle(),
+                                PopupMessage::Placement(Placement::Cursor(target)),
+                            );
+                            self.send(context_menu.handle(), PopupMessage::Open);
+                            // Send Event messages to the widget that was clicked on,
+                            // not to the widget that has the context menu.
+                            self.send(context_menu.handle(), PopupMessage::Owner(self.picked_node));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match message.delivery_mode {
+            DeliveryMode::FullCycle => Some(message),
+            DeliveryMode::SyncOnly => None,
         }
     }
 
@@ -2156,24 +2543,15 @@ impl UserInterface {
     }
 
     fn show_tooltip(&self, tooltip: RcUiNodeHandle) {
-        self.send_message(WidgetMessage::visibility(
+        self.send(tooltip.handle(), WidgetMessage::Visibility(true));
+        self.send(tooltip.handle(), WidgetMessage::Topmost);
+        self.send(
             tooltip.handle(),
-            MessageDirection::ToWidget,
-            true,
-        ));
-        self.send_message(WidgetMessage::topmost(
-            tooltip.handle(),
-            MessageDirection::ToWidget,
-        ));
-        self.send_message(WidgetMessage::desired_position(
-            tooltip.handle(),
-            MessageDirection::ToWidget,
-            self.screen_to_root_canvas_space(self.cursor_position() + Vector2::new(0.0, 16.0)),
-        ));
-        self.send_message(WidgetMessage::adjust_position_to_fit(
-            tooltip.handle(),
-            MessageDirection::ToWidget,
-        ));
+            WidgetMessage::DesiredPosition(
+                self.screen_to_root_canvas_space(self.cursor_position() + Vector2::new(0.0, 16.0)),
+            ),
+        );
+        self.send(tooltip.handle(), WidgetMessage::AdjustPositionToFit);
     }
 
     fn replace_or_update_tooltip(&mut self, tooltip: RcUiNodeHandle, disappear_timeout: f32) {
@@ -2192,11 +2570,7 @@ impl UserInterface {
                 entry.tooltip = tooltip.clone();
 
                 // Hide previous.
-                self.send_message(WidgetMessage::visibility(
-                    old_tooltip.handle(),
-                    MessageDirection::ToWidget,
-                    false,
-                ));
+                self.send(old_tooltip.handle(), WidgetMessage::Visibility(false));
             }
         } else {
             self.active_tooltip = Some(TooltipEntry::new(
@@ -2218,10 +2592,9 @@ impl UserInterface {
                     // This uses sender directly since we're currently mutably borrowing
                     // visible_tooltips
                     sender
-                        .send(WidgetMessage::visibility(
+                        .send(UiMessage::for_widget(
                             entry.tooltip.handle(),
-                            MessageDirection::ToWidget,
-                            false,
+                            WidgetMessage::Visibility(false),
                         ))
                         .unwrap();
 
@@ -2230,7 +2603,7 @@ impl UserInterface {
             } else {
                 let mut tooltip_owner_hovered = false;
                 let mut handle = self.picked_node;
-                while let Some(node) = self.nodes.try_borrow(handle) {
+                while let Ok(node) = self.nodes.try_borrow(handle) {
                     if let Some(tooltip) = node.tooltip.as_ref() {
                         if &entry.tooltip == tooltip {
                             tooltip_owner_hovered = true;
@@ -2255,7 +2628,7 @@ impl UserInterface {
 
         // Check for hovering over a widget with a tooltip, or hovering over a tooltip.
         let mut handle = self.picked_node;
-        while let Some(node) = self.nodes.try_borrow(handle) {
+        while let Ok(node) = self.nodes.try_borrow(handle) {
             let parent = node.parent();
 
             if let Some(tooltip) = node.tooltip() {
@@ -2302,25 +2675,17 @@ impl UserInterface {
     fn request_focus(&mut self, new_focused: Handle<UiNode>) {
         if self.keyboard_focus_node != new_focused {
             if self.keyboard_focus_node.is_some() {
-                self.send_message(WidgetMessage::unfocus(
-                    self.keyboard_focus_node,
-                    MessageDirection::FromWidget,
-                ));
+                self.post(self.keyboard_focus_node, WidgetMessage::Unfocus);
             }
-
             self.keyboard_focus_node = new_focused;
-
             if self.keyboard_focus_node.is_some() {
-                self.send_message(WidgetMessage::focus(
-                    self.keyboard_focus_node,
-                    MessageDirection::FromWidget,
-                ));
+                self.post(self.keyboard_focus_node, WidgetMessage::Focus);
             }
         }
     }
 
     /// Translates raw window event into some specific UI message. This is one of the
-    /// most important methods of UI. You must call it each time you received a message
+    /// most important methods of UI. You must call it each time you receive a message
     /// from a window.
     pub fn process_os_event(&mut self, event: &OsEvent) -> bool {
         let mut event_processed = false;
@@ -2387,32 +2752,30 @@ impl UserInterface {
                         self.request_focus(self.picked_node);
 
                         if self.picked_node.is_some() {
-                            self.send_message(WidgetMessage::mouse_down(
+                            self.post(
                                 self.picked_node,
-                                MessageDirection::FromWidget,
-                                self.cursor_position,
-                                button,
-                            ));
+                                WidgetMessage::MouseDown {
+                                    pos: self.cursor_position,
+                                    button,
+                                },
+                            );
                             event_processed = true;
                         }
 
                         // Make sure double click will be emitted after mouse down event.
                         if emit_double_click {
-                            self.send_message(WidgetMessage::double_click(
-                                self.picked_node,
-                                MessageDirection::FromWidget,
-                                button,
-                            ));
+                            self.post(self.picked_node, WidgetMessage::DoubleClick { button });
                         }
                     }
                     ButtonState::Released => {
                         if self.picked_node.is_some() {
-                            self.send_message(WidgetMessage::mouse_up(
+                            self.post(
                                 self.picked_node,
-                                MessageDirection::FromWidget,
-                                self.cursor_position,
-                                button,
-                            ));
+                                WidgetMessage::MouseUp {
+                                    pos: self.cursor_position,
+                                    button,
+                                },
+                            );
 
                             if self.drag_context.is_dragging {
                                 self.drag_context.is_dragging = false;
@@ -2424,11 +2787,10 @@ impl UserInterface {
                                 while let Some(handle) = self.stack.pop() {
                                     let node = &self.nodes[handle];
                                     if node.is_drop_allowed() {
-                                        self.send_message(WidgetMessage::drop(
+                                        self.post(
                                             handle,
-                                            MessageDirection::FromWidget,
-                                            self.drag_context.drag_node,
-                                        ));
+                                            WidgetMessage::Drop(self.drag_context.drag_node),
+                                        );
                                         self.stack.clear();
                                         break;
                                     } else if node.parent().is_some() {
@@ -2471,11 +2833,10 @@ impl UserInterface {
 
                     self.drag_context.is_dragging = true;
 
-                    self.send_message(WidgetMessage::drag_started(
+                    self.post(
                         self.picked_node,
-                        MessageDirection::FromWidget,
-                        self.drag_context.drag_node,
-                    ));
+                        WidgetMessage::DragStarted(self.drag_context.drag_node),
+                    );
 
                     self.cursor_icon = CursorIcon::Crosshair;
                 }
@@ -2483,11 +2844,11 @@ impl UserInterface {
                 if self.drag_context.is_dragging
                     && self.nodes.is_valid_handle(self.drag_context.drag_preview)
                 {
-                    self.send_message(WidgetMessage::desired_position(
+                    let local_position = self.screen_to_root_canvas_space(*position);
+                    self.send(
                         self.drag_context.drag_preview,
-                        MessageDirection::ToWidget,
-                        *position,
-                    ));
+                        WidgetMessage::DesiredPosition(local_position),
+                    );
                 }
 
                 // Fire mouse leave for previously picked node
@@ -2495,10 +2856,7 @@ impl UserInterface {
                     let prev_picked_node = self.nodes.borrow_mut(self.prev_picked_node);
                     if prev_picked_node.is_mouse_directly_over {
                         prev_picked_node.is_mouse_directly_over = false;
-                        self.send_message(WidgetMessage::mouse_leave(
-                            self.prev_picked_node,
-                            MessageDirection::FromWidget,
-                        ));
+                        self.post(self.prev_picked_node, WidgetMessage::MouseLeave);
                     }
                 }
 
@@ -2506,26 +2864,23 @@ impl UserInterface {
                     let picked_node = self.nodes.borrow_mut(self.picked_node);
                     if !picked_node.is_mouse_directly_over {
                         picked_node.is_mouse_directly_over = true;
-                        self.send_message(WidgetMessage::mouse_enter(
-                            self.picked_node,
-                            MessageDirection::FromWidget,
-                        ));
+                        self.post(self.picked_node, WidgetMessage::MouseEnter);
                     }
 
                     // Fire mouse move
-                    self.send_message(WidgetMessage::mouse_move(
+                    self.post(
                         self.picked_node,
-                        MessageDirection::FromWidget,
-                        self.cursor_position,
-                        self.mouse_state,
-                    ));
+                        WidgetMessage::MouseMove {
+                            pos: self.cursor_position,
+                            state: self.mouse_state,
+                        },
+                    );
 
                     if self.drag_context.is_dragging {
-                        self.send_message(WidgetMessage::drag_over(
+                        self.post(
                             self.picked_node,
-                            MessageDirection::FromWidget,
-                            self.drag_context.drag_node,
-                        ));
+                            WidgetMessage::DragOver(self.drag_context.drag_node),
+                        );
                     }
 
                     event_processed = true;
@@ -2533,12 +2888,13 @@ impl UserInterface {
             }
             OsEvent::MouseWheel(_, y) => {
                 if self.picked_node.is_some() {
-                    self.send_message(WidgetMessage::mouse_wheel(
+                    self.post(
                         self.picked_node,
-                        MessageDirection::FromWidget,
-                        self.cursor_position,
-                        *y,
-                    ));
+                        WidgetMessage::MouseWheel {
+                            pos: self.cursor_position,
+                            amount: *y,
+                        },
+                    );
 
                     event_processed = true;
                 }
@@ -2548,29 +2904,25 @@ impl UserInterface {
                 state,
                 text,
             } => {
-                if let Some(keyboard_focus_node) = self.try_get(self.keyboard_focus_node) {
+                if let Ok(keyboard_focus_node) = self.try_get_node(self.keyboard_focus_node) {
                     if keyboard_focus_node.is_globally_visible() {
                         match state {
                             ButtonState::Pressed => {
-                                self.send_message(WidgetMessage::key_down(
+                                self.post(
                                     self.keyboard_focus_node,
-                                    MessageDirection::FromWidget,
-                                    *button,
-                                ));
+                                    WidgetMessage::KeyDown(*button),
+                                );
 
                                 if !text.is_empty() {
-                                    self.send_message(WidgetMessage::text(
+                                    self.post(
                                         self.keyboard_focus_node,
-                                        MessageDirection::FromWidget,
-                                        text.clone(),
-                                    ));
+                                        WidgetMessage::Text(text.clone()),
+                                    );
                                 }
                             }
-                            ButtonState::Released => self.send_message(WidgetMessage::key_up(
-                                self.keyboard_focus_node,
-                                MessageDirection::FromWidget,
-                                *button,
-                            )),
+                            ButtonState::Released => {
+                                self.post(self.keyboard_focus_node, WidgetMessage::KeyUp(*button))
+                            }
                         }
 
                         event_processed = true;
@@ -2640,25 +2992,27 @@ impl UserInterface {
                     self.request_focus(self.picked_node);
 
                     if self.picked_node.is_some() {
-                        self.send_message(WidgetMessage::touch_started(
+                        self.post(
                             self.picked_node,
-                            MessageDirection::FromWidget,
-                            self.cursor_position,
-                            *force,
-                            *id,
-                        ));
+                            WidgetMessage::TouchStarted {
+                                pos: self.cursor_position,
+                                force: *force,
+                                id: *id,
+                            },
+                        );
                         event_processed = true;
                     }
 
                     // Make sure double click will be emitted after mouse down event.
                     if emit_double_tap {
-                        self.send_message(WidgetMessage::double_tap(
+                        self.post(
                             self.picked_node,
-                            MessageDirection::FromWidget,
-                            *location,
-                            *force,
-                            *id,
-                        ));
+                            WidgetMessage::DoubleTap {
+                                pos: *location,
+                                force: *force,
+                                id: *id,
+                            },
+                        );
                     }
                 }
                 TouchPhase::Moved => {
@@ -2685,24 +3039,26 @@ impl UserInterface {
                     self.request_focus(self.picked_node);
 
                     if self.picked_node.is_some() {
-                        self.send_message(WidgetMessage::touch_moved(
+                        self.post(
                             self.picked_node,
-                            MessageDirection::FromWidget,
-                            self.cursor_position,
-                            *force,
-                            *id,
-                        ));
+                            WidgetMessage::TouchMoved {
+                                pos: self.cursor_position,
+                                force: *force,
+                                id: *id,
+                            },
+                        );
                         event_processed = true;
                     }
                 }
                 TouchPhase::Ended => {
                     if self.picked_node.is_some() {
-                        self.send_message(WidgetMessage::touch_ended(
+                        self.post(
                             self.picked_node,
-                            MessageDirection::FromWidget,
-                            self.cursor_position,
-                            *id,
-                        ));
+                            WidgetMessage::TouchEnded {
+                                pos: self.cursor_position,
+                                id: *id,
+                            },
+                        );
 
                         if self.drag_context.is_dragging {
                             self.drag_context.is_dragging = false;
@@ -2713,11 +3069,10 @@ impl UserInterface {
                             while let Some(handle) = self.stack.pop() {
                                 let node = &self.nodes[handle];
                                 if node.is_drop_allowed() {
-                                    self.send_message(WidgetMessage::drop(
+                                    self.post(
                                         handle,
-                                        MessageDirection::FromWidget,
-                                        self.drag_context.drag_node,
-                                    ));
+                                        WidgetMessage::Drop(self.drag_context.drag_node),
+                                    );
                                     self.stack.clear();
                                     break;
                                 } else if node.parent().is_some() {
@@ -2736,12 +3091,13 @@ impl UserInterface {
                 }
                 TouchPhase::Cancelled => {
                     if self.picked_node.is_some() {
-                        self.send_message(WidgetMessage::touch_cancelled(
+                        self.post(
                             self.picked_node,
-                            MessageDirection::FromWidget,
-                            self.cursor_position,
-                            *id,
-                        ));
+                            WidgetMessage::TouchCancelled {
+                                pos: self.cursor_position,
+                                id: *id,
+                            },
+                        );
 
                         if self.drag_context.is_dragging {
                             self.drag_context.is_dragging = false;
@@ -2808,7 +3164,7 @@ impl UserInterface {
     }
 
     /// Extracts sub-graph starting from the given widget. All handles to extracted widgets
-    /// becomes reserved and will be marked as "occupied", an attempt to borrow a widget
+    ///  become reserved and will be marked as "occupied", an attempt to borrow a widget
     /// at such handle will result in panic!. Please note that root widget will be
     /// detached from its parent!
     #[inline]
@@ -2832,7 +3188,7 @@ impl UserInterface {
     }
 
     /// Puts previously extracted sub-graph into the user interface. Handles to widgets will become valid
-    /// again. After that you probably want to re-link returned handle with its previous parent.
+    /// again. After that, you probably want to re-link the returned handle with its previous parent.
     #[inline]
     pub fn put_sub_graph_back(&mut self, sub_graph: SubGraph) -> Handle<UiNode> {
         for (ticket, node) in sub_graph.descendants {
@@ -2855,6 +3211,10 @@ impl UserInterface {
         }
         let (ticket, _) = sub_graph.root;
         self.nodes.forget_ticket(ticket);
+    }
+
+    pub fn restricts_picking(&self, node: Handle<UiNode>) -> bool {
+        self.picking_stack.iter().any(|e| e.handle == node)
     }
 
     pub fn push_picking_restriction(&mut self, restriction: RestrictionEntry) {
@@ -2891,10 +3251,12 @@ impl UserInterface {
     #[inline]
     pub fn link_nodes(
         &mut self,
-        child_handle: Handle<UiNode>,
-        parent_handle: Handle<UiNode>,
+        child_handle: Handle<impl ObjectOrVariant<UiNode>>,
+        parent_handle: Handle<impl ObjectOrVariant<UiNode>>,
         in_front: bool,
     ) {
+        let child_handle = child_handle.to_base();
+        let parent_handle = parent_handle.to_base();
         assert_ne!(child_handle, parent_handle);
         self.isolate_node(child_handle);
         self.nodes[child_handle].set_parent(parent_handle);
@@ -2907,7 +3269,10 @@ impl UserInterface {
     }
 
     #[inline]
-    pub fn try_get_node_mut(&mut self, node_handle: Handle<UiNode>) -> Option<&mut UiNode> {
+    pub fn try_get_node_mut(
+        &mut self,
+        node_handle: Handle<UiNode>,
+    ) -> Result<&mut UiNode, PoolError> {
         self.nodes.try_borrow_mut(node_handle)
     }
 
@@ -3027,7 +3392,7 @@ impl UserInterface {
             }
         }
 
-        let Some(node) = self.nodes.try_borrow(node_handle) else {
+        let Ok(node) = self.nodes.try_borrow(node_handle) else {
             return Default::default();
         };
 
@@ -3064,11 +3429,14 @@ impl UserInterface {
     #[allow(clippy::arc_with_non_send_sync)]
     pub async fn load_from_file<P: AsRef<Path>>(
         path: P,
+        constructors: Arc<WidgetConstructorContainer>,
+        dyn_type_constructors: Arc<DynTypeConstructorContainer>,
         resource_manager: ResourceManager,
-    ) -> Result<Self, VisitError> {
+    ) -> Result<(Self, Vec<u8>), VisitError> {
         Self::load_from_file_ex(
             path,
-            Arc::new(new_widget_constructor_container()),
+            constructors,
+            dyn_type_constructors,
             resource_manager,
             &FsResourceIo,
         )
@@ -3110,19 +3478,25 @@ impl UserInterface {
     pub async fn load_from_file_ex<P: AsRef<Path>>(
         path: P,
         constructors: Arc<WidgetConstructorContainer>,
+        dyn_type_constructors: Arc<DynTypeConstructorContainer>,
         resource_manager: ResourceManager,
         io: &dyn ResourceIo,
-    ) -> Result<Self, VisitError> {
-        let mut ui = {
-            let mut visitor = Visitor::load_from_memory(&io.load_file(path.as_ref()).await?)?;
+    ) -> Result<(Self, Vec<u8>), VisitError> {
+        if !resource_manager.registry_is_loaded() {
+            return Err("The resource registry is unavailable!".to_string().into());
+        }
+        let (mut ui, data) = {
+            let data = io.load_file(path.as_ref()).await?;
+            let mut visitor = Visitor::load_from_memory(&data)?;
             let (sender, receiver) = mpsc::channel();
             visitor.blackboard.register(constructors);
             visitor.blackboard.register(Arc::new(sender.clone()));
             visitor.blackboard.register(Arc::new(resource_manager));
+            visitor.blackboard.register(dyn_type_constructors);
             let mut ui =
                 UserInterface::new_with_channel(sender, receiver, Vector2::new(100.0, 100.0));
             ui.visit("Ui", &mut visitor)?;
-            ui
+            (ui, data)
         };
 
         Log::info("UserInterface - Collecting resources used by the scene...");
@@ -3136,11 +3510,11 @@ impl UserInterface {
         ));
 
         // Wait everything.
-        join_all(used_resources.into_iter()).await;
+        join_all(used_resources).await;
 
         ui.resolve();
 
-        Ok(ui)
+        Ok((ui, data))
     }
 }
 
@@ -3158,65 +3532,89 @@ impl PrefabData for UserInterface {
     }
 }
 
-impl AbstractSceneGraph for UserInterface {
-    fn try_get_node_untyped(&self, handle: ErasedHandle) -> Option<&dyn AbstractSceneNode> {
-        self.nodes
-            .try_borrow(handle.into())
-            .map(|n| n as &dyn AbstractSceneNode)
-    }
-
-    fn try_get_node_untyped_mut(
-        &mut self,
-        handle: ErasedHandle,
-    ) -> Option<&mut dyn AbstractSceneNode> {
-        self.nodes
-            .try_borrow_mut(handle.into())
-            .map(|n| n as &mut dyn AbstractSceneNode)
-    }
-}
-
-impl BaseSceneGraph for UserInterface {
+impl SceneGraph for UserInterface {
     type Prefab = Self;
-    type NodeContainer = WidgetContainer;
-    type Node = UiNode;
+    type NodeWrapper = UiNode;
+
+    fn summary(&self) -> String {
+        let mut result = String::new();
+        self.recursive_summary(0, self.root_canvas, &mut result);
+        result
+    }
 
     #[inline]
-    fn actual_type_id(&self, handle: Handle<Self::Node>) -> Option<TypeId> {
+    fn actual_type_id(&self, handle: Handle<Self::NodeWrapper>) -> Result<TypeId, PoolError> {
         self.nodes
             .try_borrow(handle)
             .map(|n| ControlAsAny::as_any(n.0.deref()).type_id())
     }
 
+    fn actual_type_name(
+        &self,
+        handle: Handle<Self::NodeWrapper>,
+    ) -> Result<&'static str, PoolError> {
+        self.nodes
+            .try_borrow(handle)
+            .map(|n| n.0.deref().type_info_ref().type_name)
+    }
+
+    fn derived_type_ids(
+        &self,
+        handle: Handle<Self::NodeWrapper>,
+    ) -> Result<Vec<TypeId>, PoolError> {
+        self.nodes
+            .try_borrow(handle)
+            .map(|n| n.0.deref().type_info_ref().derived_types.to_vec())
+    }
+
     #[inline]
-    fn root(&self) -> Handle<Self::Node> {
+    fn root(&self) -> Handle<Self::NodeWrapper> {
         self.root_canvas
     }
 
     #[inline]
-    fn set_root(&mut self, root: Handle<Self::Node>) {
+    fn set_root(&mut self, root: Handle<Self::NodeWrapper>) {
         self.root_canvas = root;
     }
 
     #[inline]
-    fn try_get(&self, handle: Handle<Self::Node>) -> Option<&Self::Node> {
+    fn try_get_node(
+        &self,
+        handle: Handle<Self::NodeWrapper>,
+    ) -> Result<&Self::NodeWrapper, PoolError> {
         self.nodes.try_borrow(handle)
     }
 
     #[inline]
-    fn try_get_mut(&mut self, handle: Handle<Self::Node>) -> Option<&mut Self::Node> {
+    fn try_get_node_mut(
+        &mut self,
+        handle: Handle<Self::NodeWrapper>,
+    ) -> Result<&mut Self::NodeWrapper, PoolError> {
         self.nodes.try_borrow_mut(handle)
     }
 
     #[inline]
-    fn is_valid_handle(&self, handle: Handle<Self::Node>) -> bool {
+    fn is_valid_handle(&self, handle: Handle<impl ObjectOrVariant<Self::NodeWrapper>>) -> bool {
         self.nodes.is_valid_handle(handle)
     }
 
     #[inline]
-    fn add_node(&mut self, mut node: Self::Node) -> Handle<Self::Node> {
+    fn add_node(&mut self, node: Self::NodeWrapper) -> Handle<Self::NodeWrapper> {
+        let handle = self.nodes.next_free_handle();
+        self.add_node_at_handle(node, handle);
+        handle
+    }
+
+    fn add_node_at_handle(
+        &mut self,
+        mut node: Self::NodeWrapper,
+        node_handle: Handle<Self::NodeWrapper>,
+    ) {
         let children = node.children().to_vec();
         node.clear_children();
-        let node_handle = self.nodes.spawn(node);
+        self.nodes
+            .spawn_at_handle(node_handle, node)
+            .expect("The handle must be valid!");
         if self.root_canvas.is_some() {
             self.link_nodes(node_handle, self.root_canvas, false);
         }
@@ -3232,11 +3630,11 @@ impl BaseSceneGraph for UserInterface {
         self.layout_events_sender
             .send(LayoutEvent::VisibilityChanged(node_handle))
             .unwrap();
-        node_handle
     }
 
     #[inline]
-    fn remove_node(&mut self, node: Handle<Self::Node>) {
+    fn remove_node(&mut self, node: Handle<impl ObjectOrVariant<Self::NodeWrapper>>) {
+        let node = node.to_base();
         self.isolate_node(node);
 
         let sender = self.sender.clone();
@@ -3269,18 +3667,23 @@ impl BaseSceneGraph for UserInterface {
     }
 
     #[inline]
-    fn link_nodes(&mut self, child: Handle<Self::Node>, parent: Handle<Self::Node>) {
-        self.link_nodes(child, parent, false)
+    fn link_nodes(
+        &mut self,
+        child: Handle<impl ObjectOrVariant<Self::NodeWrapper>>,
+        parent: Handle<impl ObjectOrVariant<Self::NodeWrapper>>,
+    ) {
+        self.link_nodes(child.to_base(), parent.to_base(), false)
     }
 
     #[inline]
-    fn unlink_node(&mut self, node_handle: Handle<Self::Node>) {
+    fn unlink_node(&mut self, node_handle: Handle<impl ObjectOrVariant<Self::NodeWrapper>>) {
         self.isolate_node(node_handle);
         self.link_nodes(node_handle, self.root_canvas, false);
     }
 
     #[inline]
-    fn isolate_node(&mut self, node_handle: Handle<Self::Node>) {
+    fn isolate_node(&mut self, node_handle: Handle<impl ObjectOrVariant<Self::NodeWrapper>>) {
+        let node_handle = node_handle.to_base();
         let node = self.nodes.borrow_mut(node_handle);
         let parent_handle = node.parent();
         if parent_handle.is_some() {
@@ -3291,47 +3694,30 @@ impl BaseSceneGraph for UserInterface {
         }
     }
 
-    fn derived_type_ids(&self, handle: Handle<Self::Node>) -> Option<Vec<TypeId>> {
-        self.nodes
-            .try_borrow(handle)
-            .map(|n| n.0.query_derived_types().to_vec())
-    }
-
-    fn actual_type_name(&self, handle: Handle<Self::Node>) -> Option<&'static str> {
-        self.nodes
-            .try_borrow(handle)
-            .map(|n| Reflect::type_name(n.0.deref()))
-    }
-}
-
-impl SceneGraph for UserInterface {
     #[inline]
-    fn pair_iter(&self) -> impl Iterator<Item = (Handle<Self::Node>, &Self::Node)> {
+    fn pair_iter(&self) -> impl Iterator<Item = (Handle<Self::NodeWrapper>, &Self::NodeWrapper)> {
         self.nodes.pair_iter()
     }
 
     #[inline]
-    fn linear_iter(&self) -> impl Iterator<Item = &Self::Node> {
+    fn linear_iter(&self) -> impl Iterator<Item = &Self::NodeWrapper> {
         self.nodes.iter()
     }
 
     #[inline]
-    fn linear_iter_mut(&mut self) -> impl Iterator<Item = &mut Self::Node> {
+    fn linear_iter_mut(&mut self) -> impl Iterator<Item = &mut Self::NodeWrapper> {
         self.nodes.iter_mut()
     }
 
-    fn typed_ref<Ref>(
-        &self,
-        handle: impl BorrowAs<Self::Node, Self::NodeContainer, Target = Ref>,
-    ) -> Option<&Ref> {
-        self.nodes.typed_ref(handle)
+    fn try_get<U: ObjectOrVariant<UiNode>>(&self, handle: Handle<U>) -> Result<&U, PoolError> {
+        self.nodes.try_get(handle)
     }
 
-    fn typed_mut<Ref>(
+    fn try_get_mut<U: ObjectOrVariant<UiNode>>(
         &mut self,
-        handle: impl BorrowAs<Self::Node, Self::NodeContainer, Target = Ref>,
-    ) -> Option<&mut Ref> {
-        self.nodes.typed_mut(handle)
+        handle: Handle<U>,
+    ) -> Result<&mut U, PoolError> {
+        self.nodes.try_get_mut(handle)
     }
 }
 
@@ -3380,12 +3766,12 @@ fn less_than_or_close(value1: f32, value2: f32) -> bool {
     (value1 < value2) || are_close(value1, value2)
 }
 
-/// Calculates a new size for the rect after transforming it with the given matrix. Basically it
+/// Calculates a new size for the rect after transforming it with the given matrix. Basically, it
 /// finds a new rectangle that can contain the rotated rectangle.
 ///
 /// # Origin
 ///
-/// Original code was taken from WPF source code (FindMaximalAreaLocalSpaceRect) and ported to Rust.
+/// The Original code was taken from WPF source code (FindMaximalAreaLocalSpaceRect) and ported to Rust.
 /// It handles a lot of edge cases that could occur due to the fact that the UI uses a lot of
 /// special floating-point constants like Infinity or NaN. If there would be no such values, simple
 /// `rect.transform(&matrix).size` could be used.
@@ -3455,7 +3841,7 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
             } else {
                 // Case: b==0, a!=0, c!=0, d!=0
 
-                // Maximizing under line (hIntercept=xConstr/c, wIntercept=xConstr/a)
+                // Maximizing underline (hIntercept=xConstr/c, wIntercept=xConstr/a)
                 // BUT we still have constraint: h <= yConstr/d
 
                 h = (0.5 * (x_constr / c).abs()).min(y_cover_d);
@@ -3464,7 +3850,7 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
         } else {
             // Case: c==0, a!=0, b!=0, d!=0
 
-            // Maximizing under line (hIntercept=yConstr/d, wIntercept=yConstr/b)
+            // Maximizing underline (hIntercept=yConstr/d, wIntercept=yConstr/b)
             // BUT we still have constraint: w <= xConstr/a
 
             w = (0.5 * (y_constr / b).abs()).min(x_cover_a);
@@ -3487,7 +3873,7 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
             } else {
                 // Case: a==0, b!=0, c!=0, d!=0
 
-                // Maximizing under line (hIntercept=yConstr/d, wIntercept=yConstr/b)
+                // Maximizing underline (hIntercept=yConstr/d, wIntercept=yConstr/b)
                 // BUT we still have constraint: h <= xConstr/c
 
                 h = (0.5 * (y_constr / d).abs()).min(x_cover_c);
@@ -3496,7 +3882,7 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
         } else {
             // Case: d==0, a!=0, b!=0, c!=0
 
-            // Maximizing under line (hIntercept=xConstr/c, wIntercept=xConstr/a)
+            // Maximizing underline (hIntercept=xConstr/c, wIntercept=xConstr/a)
             // BUT we still have constraint: w <= yConstr/b
 
             w = (0.5 * (x_constr / a).abs()).min(y_cover_b);
@@ -3509,7 +3895,7 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
         let y_cover_b = (y_constr / b).abs(); // w-intercept of y-constraint line.
         let y_cover_d = (y_constr / d).abs(); // h-intercept of y-constraint line.
 
-        // The tighest constraint governs, so we pick the lowest constraint line.
+        // The tightest constraint governs, so we pick the lowest constraint line.
         //
         //   The optimal point (w,h) for which Area = w*h is maximized occurs halfway
         //   to each intercept.
@@ -3543,13 +3929,7 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
     Vector2::new(w, h)
 }
 
-uuid_provider!(UserInterface = "0d065c93-ef9c-4dd2-9fe7-e2b33c1a21b6");
-
 impl ResourceData for UserInterface {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
         self.save(path)?;
         Ok(())
@@ -3564,39 +3944,18 @@ impl ResourceData for UserInterface {
     }
 }
 
-pub mod test {
-    use crate::{
-        core::{algebra::Vector2, pool::Handle},
-        message::MessageDirection,
-        widget::WidgetMessage,
-        BuildContext, UiNode, UserInterface,
-    };
-
-    pub fn test_widget_deletion(constructor: impl FnOnce(&mut BuildContext) -> Handle<UiNode>) {
-        let screen_size = Vector2::new(100.0, 100.0);
-        let mut ui = UserInterface::new(screen_size);
-        let widget = constructor(&mut ui.build_ctx());
-        ui.send_message(WidgetMessage::remove(widget, MessageDirection::ToWidget));
-        ui.update(screen_size, 1.0 / 60.0, &Default::default());
-        while ui.poll_message().is_some() {}
-        // Only root node must be alive.
-        assert_eq!(ui.nodes().alive_count(), 1);
-    }
-}
-
 #[cfg(test)]
 mod test_inner {
+    use crate::message::UiMessage;
     use crate::{
         border::BorderBuilder,
         core::algebra::{Rotation2, UnitComplex, Vector2},
-        message::MessageDirection,
         message::{ButtonState, KeyCode},
         text_box::TextBoxBuilder,
         transform_size,
         widget::{WidgetBuilder, WidgetMessage},
         OsEvent, UserInterface,
     };
-    use fyrox_graph::BaseSceneGraph;
 
     #[test]
     fn test_transform_size() {
@@ -3618,12 +3977,12 @@ mod test_inner {
                 .with_height(widget_size.y),
         )
         .build(&mut ui.build_ctx());
-        ui.update(screen_size, 0.0, &Default::default()); // Make sure layout was calculated.
-        ui.send_message(WidgetMessage::center(widget, MessageDirection::ToWidget));
+        ui.update(screen_size, 0.0, &Default::default()); // Make sure the layout was calculated.
+        ui.send(widget, WidgetMessage::Center);
         while ui.poll_message().is_some() {}
         ui.update(screen_size, 0.0, &Default::default());
         let expected_position = (screen_size - widget_size).scale(0.5);
-        let actual_position = ui.node(widget).actual_local_position();
+        let actual_position = ui[widget].actual_local_position();
         assert_eq!(actual_position, expected_position);
     }
 
@@ -3634,30 +3993,27 @@ mod test_inner {
 
         let text_box = TextBoxBuilder::new(WidgetBuilder::new()).build(&mut ui.build_ctx());
 
-        // Make sure layout was calculated.
+        // Make sure the layout was calculated.
         ui.update(screen_size, 0.0, &Default::default());
 
         assert!(ui.poll_message().is_none());
 
-        ui.send_message(WidgetMessage::focus(text_box, MessageDirection::ToWidget));
+        ui.send(text_box, WidgetMessage::Focus);
 
         // Ensure that the message has gotten in the queue.
         assert_eq!(
             ui.poll_message(),
-            Some(WidgetMessage::focus(text_box, MessageDirection::ToWidget))
+            Some(UiMessage::for_widget(text_box, WidgetMessage::Focus))
         );
-        // Root must be unfocused right before new widget is focused.
+        // Root must be unfocused right before the new widget is focused.
         assert_eq!(
             ui.poll_message(),
-            Some(WidgetMessage::unfocus(
-                ui.root(),
-                MessageDirection::FromWidget
-            ))
+            Some(UiMessage::from_widget(ui.root(), WidgetMessage::Unfocus))
         );
-        // Finally there should be a response from newly focused node.
+        // Finally, there should be a response from newly focused node.
         assert_eq!(
             ui.poll_message(),
-            Some(WidgetMessage::focus(text_box, MessageDirection::FromWidget))
+            Some(UiMessage::from_widget(text_box, WidgetMessage::Focus))
         );
 
         // Do additional check - emulate key press of "A" and check if the focused text box has accepted it.
@@ -3667,16 +4023,15 @@ mod test_inner {
             text: "A".to_string(),
         });
 
-        let msg = WidgetMessage::key_down(text_box, MessageDirection::FromWidget, KeyCode::KeyA);
+        let msg = UiMessage::from_widget(text_box, WidgetMessage::KeyDown(KeyCode::KeyA));
         msg.set_handled(true);
         assert_eq!(ui.poll_message(), Some(msg));
 
         assert_eq!(
             ui.poll_message(),
-            Some(WidgetMessage::text(
+            Some(UiMessage::from_widget(
                 text_box,
-                MessageDirection::FromWidget,
-                'A'.to_string()
+                WidgetMessage::Text('A'.to_string())
             ))
         );
 

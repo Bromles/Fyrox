@@ -31,6 +31,7 @@ use std::ops::Range;
 
 /// See module docs.
 #[derive(Debug, Visit, PartialEq, Reflect)]
+#[reflect(type_uuid = "61dcd2a8-58e5-4b53-92ed-7e0b531e1ed2")]
 pub struct BaseEmitter {
     /// Offset from center of particle system.
     position: Vector3<f32>,
@@ -39,7 +40,6 @@ pub struct BaseEmitter {
     #[visit(rename = "SpawnRate")]
     particle_spawn_rate: u32,
     /// Maximum amount of particles emitter can emit. Unlimited if < 0
-    #[visit(optional)] // Backward compatibility
     max_particles: Option<u32>,
     /// Range of initial lifetime of a particle
     #[visit(rename = "LifeTime")]

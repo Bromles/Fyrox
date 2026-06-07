@@ -20,11 +20,13 @@
 
 use super::*;
 
+use fyrox::gui::grid::Grid;
+use fyrox::gui::vec::VecEditor;
 use fyrox::{
-    core::{pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
     gui::{
         button::ButtonMessage,
-        define_constructor, define_widget_deref,
+        define_widget_deref,
         grid::{Column, GridBuilder, Row},
         message::{MessageDirection, UiMessage},
         stack_panel::StackPanelBuilder,
@@ -34,7 +36,6 @@ use fyrox::{
     },
     scene::tilemap::{tileset::TileBounds, OrthoTransform},
 };
-use std::ops::{Deref, DerefMut};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TileBoundsMessage {
@@ -43,35 +44,29 @@ pub enum TileBoundsMessage {
     FlipX,
     FlipY,
 }
+impl MessageData for TileBoundsMessage {}
 
-impl TileBoundsMessage {
-    define_constructor!(TileBoundsMessage:Value => fn value(Option<TileBounds>), layout: false);
-    define_constructor!(TileBoundsMessage:Turn => fn turn(i8), layout: false);
-    define_constructor!(TileBoundsMessage:FlipX => fn flip_x(), layout: false);
-    define_constructor!(TileBoundsMessage:FlipY => fn flip_y(), layout: false);
-}
-
-#[derive(Clone, Default, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "1e600103-6516-4c5a-a30b-f90f64fc9623")]
+#[derive(Clone, Default, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "1e600103-6516-4c5a-a30b-f90f64fc9623")]
 #[reflect(derived_type = "UiNode")]
 pub struct TileBoundsEditor {
     widget: Widget,
     pub value: Option<TileBounds>,
-    pub value_area: Handle<UiNode>,
-    pub left_top: Handle<UiNode>,
-    pub left_bottom: Handle<UiNode>,
-    pub right_top: Handle<UiNode>,
-    pub right_bottom: Handle<UiNode>,
-    pub button_left: Handle<UiNode>,
-    pub button_right: Handle<UiNode>,
-    pub button_flip_x: Handle<UiNode>,
-    pub button_flip_y: Handle<UiNode>,
+    pub value_area: Handle<Grid>,
+    pub left_top: Handle<VecEditor<u32, 2>>,
+    pub left_bottom: Handle<VecEditor<u32, 2>>,
+    pub right_top: Handle<VecEditor<u32, 2>>,
+    pub right_bottom: Handle<VecEditor<u32, 2>>,
+    pub button_left: Handle<Button>,
+    pub button_right: Handle<Button>,
+    pub button_flip_x: Handle<Button>,
+    pub button_flip_y: Handle<Button>,
 }
 
 define_widget_deref!(TileBoundsEditor);
 
 impl TileBoundsEditor {
-    fn get_field(&self, index: usize) -> Handle<UiNode> {
+    fn get_field(&self, index: usize) -> Handle<VecEditor<u32, 2>> {
         match index {
             0 => self.left_bottom,
             1 => self.right_bottom,
@@ -82,45 +77,23 @@ impl TileBoundsEditor {
     }
     fn turn(&mut self, amount: i8, ui: &mut UserInterface) {
         if let Some(value) = self.value.clone().map(|v| v.rotated(amount)) {
-            ui.send_message(TileBoundsMessage::value(
-                self.handle,
-                MessageDirection::ToWidget,
-                Some(value),
-            ));
+            ui.send(self.handle, TileBoundsMessage::Value(Some(value)));
         } else {
-            ui.send_message(TileBoundsMessage::turn(
-                self.handle,
-                MessageDirection::FromWidget,
-                amount,
-            ));
+            ui.send(self.handle, TileBoundsMessage::Turn(amount));
         }
     }
     fn flip_x(&mut self, ui: &mut UserInterface) {
         if let Some(value) = self.value.clone().map(|v| v.x_flipped()) {
-            ui.send_message(TileBoundsMessage::value(
-                self.handle,
-                MessageDirection::ToWidget,
-                Some(value),
-            ));
+            ui.send(self.handle, TileBoundsMessage::Value(Some(value)));
         } else {
-            ui.send_message(TileBoundsMessage::flip_x(
-                self.handle,
-                MessageDirection::FromWidget,
-            ));
+            ui.send(self.handle, TileBoundsMessage::FlipX);
         }
     }
     fn flip_y(&mut self, ui: &mut UserInterface) {
         if let Some(value) = self.value.clone().map(|v| v.y_flipped()) {
-            ui.send_message(TileBoundsMessage::value(
-                self.handle,
-                MessageDirection::ToWidget,
-                Some(value),
-            ));
+            ui.send(self.handle, TileBoundsMessage::Value(Some(value)));
         } else {
-            ui.send_message(TileBoundsMessage::flip_y(
-                self.handle,
-                MessageDirection::FromWidget,
-            ));
+            ui.send(self.handle, TileBoundsMessage::FlipY);
         }
     }
     fn set_value(
@@ -132,45 +105,29 @@ impl TileBoundsEditor {
         match (&self.value, new_value) {
             (None, None) => (),
             (Some(_), None) => {
-                ui.send_message(WidgetMessage::visibility(
-                    self.value_area,
-                    MessageDirection::ToWidget,
-                    false,
-                ));
+                ui.send(self.value_area, WidgetMessage::Visibility(false));
                 self.value = None;
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
             }
             (None, Some(v)) => {
-                ui.send_message(WidgetMessage::visibility(
-                    self.value_area,
-                    MessageDirection::ToWidget,
-                    true,
-                ));
+                ui.send(self.value_area, WidgetMessage::Visibility(true));
                 self.value = Some(v.clone());
                 for i in 0..4 {
-                    ui.send_message(Vec2EditorMessage::value(
-                        self.get_field(i),
-                        MessageDirection::ToWidget,
-                        v.get(i),
-                    ));
+                    ui.send(self.get_field(i), Vec2EditorMessage::Value(v.get(i)));
                 }
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
             }
             (Some(v0), Some(v1)) => {
                 let mut has_changed = false;
                 for i in 0..4 {
                     if v0.get(i) != v1.get(i) {
                         has_changed = true;
-                        ui.send_message(Vec2EditorMessage::value(
-                            self.get_field(i),
-                            MessageDirection::ToWidget,
-                            v1.get(i),
-                        ));
+                        ui.send(self.get_field(i), Vec2EditorMessage::Value(v1.get(i)));
                     }
                 }
                 self.value = Some(v1.clone());
                 if has_changed {
-                    ui.send_message(message.reverse());
+                    ui.try_send_response(message);
                 }
             }
         }
@@ -183,16 +140,12 @@ impl Control for TileBoundsEditor {
         if let Some(Vec2EditorMessage::<u32>::Value(v)) = message.data() {
             if message.direction() == MessageDirection::FromWidget {
                 for i in 0..4 {
-                    if self.get_field(i) == message.destination() {
+                    if message.destination() == self.get_field(i) {
                         let mut value = self.value.clone().unwrap_or_default();
                         *value.get_mut(i) = *v;
                         // This does not trigger a Value FromWidget message from the VecEditor
                         // because the values of the fields have not changed.
-                        ui.send_message(TileBoundsMessage::value(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            Some(value),
-                        ));
+                        ui.send(self.handle, TileBoundsMessage::Value(Some(value)));
                     }
                 }
             }
@@ -222,7 +175,7 @@ impl TileBoundsEditorBuilder {
     pub fn new(widget_builder: WidgetBuilder) -> Self {
         Self { widget_builder }
     }
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<TileBoundsEditor> {
         let left_top = VecEditorBuilder::<u32, 2>::new(WidgetBuilder::new()).build(ctx);
         let right_top =
             VecEditorBuilder::<u32, 2>::new(WidgetBuilder::new().on_column(1)).build(ctx);
@@ -292,7 +245,7 @@ impl TileBoundsEditorBuilder {
                 .with_child(buttons),
         )
         .build(ctx);
-        ctx.add_node(UiNode::new(TileBoundsEditor {
+        ctx.add(TileBoundsEditor {
             widget: self.widget_builder.with_child(content).build(ctx),
             value: None,
             value_area,
@@ -304,6 +257,6 @@ impl TileBoundsEditorBuilder {
             button_right: right_button,
             button_flip_x: flip_x_button,
             button_flip_y: flip_y_button,
-        }))
+        })
     }
 }

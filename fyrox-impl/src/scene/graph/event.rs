@@ -64,7 +64,7 @@ impl GraphEventBroadcaster {
     /// # use fyrox_impl::scene::graph::event::GraphEvent;
     /// # use fyrox_impl::scene::graph::Graph;
     /// # use fyrox_impl::scene::pivot::PivotBuilder;
-    /// # use fyrox_impl::graph::BaseSceneGraph;
+    /// # use fyrox_impl::graph::SceneGraph;
     ///
     /// let mut graph = Graph::new();
     ///
@@ -72,7 +72,7 @@ impl GraphEventBroadcaster {
     /// graph.event_broadcaster.subscribe(tx);
     ///
     /// // Add a node
-    /// let handle = PivotBuilder::new(BaseBuilder::new()).build(&mut graph);
+    /// let handle = PivotBuilder::new(BaseBuilder::new()).build(&mut graph).to_base();
     ///
     /// assert_eq!(rx.recv(), Ok(GraphEvent::Added(handle)));
     ///

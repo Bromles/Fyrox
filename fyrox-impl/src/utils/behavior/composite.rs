@@ -25,17 +25,19 @@
 //! is returned from any descendant node. In other worlds `Selector` implement OR logical
 //! function.
 
+use crate::utils::behavior::BaseBehavior;
 use crate::{
     core::{pool::Handle, visitor::prelude::*},
     utils::behavior::{BehaviorNode, BehaviorTree},
 };
 
 /// Defines exact behavior of the composite node.
-#[derive(Debug, PartialEq, Visit, Eq, Clone)]
+#[derive(Debug, PartialEq, Visit, Eq, Clone, Default)]
 pub enum CompositeNodeKind {
     /// `Sequence` node will execute children nodes consecutively
     /// until `Status::Failure` is returned from any descendant node. In other words `Sequence`
     /// implement AND logical function.
+    #[default]
     Sequence,
     /// `Selector` node will execute children until `Status::Success`
     /// is returned from any descendant node. In other worlds `Selector` implement OR logical
@@ -43,17 +45,11 @@ pub enum CompositeNodeKind {
     Selector,
 }
 
-impl Default for CompositeNodeKind {
-    fn default() -> Self {
-        Self::Sequence
-    }
-}
-
 /// See module docs.
 #[derive(Debug, PartialEq, Visit, Eq, Clone)]
 pub struct CompositeNode<B>
 where
-    B: Clone,
+    B: BaseBehavior,
 {
     /// A set of children.
     pub children: Vec<Handle<BehaviorNode<B>>>,
@@ -63,7 +59,7 @@ where
 
 impl<B> Default for CompositeNode<B>
 where
-    B: Clone,
+    B: BaseBehavior,
 {
     fn default() -> Self {
         Self {
@@ -75,7 +71,7 @@ where
 
 impl<B> CompositeNode<B>
 where
-    B: Clone + 'static,
+    B: BaseBehavior,
 {
     /// Creates new composite node of given kind and set of children nodes.
     pub fn new(kind: CompositeNodeKind, children: Vec<Handle<BehaviorNode<B>>>) -> Self {

@@ -21,18 +21,17 @@
 use crate::{
     fyrox::{
         core::{
-            algebra::Vector2, parking_lot::Mutex, pool::ErasedHandle, pool::Handle,
-            reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*,
+            parking_lot::Mutex, pool::ErasedHandle, pool::Handle, reflect::prelude::*,
+            visitor::prelude::*,
         },
         fxhash::FxHashSet,
-        graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+        graph::{NodeWrapper, SceneGraph},
         gui::{
             border::BorderBuilder,
             button::{ButtonBuilder, ButtonMessage},
-            define_constructor, define_widget_deref,
-            draw::DrawingContext,
+            define_widget_deref,
             grid::{Column, GridBuilder, Row},
-            message::{KeyCode, MessageDirection, OsEvent, UiMessage},
+            message::{KeyCode, MessageDirection, UiMessage},
             scroll_viewer::ScrollViewerBuilder,
             scroll_viewer::ScrollViewerMessage,
             searchbar::{SearchBarBuilder, SearchBarMessage},
@@ -48,13 +47,20 @@ use crate::{
     },
     utils::make_node_name,
 };
+use fyrox::gui::button::Button;
+use fyrox::gui::control_trait_proxy_impls;
 use fyrox::gui::formatted_text::WrapMode;
+use fyrox::gui::message::{DeliveryMode, MessageData};
+use fyrox::gui::scroll_viewer::ScrollViewer;
+use fyrox::gui::searchbar::SearchBar;
+use fyrox::gui::text_box::EmptyTextPlaceholder;
+use fyrox::gui::tree::TreeRoot;
 use std::hash::{Hash, Hasher};
 use std::{
     any::{Any, TypeId},
     fmt::Debug,
     ops::{Deref, DerefMut},
-    sync::{mpsc::Sender, Arc},
+    sync::Arc,
 };
 
 #[derive(Eq, Clone, Debug, PartialEq)]
@@ -70,8 +76,8 @@ pub struct HierarchyNode {
 impl HierarchyNode {
     pub fn from_scene_node<G, N>(node_handle: Handle<N>, ignored_node: Handle<N>, graph: &G) -> Self
     where
-        G: SceneGraph<Node = N>,
-        N: SceneGraphNode<SceneGraph = G>,
+        G: SceneGraph<NodeWrapper = N>,
+        N: NodeWrapper<SceneGraph = G>,
     {
         let node = graph.node(node_handle);
 
@@ -117,7 +123,7 @@ impl HierarchyNode {
         &self,
         allowed_types: &FxHashSet<AllowedType>,
         ctx: &mut BuildContext,
-    ) -> Handle<UiNode> {
+    ) -> Handle<Tree> {
         let brush = if allowed_types.contains(&AllowedType::unnamed(self.inner_type_id))
             || self
                 .derived_type_ids
@@ -153,6 +159,7 @@ impl HierarchyNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, Reflect)]
+#[reflect(type_uuid = "760fdb9d-45f6-4fc1-9fa0-86a802a40a1f")]
 pub struct SelectedHandle {
     #[visit(skip)]
     #[reflect(hidden)]
@@ -167,7 +174,7 @@ impl<T: Reflect> From<Handle<T>> for SelectedHandle {
     fn from(value: Handle<T>) -> Self {
         Self {
             inner_type_id: TypeId::of::<T>(),
-            derived_type_ids: T::derived_types().to_vec(),
+            derived_type_ids: T::type_info().derived_types.to_vec(),
             handle: value.into(),
         }
     }
@@ -190,12 +197,7 @@ pub enum NodeSelectorMessage {
     Selection(Vec<SelectedHandle>),
     ChooseFocus,
 }
-
-impl NodeSelectorMessage {
-    define_constructor!(NodeSelectorMessage:Hierarchy => fn hierarchy(HierarchyNode), layout: false);
-    define_constructor!(NodeSelectorMessage:Selection => fn selection(Vec<SelectedHandle>), layout: false);
-    define_constructor!(NodeSelectorMessage:ChooseFocus => fn choose_focus(), layout: false);
-}
+impl MessageData for NodeSelectorMessage {}
 
 #[derive(Clone)]
 struct TreeData {
@@ -205,15 +207,15 @@ struct TreeData {
     pub derived_type_ids: Vec<TypeId>,
 }
 
-#[derive(Debug, Clone, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
+#[derive(Debug, Clone, Visit, Reflect)]
 #[reflect(derived_type = "UiNode")]
-#[type_uuid(id = "1d718f90-323c-492d-b057-98d47495900a")]
+#[reflect(type_uuid = "1d718f90-323c-492d-b057-98d47495900a")]
 pub struct NodeSelector {
     widget: Widget,
-    tree_root: Handle<UiNode>,
-    search_bar: Handle<UiNode>,
+    tree_root: Handle<TreeRoot>,
+    search_bar: Handle<SearchBar>,
     selected: Vec<SelectedHandle>,
-    scroll_viewer: Handle<UiNode>,
+    scroll_viewer: Handle<ScrollViewer>,
     #[visit(skip)]
     #[reflect(hidden)]
     allowed_types: FxHashSet<AllowedType>,
@@ -230,16 +232,12 @@ fn apply_filter_recursive(node: Handle<UiNode>, filter: &str, ui: &UserInterface
     }
 
     if let Some(data) = node_ref
-        .query_component::<Tree>()
+        .self_or_field_ref::<Tree>()
         .and_then(|n| n.user_data_cloned::<TreeData>())
     {
         is_any_match |= data.name.to_lowercase().contains(filter);
 
-        ui.send_message(WidgetMessage::visibility(
-            node,
-            MessageDirection::ToWidget,
-            is_any_match,
-        ));
+        ui.send(node, WidgetMessage::Visibility(is_any_match));
     }
 
     is_any_match
@@ -249,103 +247,81 @@ impl Control for NodeSelector {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(msg) = message.data::<NodeSelectorMessage>() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    NodeSelectorMessage::Hierarchy(hierarchy) => {
-                        let items =
-                            vec![hierarchy.make_view(&self.allowed_types, &mut ui.build_ctx())];
-                        ui.send_message(TreeRootMessage::items(
-                            self.tree_root,
-                            MessageDirection::ToWidget,
-                            items,
-                        ));
-                    }
-                    NodeSelectorMessage::Selection(selection) => {
-                        if &self.selected != selection {
-                            self.selected.clone_from(selection);
-
-                            self.sync_selection(ui);
-
-                            ui.send_message(message.reverse());
-                        }
-                    }
-                    NodeSelectorMessage::ChooseFocus => {
-                        ui.send_message(WidgetMessage::focus(
-                            self.search_bar,
-                            MessageDirection::ToWidget,
-                        ));
+        if let Some(msg) = message.data_for::<NodeSelectorMessage>(self.handle) {
+            match msg {
+                NodeSelectorMessage::Hierarchy(hierarchy) => {
+                    let items = vec![hierarchy.make_view(&self.allowed_types, &mut ui.build_ctx())];
+                    ui.send(self.tree_root, TreeRootMessage::Items(items));
+                }
+                NodeSelectorMessage::Selection(selection) => {
+                    if &self.selected != selection {
+                        self.selected.clone_from(selection);
                         self.sync_selection(ui);
+                        ui.try_send_response(message);
                     }
                 }
-            }
-        } else if let Some(SearchBarMessage::Text(filter_text)) = message.data() {
-            if message.destination() == self.search_bar
-                && message.direction() == MessageDirection::FromWidget
-            {
-                apply_filter_recursive(self.tree_root, &filter_text.to_lowercase(), ui);
-
-                // Bring first item of current selection in the view when clearing the filter.
-                if filter_text.is_empty() {
-                    let selected_trees = self.find_selected_tree_items(ui);
-
-                    if let Some(first) = selected_trees.first() {
-                        ui.send_message(ScrollViewerMessage::bring_into_view(
-                            self.scroll_viewer,
-                            MessageDirection::ToWidget,
-                            *first,
-                        ));
-                    }
+                NodeSelectorMessage::ChooseFocus => {
+                    ui.send(self.search_bar, WidgetMessage::Focus);
+                    self.sync_selection(ui);
                 }
             }
-        } else if let Some(TreeRootMessage::Selected(selection)) = message.data() {
-            if message.destination() == self.tree_root
-                && message.direction() == MessageDirection::FromWidget
-            {
-                ui.send_message(NodeSelectorMessage::selection(
+        } else if let Some(SearchBarMessage::Text(filter_text)) = message.data_from(self.search_bar)
+        {
+            apply_filter_recursive(self.tree_root.to_base(), &filter_text.to_lowercase(), ui);
+
+            // Bring first item of current selection in the view when clearing the filter.
+            if filter_text.is_empty() {
+                let selected_trees = self.find_selected_tree_items(ui);
+
+                if let Some(first) = selected_trees.first() {
+                    ui.send(
+                        self.scroll_viewer,
+                        ScrollViewerMessage::BringIntoView(first.to_base()),
+                    );
+                }
+            }
+        } else if let Some(TreeRootMessage::Select(selection)) = message.data_from(self.tree_root) {
+            if message.delivery_mode != DeliveryMode::SyncOnly {
+                ui.send(
                     self.handle,
-                    MessageDirection::ToWidget,
-                    selection
-                        .iter()
-                        .map(|s| {
-                            let tree_data = ui.node(*s).user_data_cloned::<TreeData>().unwrap();
+                    NodeSelectorMessage::Selection(
+                        selection
+                            .iter()
+                            .filter_map(|s| {
+                                let tree_data =
+                                    ui.try_get(*s).ok()?.user_data_cloned::<TreeData>()?;
 
-                            SelectedHandle {
-                                handle: tree_data.handle,
-                                inner_type_id: tree_data.inner_type_id,
-                                derived_type_ids: tree_data.derived_type_ids,
-                            }
-                        })
-                        .collect(),
-                ));
+                                Some(SelectedHandle {
+                                    handle: tree_data.handle,
+                                    inner_type_id: tree_data.inner_type_id,
+                                    derived_type_ids: tree_data.derived_type_ids,
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
             }
-        } else if let Some(TreeRootMessage::ItemsChanged) = message.data() {
-            if message.destination == self.tree_root
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.sync_selection(ui);
-            }
+        } else if let Some(TreeRootMessage::ItemsChanged) = message.data_from(self.tree_root) {
+            self.sync_selection(ui);
         }
     }
 }
 
 impl NodeSelector {
-    fn find_selected_tree_items(&self, ui: &UserInterface) -> Vec<Handle<UiNode>> {
-        let mut stack = vec![self.tree_root];
+    fn find_selected_tree_items(&self, ui: &UserInterface) -> Vec<Handle<Tree>> {
+        let mut stack = vec![self.tree_root.to_base()];
         let mut selected_trees = Vec::new();
 
         while let Some(node_handle) = stack.pop() {
             let node = ui.node(node_handle);
 
-            if let Some(tree) = node.query_component::<Tree>() {
+            if let Some(tree) = node.self_or_field_ref::<Tree>() {
                 if self.selected.iter().any(|selected| {
                     let tree_data = tree.user_data_cloned::<TreeData>().unwrap();
                     tree_data.handle == selected.handle
                         && tree_data.inner_type_id == selected.inner_type_id
                 }) {
-                    selected_trees.push(node_handle);
+                    selected_trees.push(node_handle.to_variant());
                 }
             }
 
@@ -359,18 +335,13 @@ impl NodeSelector {
         let selected_trees = self.find_selected_tree_items(ui);
 
         if let Some(first) = selected_trees.first() {
-            ui.send_message(ScrollViewerMessage::bring_into_view(
+            ui.send(
                 self.scroll_viewer,
-                MessageDirection::ToWidget,
-                *first,
-            ))
+                ScrollViewerMessage::BringIntoView(first.to_base()),
+            )
         }
 
-        ui.send_message(TreeRootMessage::select(
-            self.tree_root,
-            MessageDirection::ToWidget,
-            selected_trees,
-        ));
+        ui.send_sync(self.tree_root, TreeRootMessage::Select(selected_trees));
     }
 }
 
@@ -399,7 +370,7 @@ impl NodeSelectorBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<NodeSelector> {
         let items = self
             .hierarchy
             .map(|h| vec![h.make_view(&self.allowed_types, ctx)])
@@ -415,6 +386,9 @@ impl NodeSelectorBuilder {
                 .with_child({
                     search_bar =
                         SearchBarBuilder::new(WidgetBuilder::new().with_tab_index(Some(0)))
+                            .with_empty_text_placeholder(EmptyTextPlaceholder::Text(
+                                "Search for a scene node",
+                            ))
                             .build(ctx);
                     search_bar
                 })
@@ -450,19 +424,18 @@ impl NodeSelectorBuilder {
             allowed_types: self.allowed_types,
         };
 
-        ctx.add_node(UiNode::new(selector))
+        ctx.add(selector)
     }
 }
 
-#[derive(Debug, Clone, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "5bb00f15-d6ec-4f0e-af7e-9472b0e290b4")]
+#[derive(Debug, Clone, Visit, Reflect)]
+#[reflect(type_uuid = "5bb00f15-d6ec-4f0e-af7e-9472b0e290b4")]
 #[reflect(derived_type = "UiNode")]
 pub struct NodeSelectorWindow {
-    #[component(include)]
     window: Window,
-    selector: Handle<UiNode>,
-    ok: Handle<UiNode>,
-    cancel: Handle<UiNode>,
+    selector: Handle<NodeSelector>,
+    ok: Handle<Button>,
+    cancel: Handle<Button>,
     #[visit(skip)]
     #[reflect(hidden)]
     allowed_types: FxHashSet<AllowedType>,
@@ -484,43 +457,17 @@ impl DerefMut for NodeSelectorWindow {
 
 impl NodeSelectorWindow {
     fn confirm(&self, ui: &UserInterface) {
-        ui.send_message(NodeSelectorMessage::selection(
+        ui.post(
             self.handle,
-            MessageDirection::FromWidget,
-            ui.node(self.selector)
-                .query_component::<NodeSelector>()
-                .unwrap()
-                .selected
-                .clone(),
-        ));
+            NodeSelectorMessage::Selection(ui[self.selector].selected.clone()),
+        );
 
-        ui.send_message(WindowMessage::close(
-            self.handle,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.handle, WindowMessage::Close);
     }
 }
 
 impl Control for NodeSelectorWindow {
-    fn on_remove(&self, sender: &Sender<UiMessage>) {
-        self.window.on_remove(sender);
-    }
-
-    fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
-        self.window.measure_override(ui, available_size)
-    }
-
-    fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
-        self.window.arrange_override(ui, final_size)
-    }
-
-    fn draw(&self, drawing_context: &mut DrawingContext) {
-        self.window.draw(drawing_context)
-    }
-
-    fn update(&mut self, dt: f32, ui: &mut UserInterface) {
-        self.window.update(dt, ui)
-    }
+    control_trait_proxy_impls!(window);
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.window.handle_routed_message(ui, message);
@@ -529,47 +476,37 @@ impl Control for NodeSelectorWindow {
             if message.destination() == self.ok {
                 self.confirm(ui);
             } else if message.destination() == self.cancel {
-                ui.send_message(WindowMessage::close(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, WindowMessage::Close);
             }
         } else if let Some(msg) = message.data::<NodeSelectorMessage>() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-            {
+            if message.is_for(self.handle) {
                 // Dispatch to inner selector.
                 let mut msg = message.clone();
-                msg.destination = self.selector;
+                msg.destination = self.selector.to_base();
                 ui.send_message(msg);
             } else if message.destination() == self.selector
                 && message.direction() == MessageDirection::FromWidget
             {
                 // Enable "ok" button if selection is valid.
                 if let NodeSelectorMessage::Selection(selection) = msg {
-                    ui.send_message(WidgetMessage::enabled(
+                    ui.send(
                         self.ok,
-                        MessageDirection::ToWidget,
-                        !selection.is_empty()
-                            && selection.iter().all(|h| {
-                                self.allowed_types
-                                    .contains(&AllowedType::unnamed(h.inner_type_id))
-                                    || h.derived_type_ids.iter().any(|derived| {
-                                        self.allowed_types.contains(&AllowedType::unnamed(*derived))
-                                    })
-                            }),
-                    ));
+                        WidgetMessage::Enabled(
+                            !selection.is_empty()
+                                && selection.iter().all(|h| {
+                                    self.allowed_types
+                                        .contains(&AllowedType::unnamed(h.inner_type_id))
+                                        || h.derived_type_ids.iter().any(|derived| {
+                                            self.allowed_types
+                                                .contains(&AllowedType::unnamed(*derived))
+                                        })
+                                }),
+                        ),
+                    );
                 }
             }
-        } else if let Some(WindowMessage::Open { .. })
-        | Some(WindowMessage::OpenAt { .. })
-        | Some(WindowMessage::OpenModal { .. })
-        | Some(WindowMessage::OpenAndAlign { .. }) = message.data()
-        {
-            ui.send_message(NodeSelectorMessage::choose_focus(
-                self.selector,
-                MessageDirection::ToWidget,
-            ));
+        } else if let Some(WindowMessage::Open { .. }) = message.data() {
+            ui.send(self.selector, NodeSelectorMessage::ChooseFocus);
         } else if let Some(WidgetMessage::KeyDown(KeyCode::Enter | KeyCode::NumpadEnter)) =
             message.data()
         {
@@ -578,19 +515,6 @@ impl Control for NodeSelectorWindow {
                 message.set_handled(true);
             }
         }
-    }
-
-    fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
-        self.window.preview_message(ui, message)
-    }
-
-    fn handle_os_event(
-        &mut self,
-        self_handle: Handle<UiNode>,
-        ui: &mut UserInterface,
-        event: &OsEvent,
-    ) {
-        self.window.handle_os_event(self_handle, ui, event);
     }
 }
 
@@ -646,7 +570,7 @@ impl NodeSelectorWindowBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<NodeSelectorWindow> {
         let ok;
         let cancel;
         let selector;
@@ -730,7 +654,7 @@ impl NodeSelectorWindowBuilder {
             allowed_types: self.allowed_types,
         };
 
-        ctx.add_node(UiNode::new(window))
+        ctx.add(window)
     }
 }
 

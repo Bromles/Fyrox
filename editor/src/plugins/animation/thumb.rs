@@ -27,23 +27,21 @@ use crate::fyrox::{
         algebra::{Point2, Vector2},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
-        uuid_provider,
         visitor::prelude::*,
     },
     gui::{
-        define_constructor, define_widget_deref,
+        define_widget_deref,
         draw::{CommandTexture, Draw, DrawingContext},
-        message::{MessageDirection, UiMessage},
+        message::UiMessage,
         widget::{Widget, WidgetBuilder},
         BuildContext, Control, UiNode, UserInterface,
     },
 };
 
 use fyrox::gui::curve::CurveTransformCell;
+use fyrox::gui::message::MessageData;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
-use std::ops::{Deref, DerefMut};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThumbMessage {
@@ -51,15 +49,13 @@ pub enum ThumbMessage {
     ViewPosition(f32),
     Position(f32),
 }
+impl MessageData for ThumbMessage {}
 
-impl ThumbMessage {
-    define_constructor!(ThumbMessage:Zoom => fn zoom(f32), layout: false);
-    define_constructor!(ThumbMessage:ViewPosition => fn view_position(f32), layout: false);
-    define_constructor!(ThumbMessage:Position => fn position(f32), layout: false);
-}
-
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "820ba009-54e0-4050-ba7e-28f1f5b40429"
+)]
 pub struct Thumb {
     widget: Widget,
     #[visit(skip)]
@@ -78,8 +74,6 @@ impl Thumb {
             .x
     }
 }
-
-uuid_provider!(Thumb = "820ba009-54e0-4050-ba7e-28f1f5b40429");
 
 impl Control for Thumb {
     fn draw(&self, ctx: &mut DrawingContext) {
@@ -109,22 +103,21 @@ impl Control for Thumb {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(msg) = message.data::<ThumbMessage>() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    ThumbMessage::Zoom(zoom) => {
-                        self.transform.set_scale(Vector2::new(*zoom, 1.0));
-                    }
-                    ThumbMessage::ViewPosition(position) => {
-                        self.transform.set_position(Vector2::new(*position, 0.0));
-                    }
-                    ThumbMessage::Position(value) => {
-                        if value.ne(&self.position) {
-                            self.position = *value;
-                            ui.send_message(message.reverse());
-                        }
+        if let Some(msg) = message.data_for::<ThumbMessage>(self.handle) {
+            match msg {
+                ThumbMessage::Zoom(zoom) => {
+                    self.transform.set_scale(Vector2::new(*zoom, 1.0));
+                    self.invalidate_visual();
+                }
+                ThumbMessage::ViewPosition(position) => {
+                    self.transform.set_position(Vector2::new(*position, 0.0));
+                    self.invalidate_visual();
+                }
+                ThumbMessage::Position(value) => {
+                    if value.ne(&self.position) {
+                        self.position = *value;
+                        ui.try_send_response(message);
+                        self.invalidate_visual();
                     }
                 }
             }
@@ -141,7 +134,7 @@ impl ThumbBuilder {
         Self { widget_builder }
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Thumb> {
         let ruler = Thumb {
             widget: self
                 .widget_builder
@@ -152,7 +145,7 @@ impl ThumbBuilder {
             position: 0.0,
         };
 
-        ctx.add_node(UiNode::new(ruler))
+        ctx.add(ruler)
     }
 }
 

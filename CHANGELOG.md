@@ -1,3 +1,816 @@
+# 1.0.1
+
+- Fixed unaligned read in the renderer on WebAssembly, that in some cases led to black screen on startup (#906).
+
+# 1.0.0
+
+First stable release.
+
+## Fixed
+
+- Reduced vram consumption by replacing rgba16f with rgb10a2 textures
+- Fixed crash when switching scenes after selecting an audio bus
+- Fixed incorrect shape editing for cuboid shapes
+- Fixed debug rendering in 2d
+- Do not offset a collider when changing its size via shape editing
+- Fixed position reset when moving multiple objects at once
+- Fixed crash when attempting to bring a destroyed widget into view
+- Fixed terrain multilayer rendering
+- Fixed prefab hot reloading
+- Fixed heightfield collider not working (fix for rapier3d regression)
+- Fixed view jumping when selecting large tree view items in world viewer
+- Fixed incorrect id for default animation tracks data container
+- Fixed crash when undoing asset instantiation
+- Fixed root field name
+- Fixed inability to delete text in text box in some cases
+- Fixed camera preview being cutoff from the bottom
+- Fixed inability to copy built-in resources without a data source
+- Fixed height for search bar in property selector
+- Correctly leave preview mode when closing absm editor
+- Correctly leave preview mode when closing animation editor
+- Fixed asset selector style
+- Fixed text trimming in check box
+- Fixed warning from material field
+- Fixed tab control style
+- Fixed layout for bit field
+- Fixed text alignment for infinite constraints
+- Fixed incorrect descender calculation in case of infinite constraints
+- Fixed checkbox style
+- Fixed crash when loading a prefab with hierarchy modified in the base
+- Fixed infinite message loop in quat property editor
+- Fixed absm editor not working properly for game scenes
+- Fix naming for inspector actions
+- Fix naming some more
+- Fixed `already borrowed` panic
+- Fixed absm buttons
+- Fixed bitfield style
+- Fixed curve editor coordinate space
+- Fixed incorrect behavior of `open recent scene`
+- Fixed incorrect project name for `export-cli`
+- Fixed incorrect resource path fetching in material field editor
+- Fixed style for `add` and `remove` buttons for collections
+- Include `core` module in `fyrox` docs
+- Fix for macos fast scroll when pixel delta is received (#898)
+- Style fixes for material editor
+- Fixed resource registry not loading in time on wasm
+- Prevent crash when moving a scene node
+
+## Added
+
+- CLI for project export
+- Ability to trim text with ellipsis
+- Input box widget
+- Tooltip with track property name
+- `UserInterface::try_send_response` helper
+- Ability to disable background curves in the animation editor
+- Ability to disable background curves for curve editor widget
+- Add built-in light style resource
+- Add exit confimation dialog for project manager
+- Added `donate` button for project manager
+- Added colors for scene item icons
+- Added missing code for surface data resource saving
+- Added more methods for `ImageButtonBuilder`
+- Added shadow for the text in the asset item
+- `BehaviorResult` alias + test fixes
+- `Color::hex`
+- `ImageButtonBuilder` helper + replaced `make_button_xxx`
+- `PluginContext::load_scene_or_ui` + fixed project template
+- `dispatch_behavior_variants` macro
+- `locate` button for material field
+- `locate` button for surface field
+- `make_image_toggle_with_tooltip` helper
+- Corner radius for text box
+- Property editor for triangle buffer
+- Property editor for vertex buffer
+- Ability to add keys for any numeric properties in the animation editor
+- Ability to add keys for selected nodes in the animation editor
+- Ability to minimize all editor panels
+- Ability to search for a loader for specific resource data type
+
+## Changed
+
+- Increased kernel size of pcs filtered shadows (makes shadows much smoother)
+- Watch only registry root for changes
+- Absm editor improvements
+- Migrate to rapier 0.32
+- Do not echo sync-only messages
+- Improved validation for rigid bodies
+- Increase ambient lighting for asset preview
+- Update libloading dep
+- Do not try to use hole mask if `holes enabled` flag is off
+- Print info messages in automated tests only if `visual_debug == true`
+- Prevent message spam when executing editor tests
+- Do not reset camera state when doing any changes on it
+- Wrap asset title by word, not by letter
+- Improved log filtering in the editor
+- Improved numericupdown widget style
+- Improved style for docking anchor
+- Improved surface data editor style
+- Improved visual style for signals in animation editor
+- Improvements for animation editor
+- Improvements for audio preview panel
+- Moved build targets list to editor settings
+- Moved project build tools to `fyrox-build-tools` crate
+- Refactor window dragging logic to use local coordinates and clamp size/position (#899)
+- Refactored animation renaming + adding new animation
+- Refactored export cli to be a part of the game workspace
+- Refactored log filtering
+- Refactored scene loading to use plugin tasks
+- Print current version in the project manager window's title
+- Print warning message if backtrace capture is enabled
+- Disable info logging by default in project manager
+- Disable layer-related buttons when no layer is selected
+- Disable word wrap for node type
+- Adjust "open docs" button style
+- Adjust byte gap
+- Adjust default height map size for terrains to prevent warning message
+- Automatically enter preview mode when selecting a camera
+- Automatically zoom in on the new animation
+- Accept `NumpadEnter` on `Button` widget
+- Use bitmap image for check box instead of vector
+- Use correct resource for `locate` button in material field editor
+- Use correct resource for `locate` button in surface field editor
+- Use default style for new ui
+- Use image for `locate` button in resource field editor
+- Use toggle buttons for preview and loop options in animation editor
+- Use ui style when drawing keyboard focused widget bounds
+- Show animation player name in the window title
+- Show currently selected absm name
+- Send message box messages back
+- Save triangle buffer as a binary blob
+- Unify naming for built-in assets
+- Editor style improvements
+- The plugin initialization was moved to event queue and only when the registry is fully loaded
+- Always show display name of the property if the doc is empty
+- Build target for project export options
+- Configurable constraint for dropdown list
+- Convert project name to standard format
+- Correctly handle dyn types on hot reloading
+- Correctly mark property editors when loading a dynamic editor plugin
+- Deactivate "add key" button if nothing is selected
+- Default ui for project manager
+- Defaults + docs for project exporter cli
+- Diagnostic messages when adding keys
+- Do not create a default user interface
+- Do not rebuild formatted text when visual transform changed
+- Draw keys on background curves
+- Helper methods for `HotKey`
+- Keep message flags when responding to changes in ScrollBar widget
+- Keep track of an assembly from which a dyn type originates from
+- Make keyboard shortcut text for menu item less bright
+- More efficient render data copying
+- More visual improvements for animation editor
+- Offload vertex transform to gpu when drawing widgets
+- Prevent highlighting rectangle of a focused widget to draw outside
+- Prevent redundant memory allocations during widgets drawing
+- Rename default name of the scene root to `SceneRoot` from `__ROOT__`
+- Reorganized log and command stack panel buttons
+- Save log filter state to the editor settings
+- Shuffle icon for uuid property editor
+- Simplified trait bounds for `load_ui`
+- Split animation editor toolbar in a top and bottom parts
+- Support `FrameworkError` in `GameError`
+- Unified scene/ui loading + refactored async script/plugin tasks
+
+## Removed
+
+- Remove `Mobility` because it does nothing
+- Removed context menu from texture field, replace with buttons
+- Removed redundant tree traversal in widgets drawing
+- Removed unused import
+- Removed useless message when saving settings
+
+# 1.0.0-rc.2
+
+Second release-candidate version.
+
+## Fixed
+
+- Fixed combining lightmaps with emissive channel
+- Fixed incorrect light mapping for shared materials
+- Fixed incorrect filtering of material when generating a lightmap
+- Fixed path filtering in case of empty filter
+- Fixed editor hanging when closing a scene tab when more 3+ scenes open
+- Fixed incorrect position syncing when modifying z coordinate of 2d body
+- Fixed infinite recursion in trait bounds for Visit and Reflect procmacro
+- Fixed infinite message loop in node selector
+- Fixed crash in node selector when untyped handle was replaced with typed
+- Fixed dyn type constructors container type passed on deserialization
+- Fixed project template generator
+- Fixed crash when trying to rebind a property prefab's animation
+- Fixed `Bring into view` functionality for log panel
+- Fixed enabled state for menu items of asset item
+- Fixed folder deletion from asset browser
+- Fixed crash when attempting to delete ui scene root
+- Fixed incorrect "no items" visibility condition + fixed `Make Folder`
+- Fixed incorrect tree root handling when processing fs events
+- Fixed file system watcher for file browser widget
+- Fixed crash in fs tree creation
+- Fixed incorrect nan handling in numeric up down widget
+- Fixed infinite message loop in numeric up down
+- Fixed incorrect hdr adaptation
+- Fixed hdr auto exposure
+- Fixed defaults for automatic exposure for hdr
+- Fixed incorrect frame luminance calculation for hdr
+- Fixed luminance calculation glsl function
+- Fixed misleading docs
+- Fixed gltf loading
+- Fixed panic from `TileCollider` load failure
+- Deduplicate fs events to prevent duplication of fs tree items
+- Correctly filter out editor nodes when generating a lightmap
+- Update vertex buffer if its layout has changed
+- Clip keyboard focus rectangle by widget's clip bounds
+
+## Added
+
+- `DynType` for user-defined serializable structures with full editor support
+- Error handling for scripts and plugins with optional backtrace capture
+- UI rendering optimization based on widget invalidation
+- BBCode support
+- Font fallbacks
+- Experimental shader code editor
+- Added ability to keep the editor active on every frame
+- Added ability to disable bloom + configurable bloom threshold
+- Automated testing mode for the editor
+- Added hdr settings
+- Added named scopes for renderer to improve debugging
+- Added background for the editor content
+- Added user data for `Graph`
+- Added property editor for `TextureKind`
+- Added `This folder is empty` message for file browser
+- Added helper methods to graph to borrow nodes and do ray casting
+- `impl Display` and `impl Error` for various engine errors
+- `UserInterface::send_to` + `UserInterface::send_many_to` + `UserInterface::send_many_to_if` +
+  `UserInterface::send_sync_many` methods
+- `UiMessage::is_for` + `UiMessage::data_for` + `UiMessage::for_widget` + `UiMessage::data_from` +
+  `UiMessage::comes_from` methods
+- UI message delivery mode
+- Helper methods for scene nodes: `set_position`, `set_position_xyz`, `set_rotation`, `set_rotation_angles`,
+  `set_rotation_x`,  `set_rotation_y`,  `set_rotation_z`, `set_scale`, `set_scale_xyz`, `set_uniform_scale`
+- Add [useful instructions](https://github.com/FyroxEngine/Fyrox/blob/master/CONTRIBUTING.md#contributing-code) for
+  contributors
+- Configurable exposure for editor's camera
+- `impl Default for DrawingContext`
+- Visual invalidation flag for widgets
+- Headless mode for the editor
+- Autotesting for the editor
+- Resource io improvements
+- Folder filter preset for file browser
+- Path filtering in file selector
+- Add `All Supported` filter option for file selector
+- Ability to deselect currently selected path in file browser
+- Standard `ok` + `cancel` styles for button background decorator
+- Icons for editor's menu items
+- Padding for text box and formatted text
+- Overall style improvements
+- Placeholder for textbox + searchbar widgets
+- Add preview for shaders
+- `control_trait_proxy_impls` macro + boilerplate code removal
+- `BuildContext::add` method
+- Ability to check if a path is a built-in resource path
+- Property editor for `TexturePixelKind`
+- Property editors for vec<matrix 2/3/4>
+- Type uuid provider impl for matrix 2/3/4
+- Property editors for shader entities
+- Better error handling for `Pool`, `Graph`
+- `NetStream::pop_message` method
+- Arbitrary error support for visitor
+- User data for `Graph` and `UserInterface` based on `DynType`
+- Ability to edit ui scene settings
+- `to_base`/`to_variant` methods for handle type conversion
+- Better error handling in `Ragdoll::iterate_recursive`
+- `HandlesArrayExtension` trait
+- `to_base` for `Vec<T>` where T: ObjectOrVariant<B>
+- Property editor for `Style`
+- `Rectangle::apply_animation`/`Sprite::apply_animation` helper method for easier applying of sprite sheet animation
+- Shortcuts for setting specific part of the linear velocity of rigid body
+- `PluginContext::load_ui` helper method
+- Ability to fetch scene nodes by uuid
+- `Pool::next_free_handle` method
+- `Plugin::on_game_error` - ability to handle game errors and disable standard logging
+- Ability to add scene nodes at desired handles
+- `Shader::find_texture_resource` + `Self::find_property_group_resource`
+- Ability to check if shader has a texture/property group resource
+- `impl Display for VertexAttribute`
+- Ability to explicitly specify location of the second tex coord attribute
+- Ability to clear lightmap
+- Ability to specify environment lighting brightness
+
+## Changed
+
+- UI messages refactoring - removed message constructors and replaced with direct enum variant
+  creation.
+- Migrated to typed handles
+- Fill in the default path to lightmap texture as registry root
+- Improved surface data viewer to show vertex layout
+- Report non-supported nodes when generating a light map
+- Make `instance_id_map` immutable in the editor
+- Use `tinyaudio` version 2
+- Refactored `TabControl` to use only uuids for tabs
+- Removed lazy_static dependency
+- Keep the nodes at their handles when saving a scene in the editor
+- Use task pool instead of spawning a thread manually when loading a scene
+- Refactor `Style` to use plain sorted vector
+- Shortcuts for `ScrollViewerMessage` + `ListViewMessage`
+- Allow fetching base type instances from compound objects
+- Support typed handles in multiborrow context
+- Allow comparison of base and derived handles
+- Return result in behavior trees
+- Shared property editors container
+- Plugin docs improvements
+- Improved `copy` functionality for log entries
+- Show/hide apply+revert buttons in inspector correctly
+- Wrap shader source code into newtype wrapper
+- Make shader entities inspectable
+- Keep asset preview enabled when inspecting built-in assets
+- Show asset preview for built-in assets
+- Show the content of built-in assets in inspector when selected
+- Limit dropdown container min width instead of width
+- Show registry root when clearing the search bar in the asset browser
+- Ability to set text box's padding via respective message
+- Do not allow deleting the root registry folder
+- Refresh asset browser if a folder was added/removed
+- Do not register unsupported paths in `ResourceManager::find`
+- Check if a resource can be loaded before registering it
+- Use `WrapPanel` in the animation editor for better toolbar layout
+- Improved menu item with icons + helper for `MenuItemContent`
+- Handle `Rescan` message correctly
+- Check if a file already exist when selecting a file in file selector
+- Use `ok` + `cancel` button style for file selector widget
+- Take filter into account when checking if a folder is empty
+- Disable ability to delete path root item
+- Refactored path filter to support fixed set of file types
+- Ability to show context menu by a click on file browser
+- Ability to specify filter for path field editor
+- Make path text non-editable
+- Hide home/desktop dir buttons if a root is set for file browser widget
+- Improved file selector to have configurable list of file types
+- Moved FileSelectorField widget to its own module
+- Moved mode out of file browser to file selector widget
+- Focus selected path on project import in the project manager
+- Refactored file selector + file browser some more
+- Use resource registry folder for asset browser and file browser
+- Do not generate redundant fs tree items if a root is set
+- Refactored file browser tree building + added tests
+- Refactored path setting + removed duplicated code
+- Refactored path filter
+- Simplified dir content fetching
+- Replaced `OpenModal/OpenAt/OpenAndAlign` window messages with `Open`
+- Register missing property editors
+- Force save an empty resource registry and create a folder for it
+- Post `Popup::Close` only if the dropdown's popup is open
+- Send `modified` flag message as sync in inheritable prop editor
+- `Widget::local_to_screen`
+- Keep updating all UIs even if there's no graphics context
+- Disable shadow casting for scene gizmo
+- Ability to run the editor with graphics debugging turned on
+- `GraphicsServer::begin_scope`
+- Ability to specify debug groups for graphics commands
+- Use default exposure for editor camera
+- Introducing the null scene
+- Color space conversion glsl functions
+- Return the number of processed message from ui message queue polling
+- Improving how selection changes are handled
+- Improving UX of TextBox
+- Putting space in FormattedText for tabs.
+- Allow indexing `UserInterface` with derived widget handles
+- Moved `perform_layout` flag to `MessageData` trait method
+- Use gltf emission strength parameter correctly
+- Register gltf standard shader
+- Wake up rigid bodies when changing linear/angular velocity
+- Made uv + normals optional when loading gltf
+- Merge pull request #858 from b-guild/resource
+- Ability to disable writing to stdout for `Log`
+- Correctly kill child processes when starting a new export run
+- Updated MSRV
+- Ability to disable optimizations when exporting the project
+- Show full project path in the project manager to reduce confusion
+- Use home dir as default location for new projects
+- Adjusted styles for "delete project" message box in the project manager
+
+## Removed
+
+- Removed backward compatibility for assets
+- Removed `AbstractSceneGraph` + `BaseSceneGraph`, merged in `SceneGraph`
+- Removed unused root dir title
+- Removed fs events handling from public file browser message
+- Removed optimization for `dev` profile
+- Removed hardcoded values for lightmap generation
+
+# 1.0.0-rc.1
+
+First release-candidate version.
+
+## Fixed
+
+- Fixed performance issues when deleting an object in the editor
+- Use ambient occlusion from material info in ambient lighting shader
+- Fixed skybox editing in scene settings
+- Fix build window (handle stderr and stdout in different threads)
+- Fixed ssao rendering
+- Exit build mode after successful build
+- Prevent loss of piped data due to BufReader dropping
+- Fixed cube texture to use only one size parameter instead width+height
+- Fixed layout of resource property editor
+- Fixed reflection probe rendering with fxaa enabled
+- Add details to FieldTypeDoesNotMatch error to improve warnings
+- Check if a property can be cloned/pasted in the inspector
+- Fixed box selection in the editor
+- Improved selection order in the editor
+- Context menu handling for various inspectors
+- Fixed smart placement for move interaction mode
+- Fixed grid blending issues
+- Fail-safe shader/material handling when rendering
+- Fixed incorrect sampler params
+- Prevent clamping for infinite available size in UI
+- Fixed axes colors for grid shader
+- Adjust grid cell size to match grid snapping options
+- Support all three major plane orientations (oXZ,oXY,oYZ) in grid shader
+- Improved selection in the editor
+- Fixed incorrect viewport handling for camera render targets
+- Do not crash if render data couldn't be created, return an error instead
+- Filter out editor-specific scene nodes when using camera preview
+- Remove render data for destroyed cameras
+- Use separate render target for camera preview in the editor
+- Added missing tab labels for 'Settings' and 'Navmesh' panels
+- Added missing interaction modes shortcuts for terrain and navmesh
+- Fixed terrain holes incorrect command name
+- Making relative paths for loading and saving scenes
+- Remove redundant BrushMacro method remove_cell
+- Highlight allowed types better in the node selector
+- Use typed_ref/mut methods in graph indexing impl
+- Show/hide camera preview image
+- Fixed interaction mode order in the toolbar to follow indices: 1..6
+- Fixed distance sorting for meshes
+- Collect only supported resources + ignore resources from excluded dirs
+- Fixed render order to be back-to-front for correct blending
+- Improved gizmo and exposed scale in editor settings
+- Prevented the camera frustum in debug draw from being scaled
+- Improved camera focus distance to be less close to the object
+- Correcting make_relative_path and scene saving logic.
+- Allowing make_relative_path to accept non-existing files
+- Improving error reporting for missing InspectorEnvironment
+- Fixed scene gizmo lighting
+- Fixed crash when an invalid asset is drag-dropped onto a surface field
+- Fixed crash when an empty string is used in the asset browser search
+- Fixed crash when CSM near and far values are superimposed
+- Fixed documentation for VisitError::NotSupportedFormat
+- Made "Show in explorer" work on other OS's
+- More concise naming for Reflect methods
+- Handle UI scaling in Screen Widget
+- Fixed potential crash in the editor
+- Improved performance of dynamic drawing methods
+- Fixed resource registration
+- Fixed deadlock when loading a resource
+- Preserve global transform when reparenting scene nodes
+- Fixed misleading docs
+- Fixing minimization for windows.
+- Fixed distance sorting
+- Reset editor camera rotation when in 2d mode
+- Fixed matrix2 deserialization
+- Fixing cut-off text in tooltips
+- Protecting against resource deadlock
+- Hold mutex locks as short as possible to prevent deadlocks
+- Use blocking resource registry updating where possible
+- Correcting terrain hole mask bug
+- Fixed asset item context menu not showing on rmb click
+- Do not try to reload unsupported resources.
+- Moving plugin and script handling to before node handling, to fix teleportation glitch
+- Print error message instead of silently writing an error to the resource
+- Use trait upcasting and remove `as_any` for `ResourceData`
+- Fixed usages of ResourceKind
+- Fixed asset preview generation
+- Fixed built-in resource handles deserialization
+- Ability to create metadata files
+- Proper headless mode
+- Hide asset preview if there's no actual preview data for it
+- Fixed gltf shader
+- Fixed incorrect syncing of modified flag in property editor
+- Prevent annoying message spam when import options is missing for asset
+- Fixed ambient lighting in case of non-skybox lighting
+- Render overlay icons only in the scene preview
+- Hide "revert" button for inheritable properties when no parent object
+- Improved performance of visual transform calculation in ui
+- Improved ui performance
+- Fixed blending issues when batching multiple rectangles
+- Fixed fitting for asset preview
+- Fixed visual glitch for scaling, rotation, movement gizmos
+- Fixed update loop state in the editor
+- Fixed deletion of gl vao/gpu programs/textures
+- Fixed incorrect caching/binding of gl framebuffer
+- Handle invalid aabb/division by zero when doing camera fitting
+- Fixed menu item content alignment + `make_menu_splitter` helper
+- Reset visual state of a selected option in the dropdown list on select
+- Fixed asset preview update when a resource changes
+- Significantly reduced annoying visual lag when generating asset previews
+- Correctly detach content of control panels of various entities
+- Fixed text alignment in various places in the editor
+- Fixed asset preview
+- Do not stop deserialization on invalid resource refs
+- Fixed inability to add animation track for a node
+- Better lighting for asset preview
+- Fixed torus faces orientation
+- Fixed deferred preview generation for assets in asset selector
+- Fixed `Option::None` serialization
+- Fixed camera picking issues
+- Do not change resource uuid when moving it in the editor
+- Log window improvements + fixes
+- Fixed crash when trying to select text in the text box via double click
+- Fixed resource movement in the asset browser
+- Fixed incorrect position of dragndrop preview when dpi scaling is used
+- Update asset preview if the asset changes
+- Properly handle added/removed resources to/from the resource registry
+- Use correct material in `MaterialFieldEditor`
+- Fixed crash in case of invalid material resource used in ui renderer
+- Fixed request of built-in resources in the resource manager
+- Fixed incorrect color space in standard forward pass of standard shaders
+- Fixed black screen bug when saving a scene with active camera preview
+- Prevent deadlock when trying to get a debug name for gpu texture
+- Fixed incorrect ambient lighting calculation
+- Reduced memory usage when generating asset previews
+- Clamp anisotropy in `[1.0; 16.0]` range to prevent video driver errors
+- Fixed `uuid_provider` macro
+- Correcting InheritableVariable::visit and physics integration parameters dt
+- Fixed selection button being clipped on material property editor
+- Fixed gimbal lock in GLTF animations
+- Prevent crash on empty uniform blocks
+- Update the material editor when hot-reloading a shader
+- Fixed crash on material hot-reloading when a property was removed
+
+## Added
+
+- Added image-based lighting (IBL)
+- Name for gpu buffers
+- Named gpu textures
+- Ability to specify mip level for frame buffer attachments
+- `GraphicsServer::create_cube_render_target`
+- Added runs to FormattedText
+- `Texture::new_cube_render_target`
+- Environment mapping
+- Reflection probe node
+- `fyrox_widgetData` built-in property group
+- Ability to specify custom shaders for widgets
+- Documentation and helper methods for colliders
+- Implementing Debug and Display for BitMask.
+- Brdf lut generator
+- Ability to copy/paste values in the editor setting's inspector
+- `UserInterface::has_descendant_or_equal`
+- `Inspector::handle_context_menu_simple`
+- `GpuShader` entity
+- `Reflect::try_clone_box`
+- Ability to copy/paste values in inspector
+- Added `is_significant` method for editor commands
+- Show grid in 2d mode in the editor
+- Docking manager for asset browser
+- Echo popup messages
+- `Copy Value` + `Paste Value` options in context menu of `Inspector`
+- Collect property paths in the inspector widget
+- `UserInterface::send_messages` to send multiple messages at once
+- Implemented `BorrowAs` trait for widget handles
+- Enhanced tile set editing, copying pages
+- Debug impl for NodeHandleMap
+- Movable scene tabs
+- `GraphicsServer::generate_mipmap`
+- `RendererResources` with pre-loaded resources
+- Ability to specify the face of the cube map in frame buffer attachment
+- Environment cube map prefilter shader
+- Blanket impl for ScriptMessagePayload replaced with derive macro
+- Print allowed type name in the node selector + do type checking
+- Ability to set derived handle types in the handle editor
+- Dynamically typed script messages
+- Added a setting to modify editor camera's mouse sensitivity
+- `Reflect::fields_info_mut` + optimizations
+- More methods for handles accessed via reflection
+- Improvements to autotiling
+- Multithreaded wave function collapse
+- Adding empty tiles to tile map brush
+- Render target for cameras
+- Thread sleep in headless executor
+- `ResourceLoader::convert` impl for native scenes
+- Added `ResourceIo::copy_file` method
+- Added visitor version number
+- Added option to use %MANIFEST_DIR% to open IDE in project manager
+- Add render mask to Base node
+- Docs improvements for serialization
+- Universal `Visitor::load_from_memory` with format autodetection
+- Tests for `move_resource`
+- Integration tests for fyrox-resource
+- Adding support for kinematic physics
+- `RG16F` texture format
+- Allow user to change editor icon and customize window title
+- Tooltip for material resources in the material editor
+- Ability to fetch memory usage by the graphics server
+- Ability to disable asset convertion when exporting a project
+- Convert ui scenes to binary format when exporting a project
+- Print warning messages in the log when setting terrain height map
+- Resource registry `ResourceManager::register` + `ResourceManager::uuid_to_path` methods
+- Introducing multi-window docking tiles
+- Resource registry
+- `ResourceIo::write_file` + rename `FileLoadError->FileError`
+- `ResourceLoadersContainer::is_supported_resource`
+- Show selected path in the main window of the asset browser
+- Uuids for resources
+- Ascii reader and writer for visitor
+- Added `#[inline]` attributes for ui drawing methods
+- Configurable fadeout margin for particle systems
+- Fyrox-graphics documentation
+- Ability to disable picking restriction for popup widget
+- Ability to create gpu program from shaders
+- Ability to reset widget's visual state via respective message
+- Ability to reset editor layout
+- Cell property editor
+- Placeholder icon for resources without preview generator
+- Added placeholder icon for asset items whose preview is being generated
+- Loading scenes list window when loading scenes in the editor
+- Async loading for game and ui scenes in the editor
+- Ability to specify special title for root item in the filebrowser widget
+- Ability to paste properties in resource inspector
+- Ability to inspect and edit supported assets in inspector
+- Footer attachment point for inspector plugin
+- `AssetSelection` + inspect asset import options in standard Inspector
+- Helper methods for selection downcasting
+- Ability to move a folder with resource in the resource manager
+- Configurable depth for `walk_directory` method
+- Asset rename dialog improvements
+- Ability to rename assets in the asset browser
+- Add small margin for asset preview
+- Skybox api improvements
+- Added folder icon for file browser
+- Ability to select environment light source for scenes
+- `Brush` helper methods
+- Better navigation in the asset browser
+- Ability to enable or disable debug names for GPU objects
+- Added confirmation dialog for asset deletion
+- Use checkerboard background for asset preview tooltips
+- Improved texture property editor
+- Increased size of material preview
+- Preview for surface data editor
+- Preview for material property editor
+- Magnified asset preview for resource property editor
+- Show asset preview in resource field editor
+- Texture property editor improvements
+- `AssetSelectorWindowBuilder::build_for_type_and_open`
+- Ability to disable size sync of `Image` widget with its texture
+- Helper function `make_pick_button`
+- Generate preview for items in asset selector
+- Asset selector
+- Helper methods for `ResourceState`
+- Direct immutable access to underlying container for ResourceRegistry
+- `ResourceManager::can_resource_be_moved`
+- Highlight asset item when it accepts drop
+- Check for drop content in the file browser to show correct cursor icon
+- Custom `accepts_drop` for `AssetItem` that checks if drop is possible
+- Allow to define custom drop response method on ui widgets
+- Improved visual style of `AssetItem`
+- Ability to move a folder when dropping it to some other folder
+- Ability to move a resource by dropping it to a folder asset item
+- Ability to move a resource by path without loading it
+- `impl Display for FileError`
+- `ResourceRegistry::remove_metadata`
+- `ResourceIo::delete_file+delete_file_sync`
+- `UntypedResource::type_uuid_non_blocking`
+- Ability to specify pre and post visit method calls for visitor codegen
+- Ability to try get resource manager state lock for the given time period
+- Style api improvements
+- Ability to re-bind styled properties of widgets in the editor
+- Joint motors
+- Show graphics server memory usage in the editor's rendering statistics
+- Simplified interaction with keyboard and mouse.
+- Added flake.nix for generated projects
+- Simplified way of getting input state
+- Ability to flip sprite/rectangle nodes
+- Show id of materials/surfaces in the editor
+- Added TypeUuidProvider impl for VectorN types
+- Property editors for Run + RunSet
+- Property editor for `char` + editors for mask char in formatted text
+- Named constants for mouse buttons + helper methods for mouse input
+- Ability to set runs via respective message
+- Added srgba8/srgb8 texture formats
+- Added pure color texture
+- Added non-euler-angles-based rotation track
+
+## Changed
+
+- Preventing deadlocks by replacing `lock` with `safe_lock`
+- Automatically destroy dead senders in resource event broadcasters
+- Renamed pool method typed_ref to try_get
+- Configurable render mode for ui
+- UI rendering api improvements
+- do not alter already loaded resource state when reloading it
+- Use scene skybox if there's no specific environment map
+- Do not prevent building without the opened scene
+- Remove dependency on status code 101 (which is cargo specific, while built-tool has tool-agnostic design)
+- Detached renderer from scene's `Camera`
+- Moved sky box to scene from camera
+- Enable seamless cube map filtering by default
+- Include breadcrumb into VisitError:RegionDoesNotExist
+- Moved all shaders into a centralized storage
+- Moved opengl-specific code to `fyrox-graphics-gl`
+- Build tool now streams both stdout and stderr
+- Increased window size and inspector name column width in settings
+- Smart selection of corner arc subdivision when drawing borders
+- Recalculate clip bounds only for changed widgets
+- Allow engine user control default editor settings
+- Use `MaterialResource` in widgets instead of `UntypedResource`
+- Refactored ui renderer to use materials
+- Documented keyboard focus
+- Separate brush for highlighting widgets with keyboard focus
+- Prevent selection of asset items while holding alt
+- Moved material/shaders to `fyrox-material` crate
+- Use separate struct for args for `InspectorContext::from_object` func
+- Include all nodes that produces render data in camera picking in editor
+- Convert assets to their most efficient version when exporting a project
+- Reducing dependencies of fyrox-autotile
+- Use sampler+texture pair instead of old-fashioned combined texture
+- Migrate to latest winit/glutin/rapier
+- Disable texture lod bias for wasm builds
+- Moved `set_panic_hook` to engine initialization for wasm builds
+- Disable picking restriction for menus and context menus
+- Change layout of command stack panel
+- Save ui scenes in ascii mode by default
+- Normalize paths before passing them to `ResourceManager::request`
+- Close a menu by clicking on the menu item.
+- Improved docs of `Resource::data_ref`
+- Split `FieldInfo` into two parts `FieldInfo` + `FieldMetadata`
+- Moving control panels to inspector head
+- Merged `DerivedEntityListProvider` trait into `Reflect` trait
+- Refactored node handle property editor to accept typed handles
+- Register property editors for scene/ui node handles
+- Refactored `NodeHandlePropertyEditorDefinition` to accept generic type
+- Use typed handles in 2d joints
+- Less bright icons for scene nodes
+- Do not recreate render target for asset preview if preview is collapsed
+- Explicitly disabled unsupported render passes in standard widget shader
+- Reduced contrast of the text/images in the default dark theme
+- Do not save `NEED_SYNC` flag when serializing an inheriable variable
+- Correcting how ScriptPropertyEditorDefinition accesses environment
+- Refactor resource manager to use hash map for resources
+- Use stable ids when serializing rc/arc
+- Isolated visitor's reader and writer into separate entities
+- Reversing generate_free_handles to match spawn
+- Refactored resource system to use uuids instead of path where possible
+- Track vertex/fragment shader line location
+- Tidy up menus in the editor
+- Vector flattened structure for serialization
+- Close dropdown lists on selection
+- Open context menus on rmb-up event instead of rmb-down
+- Beautifying bitfield widget
+- Adding adjustable warning messages to autotile failures
+- Select asset item by rmb click
+- Expose instance id in the inspector
+- Use doc comment for property description
+- Expose more properties in the inspector
+- Unhide node's global transform in the inspector
+- Keep the editor active until it loads all the queued scenes
+- Use special root title for project's root folder in the asset browser
+- Override title for the root item in the asset browser
+- Only show folders that in the registry in the asset browser's dir viewer
+- Show only content from the resource registry in the asset browser
+- Use command-based approach when editing resources in the inspector
+- Use respective command to change selection in the asset browser
+- Save the resource data on change in the inspector
+- Hide asset previewer for assets without a preview
+- Moved asset preview to the inspector
+- Moved selection-specific code to selection itself
+- Show pretty type name in resource creator
+- Search in resource registry when searching in the asset browser
+- Better validation for file name when doing move
+- Do not allow to delete built-in resources
+- Improved FormattedText
+- Use flat gray color background for asset previews
+- Green color for `add resource` button
+- Disable `duplicate` and `dependencies` context menu items for folders
+- Use calculated local instead of screen position when setting new desired position after toggling of a view
+- Bring selected item into view in the list view when arrow navigating
+- Use texture property editor for texture bindings in material editor
+- Use helper methods in resource property editor
+- Increased margin on `Stop` button in build window
+- Improved validation when moving a resource
+- Check if a resource can be moved when moving an asset in asset browser
+- Moved tooltip from asset item to its text field
+- Make paths os-independent and canonical when moving a resource
+- Do not allow to create a resource outside of the data folder
+- Allow to use build tool with executable that doesn't expect "--" as passthrough marker
+- Build tools: delegate stderr to Log
+- Removed redundant empty impls of InteractionMode trait
+- Share fbx materials as much as possible
+- Store a style handle in the widget
+- Pass ui handle in `Plugin::on_ui_message`
+
+## Removed
+
+- Removed resource duplicates
+- Removed invalid assertions
+- Removed redundant `ResourceLoaderAsAny` trait
+- Removed wasm-unsupported `set_border_color` of gpu texture
+- Removed `get_image+read_pixels` methods from gpu texture
+- Removed impls for `field/field_mut`
+- Removed redundant codegen for field/field_mut methods
+- Removed `Relfect::fields/fields_mut` methods
+- Removed `owner_type_id` field from `FieldInfo`
+- Removed redundant `type_name` field from `FieldInfo`
+- Removed `Downcast` trait, replaced with `define_as_any_trait` macro
+
 # 0.36.1
 
 Minor release with fixes for some annoying bugs.

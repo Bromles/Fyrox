@@ -21,13 +21,18 @@
 //! A tile editor is one of the various fields that may appear along the side
 //! of the tile set editor. See the [`TileEditor`] trait for more information.
 
-use crate::{
-    plugins::material::editor::{MaterialFieldEditorBuilder, MaterialFieldMessage},
-    send_sync_message, MSG_SYNC_FLAG,
+use crate::plugins::material::editor::{
+    MaterialFieldEditor, MaterialFieldEditorBuilder, MaterialFieldMessage,
 };
+use std::sync::mpsc::Sender;
 
 use super::*;
+use crate::asset::preview::cache::IconRequest;
 use commands::*;
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::button::Button;
+use fyrox::gui::color::ColorField;
+use fyrox::gui::text::Text;
 use fyrox::{
     fxhash::FxHashMap,
     gui::{
@@ -49,7 +54,7 @@ pub trait TileEditor: Send {
     fn handle(&self) -> Handle<UiNode>;
     /// The handle of the button which actives this editor for drawing its value onto other
     /// tiles.
-    fn draw_button(&self) -> Handle<UiNode>;
+    fn draw_button(&self) -> Handle<Button>;
     /// Slice mode means that the tile set editor allows the user to click on one of nine
     /// areas within each tile, instead of just clicking on the whole of the tile.
     /// Normally slice mode is false, because most editors edit the whole of any tile,
@@ -103,7 +108,7 @@ pub trait TileEditor: Send {
     );
 }
 
-fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<Text> {
     TextBuilder::new(WidgetBuilder::new())
         .with_text(name)
         .build(ctx)
@@ -113,7 +118,7 @@ fn make_draw_button(
     tooltip: &str,
     ctx: &mut BuildContext,
     tab_index: Option<usize>,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_column(1)
@@ -150,8 +155,8 @@ fn make_draw_button(
 
 fn make_drawable_field(
     label: &str,
-    draw_button: Handle<UiNode>,
-    field: Handle<UiNode>,
+    draw_button: Handle<Button>,
+    field: Handle<impl ObjectOrVariant<UiNode>>,
     ctx: &mut BuildContext,
 ) -> Handle<UiNode> {
     let label = make_label(label, ctx);
@@ -166,23 +171,24 @@ fn make_drawable_field(
     .add_column(Column::auto())
     .add_column(Column::stretch())
     .build(ctx)
+    .to_base()
 }
 
-fn send_visibility(ui: &UserInterface, destination: Handle<UiNode>, visible: bool) {
-    ui.send_message(WidgetMessage::visibility(
-        destination,
-        MessageDirection::ToWidget,
-        visible,
-    ));
+fn send_visibility(
+    ui: &UserInterface,
+    destination: Handle<impl ObjectOrVariant<UiNode>>,
+    visible: bool,
+) {
+    ui.send(destination, WidgetMessage::Visibility(visible));
 }
 
 /// An editor for the material and bounds of a freeform tile.
 pub struct TileMaterialEditor {
     handle: Handle<UiNode>,
     material_line: Handle<UiNode>,
-    material_field: Handle<UiNode>,
-    bounds_field: Handle<UiNode>,
-    draw_button: Handle<UiNode>,
+    material_field: Handle<MaterialFieldEditor>,
+    bounds_field: Handle<TileBoundsEditor>,
+    draw_button: Handle<Button>,
     material_bounds: TileMaterialBounds,
 }
 
@@ -190,12 +196,19 @@ impl TileMaterialEditor {
     pub fn new(
         ctx: &mut BuildContext,
         sender: MessageSender,
+        icon_request_sender: Sender<IconRequest>,
         resource_manager: ResourceManager,
     ) -> Self {
         let draw_button = make_draw_button("Apply material to tiles", ctx, None);
         let material = DEFAULT_TILE_MATERIAL.deep_copy();
         let material_field = MaterialFieldEditorBuilder::new(WidgetBuilder::new().on_column(2))
-            .build(ctx, sender, material.clone(), resource_manager);
+            .build(
+                ctx,
+                sender,
+                material.clone(),
+                icon_request_sender,
+                resource_manager,
+            );
         let material_line = make_drawable_field("Material", draw_button, material_field, ctx);
         let bounds_field = TileBoundsEditorBuilder::new(WidgetBuilder::new()).build(ctx);
         Self {
@@ -204,7 +217,8 @@ impl TileMaterialEditor {
                     .with_child(material_line)
                     .with_child(bounds_field),
             )
-            .build(ctx),
+            .build(ctx)
+            .to_base(),
             material_line,
             material_field,
             bounds_field,
@@ -337,7 +351,7 @@ impl TileEditor for TileMaterialEditor {
     fn handle(&self) -> Handle<UiNode> {
         self.handle
     }
-    fn draw_button(&self) -> Handle<UiNode> {
+    fn draw_button(&self) -> Handle<Button> {
         self.draw_button
     }
     fn sync_to_model(&mut self, _state: &TileEditorState, _ui: &mut UserInterface) {}
@@ -356,20 +370,13 @@ impl TileEditor for TileMaterialEditor {
             material.is_some() && bounds.is_some(),
         );
         if let Some(material) = material {
-            send_sync_message(
-                ui,
-                MaterialFieldMessage::material(
-                    self.material_field,
-                    MessageDirection::ToWidget,
-                    material.clone(),
-                ),
+            ui.send_sync(
+                self.material_field,
+                MaterialFieldMessage::Material(material.clone()),
             );
         }
         send_visibility(ui, self.bounds_field, Self::bounds_visible(state));
-        send_sync_message(
-            ui,
-            TileBoundsMessage::value(self.bounds_field, MessageDirection::ToWidget, bounds),
-        );
+        ui.send_sync(self.bounds_field, TileBoundsMessage::Value(bounds));
     }
 
     fn draw_tile(
@@ -391,7 +398,7 @@ impl TileEditor for TileMaterialEditor {
         tile_book: &TileBook,
         sender: &MessageSender,
     ) {
-        if message.flags == MSG_SYNC_FLAG || message.direction() == MessageDirection::ToWidget {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
         if let Some(MaterialFieldMessage::Material(material)) = message.data() {
@@ -432,8 +439,8 @@ impl TileEditor for TileMaterialEditor {
 /// An editor for the color of a tile.
 pub struct TileColorEditor {
     handle: Handle<UiNode>,
-    field: Handle<UiNode>,
-    draw_button: Handle<UiNode>,
+    field: Handle<ColorField>,
+    draw_button: Handle<Button>,
     color: Color,
 }
 
@@ -485,7 +492,7 @@ impl TileEditor for TileColorEditor {
     fn handle(&self) -> Handle<UiNode> {
         self.handle
     }
-    fn draw_button(&self) -> Handle<UiNode> {
+    fn draw_button(&self) -> Handle<Button> {
         self.draw_button
     }
     fn sync_to_model(&mut self, _state: &TileEditorState, _ui: &mut UserInterface) {}
@@ -496,10 +503,7 @@ impl TileEditor for TileColorEditor {
         }
         send_visibility(ui, self.handle, color.is_some());
         if let Some(color) = color {
-            send_sync_message(
-                ui,
-                ColorFieldMessage::color(self.field, MessageDirection::ToWidget, color),
-            );
+            ui.send_sync(self.field, ColorFieldMessage::Color(color));
         }
     }
 
@@ -522,7 +526,7 @@ impl TileEditor for TileColorEditor {
         tile_book: &TileBook,
         sender: &MessageSender,
     ) {
-        if message.direction() == MessageDirection::ToWidget || message.flags == MSG_SYNC_FLAG {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
         if let Some(&ColorFieldMessage::Color(color)) = message.data() {
@@ -536,7 +540,7 @@ impl TileEditor for TileColorEditor {
 /// a transform set tile, where the only data associated with the tile is
 /// its reference to some other tile.
 pub struct TileHandleEditor {
-    handle: Handle<UiNode>,
+    handle: Handle<TileHandleField>,
     value: Option<TileDefinitionHandle>,
 }
 
@@ -594,9 +598,9 @@ impl TileHandleEditor {
 
 impl TileEditor for TileHandleEditor {
     fn handle(&self) -> Handle<UiNode> {
-        self.handle
+        self.handle.to_base()
     }
-    fn draw_button(&self) -> Handle<UiNode> {
+    fn draw_button(&self) -> Handle<Button> {
         Handle::NONE
     }
     fn sync_to_model(&mut self, _state: &TileEditorState, _ui: &mut UserInterface) {}
@@ -604,10 +608,7 @@ impl TileEditor for TileHandleEditor {
         let value = Self::find_value(state);
         self.value = value;
         send_visibility(ui, self.handle, state.tile_redirect().next().is_some());
-        send_sync_message(
-            ui,
-            TileHandleEditorMessage::value(self.handle, MessageDirection::ToWidget, value),
-        );
+        ui.send_sync(self.handle, TileHandleEditorMessage::Value(value));
     }
 
     fn draw_tile(
@@ -628,7 +629,7 @@ impl TileEditor for TileHandleEditor {
         tile_book: &TileBook,
         sender: &MessageSender,
     ) {
-        if message.direction() == MessageDirection::ToWidget || message.flags == MSG_SYNC_FLAG {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
         if let Some(&TileHandleEditorMessage::Value(value)) = message.data() {

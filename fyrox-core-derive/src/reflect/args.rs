@@ -62,6 +62,11 @@ pub struct TypeArgs {
 
     #[darling(default)]
     pub non_cloneable: bool,
+
+    #[darling(default)]
+    pub clone_fn: Option<Path>,
+
+    pub type_uuid: String,
 }
 
 impl TypeArgs {
@@ -92,19 +97,6 @@ impl TypeArgs {
             return generics;
         }
 
-        // Add where clause for every reflectable field
-        let fields: Box<dyn Iterator<Item = &FieldArgs>> = match &self.data {
-            ast::Data::Struct(data) => Box::new(data.fields.iter()),
-            ast::Data::Enum(variants) => Box::new(variants.iter().flat_map(|v| v.fields.iter())),
-        };
-
-        clause.predicates.extend(
-            fields
-                .filter(|f| !(f.hidden || f.deref || f.field.is_some()))
-                .map(|f| &f.ty)
-                .map::<WherePredicate, _>(|ty| parse_quote! { #ty: Reflect }),
-        );
-
         generics
     }
 
@@ -114,12 +106,12 @@ impl TypeArgs {
         }
 
         quote! {
-            fn as_list(&self, func: &mut dyn FnMut(Option<&dyn ReflectList>)) {
-                func(Some(self))
+            fn as_list(&self) -> Option<&dyn ReflectList> {
+                Some(self)
             }
 
-            fn as_list_mut(&mut self,  func: &mut dyn FnMut(Option<&mut dyn ReflectList>)) {
-                func(Some(self))
+            fn as_list_mut(&mut self) -> Option<&mut dyn ReflectList> {
+                Some(self)
             }
         }
     }
@@ -130,12 +122,12 @@ impl TypeArgs {
         }
 
         quote! {
-            fn as_array(&self, func: &mut dyn FnMut(Option<&dyn ReflectArray>)) {
-                func(Some(self))
+            fn as_array(&self) -> Option<&dyn ReflectArray> {
+                Some(self)
             }
 
-            fn as_array_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectArray>)) {
-                func(Some(self))
+            fn as_array_mut(&mut self) -> Option<&mut dyn ReflectArray> {
+                Some(self)
             }
         }
     }
@@ -238,12 +230,6 @@ pub struct FieldArgs {
     /// Maximum amount of decimal places for a numeric property.
     #[darling(default)]
     pub precision: Option<usize>,
-
-    /// `#[reflect(description = "This is a property description.")]`
-    ///
-    /// Description of the property.
-    #[darling(default)]
-    pub description: Option<String>,
 }
 
 impl FieldArgs {

@@ -22,7 +22,7 @@ use crate::{
     fyrox::core::{log::Log, reflect::prelude::*},
     settings::{
         build::BuildSettings, camera::CameraSettings, debugging::DebuggingSettings,
-        general::GeneralSettings, graphics::GraphicsSettings, keys::KeyBindings,
+        general::GeneralSettings, graphics::GraphicsSettings, keys::KeyBindings, log::LogSettings,
         model::ModelSettings, move_mode::MoveInteractionModeSettings, navmesh::NavmeshSettings,
         recent::RecentFiles, rotate_mode::RotateInteractionModeSettings, scene::SceneSettings,
         selection::SelectionSettings, windows::WindowsSettings,
@@ -32,6 +32,7 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    fmt::Display,
     fs::File,
     io::Write,
     ops::{Deref, DerefMut},
@@ -45,6 +46,7 @@ pub mod debugging;
 pub mod general;
 pub mod graphics;
 pub mod keys;
+pub mod log;
 pub mod model;
 pub mod move_mode;
 pub mod navmesh;
@@ -55,6 +57,7 @@ pub mod selection;
 pub mod windows;
 
 #[derive(Deserialize, Serialize, PartialEq, Clone, Default, Debug, Reflect)]
+#[reflect(type_uuid = "8b5064fc-e25b-442c-af34-67b12b6f9e66")]
 pub struct SettingsData {
     #[reflect(tag = "Group.Selection")]
     pub selection: SelectionSettings,
@@ -80,6 +83,10 @@ pub struct SettingsData {
     pub navmesh: NavmeshSettings,
     #[reflect(tag = "Group.KeyBindings")]
     pub key_bindings: KeyBindings,
+    #[reflect(tag = "Group.Log")]
+    #[reflect(hidden)]
+    #[serde(default)]
+    pub log: LogSettings,
     #[reflect(hidden)]
     pub scene_settings: HashMap<PathBuf, SceneSettings>,
     #[reflect(hidden)]
@@ -121,11 +128,19 @@ impl DerefMut for Settings {
 
 impl Settings {
     pub fn load() -> Result<Self, SettingsError> {
+        let settings = SettingsData::load()?;
+        Log::set_log_info(settings.log.log_info);
+        Log::set_log_warning(settings.log.log_warning);
+        Log::set_log_error(settings.log.log_error);
         Ok(Settings {
-            settings: SettingsData::load()?,
+            settings,
             need_save: false,
             subscribers: Default::default(),
         })
+    }
+
+    pub fn data_mut(&mut self) -> &mut SettingsData {
+        &mut self.settings
     }
 
     pub fn force_save(&mut self) {
@@ -149,6 +164,18 @@ pub enum SettingsError {
     Io(std::io::Error),
     RonSpanned(ron::error::SpannedError),
     Ron(ron::Error),
+}
+
+impl std::error::Error for SettingsError {}
+
+impl Display for SettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettingsError::Io(error) => Display::fmt(error, f),
+            SettingsError::RonSpanned(error) => Display::fmt(error, f),
+            SettingsError::Ron(error) => Display::fmt(error, f),
+        }
+    }
 }
 
 impl From<std::io::Error> for SettingsError {
@@ -187,7 +214,6 @@ impl SettingsData {
 
         file.write_all(ron::ser::to_string_pretty(self, PrettyConfig::default())?.as_bytes())?;
 
-        Log::info("Settings were successfully saved!");
         Ok(())
     }
 }

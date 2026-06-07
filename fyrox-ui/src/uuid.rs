@@ -24,33 +24,27 @@
 #![warn(missing_docs)]
 
 use crate::{
-    button::{ButtonBuilder, ButtonMessage},
-    core::{pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
-    define_constructor, define_widget_deref,
+    button::{Button, ButtonMessage},
+    core::{pool::Handle, reflect::prelude::*, visitor::prelude::*},
+    define_widget_deref,
     grid::{Column, GridBuilder, Row},
-    message::{MessageDirection, UiMessage},
-    text::{TextBuilder, TextMessage},
+    message::{MessageData, UiMessage},
+    resources,
+    text::{Text, TextBuilder, TextMessage},
+    utils::ImageButtonBuilder,
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 
-use fyrox_core::uuid_provider;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
 /// A set of messages that is used to fetch or modify values of [`UuidEditor`] widgets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UuidEditorMessage {
-    /// Fetches or modifies a value of a [`UuidEditor`] widget.
+    /// Fetches or modifies the value of a [`UuidEditor`] widget.
     Value(Uuid),
 }
-
-impl UuidEditorMessage {
-    define_constructor!(
-        /// Creates [`UuidEditorMessage::Value`] message.
-        UuidEditorMessage:Value => fn value(Uuid), layout: false
-    );
-}
+impl MessageData for UuidEditorMessage {}
 
 /// UUID editor is used to show an arbitrary UUID and give an ability to generate a new value. It is widely used in
 /// [`crate::inspector::Inspector`] to show and edit UUIDs.
@@ -64,19 +58,24 @@ impl UuidEditorMessage {
 /// #     widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
-/// fn create_uuid_editor(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::uuid::UuidEditor;
+///
+/// fn create_uuid_editor(ctx: &mut BuildContext) -> Handle<UuidEditor> {
 ///     UuidEditorBuilder::new(WidgetBuilder::new())
 ///         .with_value(Uuid::new_v4())
 ///         .build(ctx)
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "667f7f48-2448-42da-91dd-cd743ca7117e"
+)]
 pub struct UuidEditor {
     widget: Widget,
     value: Uuid,
-    text: Handle<UiNode>,
-    generate: Handle<UiNode>,
+    text: Handle<Text>,
+    generate: Handle<Button>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for UuidEditor {
@@ -85,6 +84,7 @@ impl ConstructorProvider<UiNode, UserInterface> for UuidEditor {
             .with_variant("Uuid Editor", |ui| {
                 UuidEditorBuilder::new(WidgetBuilder::new().with_name("Uuid Editor"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -93,34 +93,18 @@ impl ConstructorProvider<UiNode, UserInterface> for UuidEditor {
 
 define_widget_deref!(UuidEditor);
 
-uuid_provider!(UuidEditor = "667f7f48-2448-42da-91dd-cd743ca7117e");
-
 impl Control for UuidEditor {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if message.destination() == self.handle && message.direction() == MessageDirection::ToWidget
-        {
-            if let Some(UuidEditorMessage::Value(value)) = message.data() {
-                if self.value != *value {
-                    self.value = *value;
-                    ui.send_message(message.reverse());
-
-                    ui.send_message(TextMessage::text(
-                        self.text,
-                        MessageDirection::ToWidget,
-                        value.to_string(),
-                    ));
-                }
+        if let Some(UuidEditorMessage::Value(value)) = message.data_for(self.handle) {
+            if self.value != *value {
+                self.value = *value;
+                ui.try_send_response(message);
+                ui.send(self.text, TextMessage::Text(value.to_string()));
             }
-        } else if message.destination() == self.generate {
-            if let Some(ButtonMessage::Click) = message.data() {
-                ui.send_message(UuidEditorMessage::value(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    Uuid::new_v4(),
-                ));
-            }
+        } else if let Some(ButtonMessage::Click) = message.data_from(self.generate) {
+            ui.send(self.handle, UuidEditorMessage::Value(Uuid::new_v4()));
         }
     }
 }
@@ -147,7 +131,7 @@ impl UuidEditorBuilder {
     }
 
     /// Finishes widget building.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<UuidEditor> {
         let text;
         let generate;
         let grid = GridBuilder::new(
@@ -165,15 +149,14 @@ impl UuidEditorBuilder {
                     text
                 })
                 .with_child({
-                    generate = ButtonBuilder::new(
-                        WidgetBuilder::new()
-                            .on_column(1)
-                            .on_row(0)
-                            .with_width(24.0)
-                            .with_margin(Thickness::uniform(1.0)),
-                    )
-                    .with_text("^/v")
-                    .build(ctx);
+                    generate = ImageButtonBuilder::default()
+                        .on_column(1)
+                        .on_row(0)
+                        .with_size(20.0)
+                        .with_image_size(14.0)
+                        .with_image(resources::SHUFFLE.clone())
+                        .with_tooltip("New Random UUID")
+                        .build_button(ctx);
                     generate
                 }),
         )
@@ -189,7 +172,7 @@ impl UuidEditorBuilder {
             generate,
         };
 
-        ctx.add_node(UiNode::new(uuid_editor))
+        ctx.add(uuid_editor)
     }
 }
 

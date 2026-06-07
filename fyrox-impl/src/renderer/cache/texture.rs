@@ -19,25 +19,25 @@
 // SOFTWARE.
 
 use crate::{
+    asset::manager::ResourceManager,
+    core::err_once,
     core::log::{Log, MessageKind},
-    renderer::{
-        cache::{TemporaryCache, TimeToLive},
-        framework::{error::FrameworkError, gpu_texture::PixelKind, server::GraphicsServer},
+    graphics::{
+        error::FrameworkError,
+        gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
+        sampler::{
+            GpuSampler, GpuSamplerDescriptor, MagnificationFilter, MinificationFilter, WrapMode,
+        },
+        server::GraphicsServer,
     },
+    renderer::cache::{TemporaryCache, TimeToLive},
     resource::texture::{Texture, TextureResource},
 };
-use fyrox_core::err_once;
-use fyrox_graphics::gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind};
-use fyrox_graphics::sampler::{
-    GpuSampler, GpuSamplerDescriptor, MagnificationFilter, MinificationFilter, WrapMode,
-};
-use fyrox_resource::manager::ResourceManager;
 use fyrox_texture::{
     TextureKind, TextureMagnificationFilter, TextureMinificationFilter, TexturePixelKind,
     TextureWrapMode,
 };
-use std::borrow::Cow;
-use std::time::Duration;
+use std::{borrow::Cow, time::Duration};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -77,7 +77,7 @@ fn convert_texture_kind(v: TextureKind) -> GpuTextureKind {
     }
 }
 
-fn convert_pixel_kind(texture_kind: TexturePixelKind) -> PixelKind {
+pub fn convert_pixel_kind(texture_kind: TexturePixelKind) -> PixelKind {
     match texture_kind {
         TexturePixelKind::R8 => PixelKind::R8,
         TexturePixelKind::RGB8 => PixelKind::RGB8,
@@ -104,17 +104,19 @@ fn convert_pixel_kind(texture_kind: TexturePixelKind) -> PixelKind {
         TexturePixelKind::LuminanceAlpha16 => PixelKind::LA16,
         TexturePixelKind::R32F => PixelKind::R32F,
         TexturePixelKind::R16F => PixelKind::R16F,
+        TexturePixelKind::SRGBA8 => PixelKind::SRGBA8,
+        TexturePixelKind::SRGB8 => PixelKind::SRGB8,
     }
 }
 
-fn convert_magnification_filter(v: TextureMagnificationFilter) -> MagnificationFilter {
+pub fn convert_magnification_filter(v: TextureMagnificationFilter) -> MagnificationFilter {
     match v {
         TextureMagnificationFilter::Nearest => MagnificationFilter::Nearest,
         TextureMagnificationFilter::Linear => MagnificationFilter::Linear,
     }
 }
 
-fn convert_minification_filter(v: TextureMinificationFilter) -> MinificationFilter {
+pub fn convert_minification_filter(v: TextureMinificationFilter) -> MinificationFilter {
     match v {
         TextureMinificationFilter::Nearest => MinificationFilter::Nearest,
         TextureMinificationFilter::NearestMipMapNearest => MinificationFilter::NearestMipMapNearest,
@@ -125,7 +127,7 @@ fn convert_minification_filter(v: TextureMinificationFilter) -> MinificationFilt
     }
 }
 
-fn convert_wrap_mode(v: TextureWrapMode) -> WrapMode {
+pub fn convert_wrap_mode(v: TextureWrapMode) -> WrapMode {
     match v {
         TextureWrapMode::Repeat => WrapMode::Repeat,
         TextureWrapMode::ClampToEdge => WrapMode::ClampToEdge,
@@ -193,12 +195,13 @@ impl TextureCache {
         resource_manager: &ResourceManager,
         texture: &TextureResource,
     ) -> Result<(), FrameworkError> {
+        let uuid = texture.resource_uuid();
         let texture = texture.state();
-        if let Some((texture, uuid)) = texture.data_ref_with_id() {
+        if let Some(texture) = texture.data_ref() {
             self.cache.get_entry_mut_or_insert_with(
                 &texture.cache_index,
                 Default::default(),
-                || create_gpu_texture(server, resource_manager, uuid, texture),
+                || create_gpu_texture(server, resource_manager, &uuid, texture),
             )?;
             Ok(())
         } else {
@@ -214,12 +217,13 @@ impl TextureCache {
         resource_manager: &ResourceManager,
         texture_resource: &TextureResource,
     ) -> Option<&TextureRenderData> {
+        let uuid = texture_resource.resource_uuid();
         let texture_data_guard = texture_resource.state();
-        if let Some((texture, uuid)) = texture_data_guard.data_ref_with_id() {
+        if let Some(texture) = texture_data_guard.data_ref() {
             match self.cache.get_mut_or_insert_with(
                 &texture.cache_index,
                 Default::default(),
-                || create_gpu_texture(server, resource_manager, uuid, texture),
+                || create_gpu_texture(server, resource_manager, &uuid, texture),
             ) {
                 Ok(entry) => {
                     // Check if some value has changed in resource.
@@ -253,8 +257,7 @@ impl TextureCache {
                     drop(texture_data_guard);
                     err_once!(
                         texture_resource.key() as usize,
-                        "Failed to create GPU texture from {} texture. Reason: {:?}",
-                        texture_resource.kind(),
+                        "Failed to create GPU texture from texture. Reason: {:?}",
                         e,
                     );
                 }

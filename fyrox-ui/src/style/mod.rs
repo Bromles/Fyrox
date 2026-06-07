@@ -20,8 +20,8 @@
 
 #![warn(missing_docs)]
 
-//! Style allows to change visual appearance of widgets in centralized manner. It can be considered
-//! as a storage for properties, that defines visual appearance. See [`Style`] docs for more info
+//! Style allows to change the visual appearance of widgets in a centralized manner. It can be considered
+//! as a storage for properties that define visual appearance. See [`Style`] docs for more info
 //! and usage examples.
 
 pub mod resource;
@@ -30,35 +30,36 @@ use crate::{
     brush::Brush,
     button::Button,
     check_box::CheckBox,
-    core::{
-        color::Color, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*,
-        ImmutableString, Uuid,
-    },
+    core::{color::Color, reflect::prelude::*, visitor::prelude::*, ImmutableString},
     dropdown_list::DropdownList,
     style::resource::{StyleResource, StyleResourceError, StyleResourceExt},
     toggle::ToggleButton,
     Thickness,
 };
-use fxhash::FxHashMap;
 use fyrox_resource::untyped::ResourceKind;
 use fyrox_resource::{
     io::ResourceIo,
     manager::{BuiltInResource, ResourceManager},
 };
 use fyrox_texture::TextureResource;
-use lazy_static::lazy_static;
+use std::{
+    any::{Any, TypeId},
+    sync::LazyLock,
+};
 use std::{
     ops::{Deref, DerefMut},
     path::Path,
     sync::Arc,
 };
+use strum_macros::{AsRefStr, EnumString, VariantNames};
 
 /// A set of potential values for styled properties.
-#[derive(Visit, Reflect, Debug, Clone)]
+#[derive(Visit, Reflect, Debug, Clone, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "85b8c1e4-03a2-4a28-acb4-1850d1a29227")]
 pub enum StyleProperty {
     /// A numeric property.
     Number(f32),
-    /// A thickness property, that defines width of four sides of a rectangles.
+    /// A thickness property that defines the width of four sides of a rectangles.
     Thickness(Thickness),
     /// A color property.
     Color(Color),
@@ -72,6 +73,20 @@ pub enum StyleProperty {
 impl Default for StyleProperty {
     fn default() -> Self {
         Self::Number(0.0)
+    }
+}
+
+impl StyleProperty {
+    /// Returns type id of the actual value stored in the property. The set of potential types is
+    /// finite (see [`StyleProperty`] declaration).
+    pub fn value_type_id(&self) -> TypeId {
+        match self {
+            StyleProperty::Number(v) => v.type_id(),
+            StyleProperty::Thickness(v) => v.type_id(),
+            StyleProperty::Color(v) => v.type_id(),
+            StyleProperty::Brush(v) => v.type_id(),
+            StyleProperty::Texture(v) => v.type_id(),
+        }
     }
 }
 
@@ -107,24 +122,44 @@ impl_casts!(Color => Color);
 impl_casts!(Brush => Brush);
 impl_casts!(TextureResource => Texture);
 
-lazy_static! {
-    /// Default style of the library.
-    pub static ref DEFAULT_STYLE: BuiltInResource<Style> = BuiltInResource::new_no_source("__DEFAULT_STYLE__",
-        StyleResource::new_ok(uuid!("1e0716e8-e728-491c-a65b-ca11b15048be"), ResourceKind::External, Style::dark_style())
-    );
-}
+/// Default style of the library.
+pub static DEFAULT_STYLE: LazyLock<BuiltInResource<Style>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Default Style",
+        StyleResource::new_ok(
+            uuid!("1e0716e8-e728-491c-a65b-ca11b15048be"),
+            ResourceKind::External,
+            Style::dark_style(),
+        ),
+    )
+});
+
+/// Light style of the library.
+pub static LIGHT_STYLE: LazyLock<BuiltInResource<Style>> = LazyLock::new(|| {
+    BuiltInResource::new_no_source(
+        "Light Style",
+        StyleResource::new_ok(
+            uuid!("05141b18-2a27-4fe3-ae6e-7af11c2e7471"),
+            ResourceKind::External,
+            Style::light_style(),
+        ),
+    )
+});
 
 /// A property, that can bind its value to a style. Why can't we just fetch the actual value from
 /// the style and why do we need to store the value as well? The answer is flexibility. In this
-/// approach style becomes not necessary and the value can be hardcoded. Also, the values of such
+/// approach, style becomes not necessary and the value can be hardcoded. Also, the values of such
 /// properties can be updated individually.
 #[derive(Clone, Debug, Reflect, Default)]
-#[reflect(bounds = "T: Reflect + Clone")]
+#[reflect(
+    bounds = "T: Reflect + Clone",
+    type_uuid = "71e84137-2832-42a1-bcb5-f8ee95784997"
+)]
 pub struct StyledProperty<T> {
     /// Property value.
     pub property: T,
     /// Name of the property in a style table.
-    #[reflect(hidden)]
+    #[reflect(read_only, display_name = "Property Name")]
     pub name: ImmutableString,
 }
 
@@ -184,9 +219,19 @@ impl<T: Visit> Visit for StyledProperty<T> {
     }
 }
 
-/// Style is a simple container for a named properties. Styles can be based off some other style, thus
+/// Named style property container.
+#[derive(Visit, Reflect, Clone, Default, Debug)]
+#[reflect(type_uuid = "6238f37c-c067-4dd1-be67-6a8bb8853a59")]
+pub struct StylePropertyContainer {
+    /// Name of the property.
+    pub name: ImmutableString,
+    /// The actual value of the property.
+    pub value: StyleProperty,
+}
+
+/// Style is a simple container for a named properties. Styles can be based on some other styles, thus
 /// allowing cascaded styling. Such cascading allows to define some base style with common properties
-/// and then create any amount of derived styles. For example, you can define a style for Button widget
+/// and then create any number of derived styles. For example, you can define a style for Button widget
 /// with corner radius, font size, border thickness and then create two derived styles for light and
 /// dark themes that will define colors and brushes. Light or dark theme does not affect all of those
 /// base properties, but has different colors.
@@ -194,7 +239,7 @@ impl<T: Visit> Visit for StyledProperty<T> {
 /// Styles can contain only specific types of properties (see [`StyleProperty`] enumeration), any
 /// more complex properties can be built using these primitives.
 ///
-/// There are three major ways of widgets styling:
+/// There are three major ways of widget styling:
 ///
 /// 1) During widget building stage - this way involves [`crate::BuildContext`]'s style field. This
 /// field defines a style for all widgets that will be built with the context.
@@ -230,7 +275,7 @@ impl<T: Visit> Visit for StyledProperty<T> {
 ///
 ///     ctx.style = StyleResource::new_embedded(style);
 ///
-///     // The button will have corner radius of 6.0 points and border thickness of 3.0 points on
+///     // The button will have a corner radius of 6.0 points and border thickness of 3.0 points on
 ///     // each side.
 ///     ButtonBuilder::new(WidgetBuilder::new()).build(ctx);
 /// }
@@ -253,11 +298,11 @@ impl<T: Visit> Visit for StyledProperty<T> {
 ///     ui.set_style(StyleResource::new_embedded(style));
 /// }
 /// ```
-#[derive(Visit, Reflect, Clone, Default, Debug, TypeUuidProvider)]
-#[type_uuid(id = "38a63b49-d765-4c01-8fb5-202cc43d607e")]
+#[derive(Visit, Reflect, Clone, Default, Debug)]
+#[reflect(type_uuid = "38a63b49-d765-4c01-8fb5-202cc43d607e")]
 pub struct Style {
     parent: Option<StyleResource>,
-    variables: FxHashMap<ImmutableString, StyleProperty>,
+    properties: Vec<StylePropertyContainer>,
 }
 
 impl Style {
@@ -297,8 +342,22 @@ impl Style {
     pub const BRUSH_ERROR: &'static str = "Global.Brush.Error";
     /// The name of the ok brush.
     pub const BRUSH_OK: &'static str = "Global.Brush.Ok";
+    /// The name of the highlight brush used to highlight widgets with keyboard focus.
+    pub const BRUSH_HIGHLIGHT: &'static str = "Global.Brush.Highlight";
     /// The name of the font size property.
     pub const FONT_SIZE: &'static str = "Global.Font.Size";
+    /// The name of the normal state brush of the `ok` context action.
+    pub const BRUSH_OK_NORMAL: &'static str = "Global.Brush.Ok.Normal";
+    /// The name of the pressed state brush of the `ok` context action.
+    pub const BRUSH_OK_PRESSED: &'static str = "Global.Brush.Ok.Pressed";
+    /// The name of the hover state brush of the `ok` context action.
+    pub const BRUSH_OK_HOVER: &'static str = "Global.Brush.Ok.Hover";
+    /// The name of the normal state brush of the `cancel` context action.
+    pub const BRUSH_CANCEL_NORMAL: &'static str = "Global.Brush.Cancel.Normal";
+    /// The name of the pressed state brush of the `cancel` context action.
+    pub const BRUSH_CANCEL_PRESSED: &'static str = "Global.Brush.Cancel.Pressed";
+    /// The name of the hover state brush of the `cancel` context action.
+    pub const BRUSH_CANCEL_HOVER: &'static str = "Global.Brush.Cancel.Hover";
 
     fn base_style() -> Style {
         let mut style = Self::default();
@@ -341,15 +400,40 @@ impl Style {
                 Brush::Solid(Color::opaque(80, 118, 178)),
             )
             .set(
+                Self::BRUSH_HIGHLIGHT,
+                Brush::Solid(Color::opaque(80, 118, 178)),
+            )
+            .set(
                 Self::BRUSH_DIM_BLUE,
                 Brush::Solid(Color::opaque(66, 99, 149)),
             )
-            .set(Self::BRUSH_TEXT, Brush::Solid(Color::opaque(220, 220, 220)))
+            .set(Self::BRUSH_TEXT, Brush::Solid(Color::opaque(190, 190, 190)))
             .set(Self::BRUSH_FOREGROUND, Brush::Solid(Color::WHITE))
             .set(Self::BRUSH_INFORMATION, Brush::Solid(Color::ANTIQUE_WHITE))
             .set(Self::BRUSH_WARNING, Brush::Solid(Color::GOLD))
             .set(Self::BRUSH_ERROR, Brush::Solid(Color::RED))
-            .set(Self::BRUSH_OK, Brush::Solid(Color::GREEN));
+            .set(Self::BRUSH_OK, Brush::Solid(Color::GREEN))
+            .set(
+                Self::BRUSH_OK_NORMAL,
+                Brush::Solid(Color::opaque(0, 130, 0)),
+            )
+            .set(Self::BRUSH_OK_HOVER, Brush::Solid(Color::opaque(0, 150, 0)))
+            .set(
+                Self::BRUSH_OK_PRESSED,
+                Brush::Solid(Color::opaque(0, 170, 0)),
+            )
+            .set(
+                Self::BRUSH_CANCEL_NORMAL,
+                Brush::Solid(Color::opaque(130, 0, 0)),
+            )
+            .set(
+                Self::BRUSH_CANCEL_HOVER,
+                Brush::Solid(Color::opaque(150, 0, 0)),
+            )
+            .set(
+                Self::BRUSH_CANCEL_PRESSED,
+                Brush::Solid(Color::opaque(170, 0, 0)),
+            );
         style
     }
 
@@ -378,6 +462,10 @@ impl Style {
             )
             .set(
                 Self::BRUSH_BRIGHT_BLUE,
+                Brush::Solid(Color::opaque(80, 118, 178)),
+            )
+            .set(
+                Self::BRUSH_HIGHLIGHT,
                 Brush::Solid(Color::opaque(80, 118, 178)),
             )
             .set(
@@ -415,7 +503,7 @@ impl Style {
         self
     }
 
-    /// Sets the parent style for this style. Parent style will be used at attempt to fetch properties
+    /// Sets the parent style for this style. Parent style will be used in an attempt to fetch properties
     /// that aren't present in this style.
     pub fn set_parent(&mut self, parent: Option<StyleResource>) {
         self.parent = parent;
@@ -426,12 +514,24 @@ impl Style {
         self.parent.as_ref()
     }
 
+    /// Returns an index of the variable with the given name.
+    pub fn index_of(&self, name: &ImmutableString) -> Option<usize> {
+        self.properties
+            .binary_search_by(|v| v.name.cached_hash().cmp(&name.cached_hash()))
+            .ok()
+    }
+
+    /// Checks if there's a variable with the given name.
+    pub fn contains(&self, name: &ImmutableString) -> bool {
+        self.index_of(name).is_some()
+    }
+
     /// Merges current style with some other style. This method does not overwrite existing values,
     /// instead it only adds missing values from the other style.
     pub fn merge(&mut self, other: &Self) -> &mut Self {
-        for (k, v) in other.variables.iter() {
-            if !self.variables.contains_key(k) {
-                self.variables.insert(k.clone(), v.clone());
+        for other_property in other.properties.iter() {
+            if !self.contains(&other_property.name) {
+                self.set(other_property.name.clone(), other_property.value.clone());
             }
         }
         self
@@ -451,9 +551,21 @@ impl Style {
     pub fn set(
         &mut self,
         name: impl Into<ImmutableString>,
-        property: impl Into<StyleProperty>,
+        value: impl Into<StyleProperty>,
     ) -> &mut Self {
-        self.variables.insert(name.into(), property.into());
+        let name = name.into();
+        let value = value.into();
+
+        if let Some(existing_index) = self.index_of(&name) {
+            self.properties[existing_index] = StylePropertyContainer { name, value };
+        } else {
+            let index = self
+                .properties
+                .partition_point(|h| h.name.cached_hash() < name.cached_hash());
+            self.properties
+                .insert(index, StylePropertyContainer { name, value });
+        }
+
         self
     }
 
@@ -461,8 +573,9 @@ impl Style {
     /// try to search in the parent style (the search is recursive).
     pub fn get_raw(&self, name: impl Into<ImmutableString>) -> Option<StyleProperty> {
         let name = name.into();
-        if let Some(property) = self.variables.get(&name) {
-            return Some(property.clone());
+        let index = self.index_of(&name)?;
+        if let Some(container) = self.properties.get(index) {
+            return Some(container.value.clone());
         } else if let Some(parent) = self.parent.as_ref() {
             let state = parent.state();
             if let Some(data) = state.data_ref() {
@@ -527,5 +640,49 @@ impl Style {
         let mut style = Style::default();
         style.visit("Style", &mut visitor)?;
         Ok(style)
+    }
+
+    /// Returns an immutable reference to the internal container with the style properties.
+    /// Keep in mind that the returned container contains only the properties of the current
+    /// style! Properties of the parent style(s) should be obtained separately.
+    pub fn inner(&self) -> &Vec<StylePropertyContainer> {
+        &self.properties
+    }
+
+    /// Collects all the properties in the current and ancestor style chain. Returns a hash map with
+    /// all property values with their names. Basically, this method merges all the styles with their
+    /// ancestor style chain.
+    pub fn all_properties(&self) -> Self {
+        let mut properties = self
+            .parent
+            .as_ref()
+            .map(|parent| parent.data_ref().all_properties())
+            .unwrap_or_default();
+        for property in self.properties.iter() {
+            properties.set(property.name.clone(), property.value.clone());
+        }
+        properties
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::brush::Brush;
+    use crate::style::Style;
+    use fyrox_core::color::Color;
+    use fyrox_core::ImmutableString;
+
+    #[test]
+    fn test_style() {
+        let mut style = Style::default();
+        style
+            .set("A", 0.2f32)
+            .set("D", 0.1f32)
+            .set("B", Brush::Solid(Color::WHITE))
+            .set("C", Brush::Solid(Color::WHITE));
+        assert_eq!(style.index_of(&ImmutableString::new("A")), Some(3));
+        assert_eq!(style.index_of(&ImmutableString::new("B")), Some(2));
+        assert_eq!(style.index_of(&ImmutableString::new("C")), Some(1));
+        assert_eq!(style.index_of(&ImmutableString::new("D")), Some(0));
     }
 }

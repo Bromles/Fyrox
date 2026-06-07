@@ -18,7 +18,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::ui_scene::commands::UiSceneContext;
 use crate::{
+    asset::preview::cache::IconRequest,
     command::make_command,
     fyrox::{
         core::{color::Color, pool::Handle, reflect::Reflect},
@@ -28,13 +30,14 @@ use crate::{
                 editors::{
                     enumeration::EnumPropertyEditorDefinition, PropertyEditorDefinitionContainer,
                 },
-                InspectorBuilder, InspectorContext, InspectorMessage, PropertyFilter,
+                InspectorBuilder, InspectorContext, InspectorContextArgs, InspectorMessage,
+                PropertyFilter,
             },
             message::UiMessage,
             scroll_viewer::ScrollViewerBuilder,
             widget::WidgetBuilder,
-            window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, UiNode,
+            window::{Window, WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
+            BuildContext, WidgetPool,
         },
         scene::{
             dim2,
@@ -47,28 +50,25 @@ use crate::{
         utils::lightmap::Lightmap,
     },
     message::MessageSender,
-    plugins::inspector::{editors::make_property_editors_container, EditorEnvironment},
-    scene::commands::GameSceneContext,
-    GameScene, Message, MessageDirection, MSG_SYNC_FLAG,
+    plugins::inspector::EditorEnvironment,
+    scene::{commands::GameSceneContext, controller::SceneController},
+    ui_scene::UiScene,
+    GameScene, Message,
 };
-use fyrox::{
-    asset::manager::ResourceManager,
-    graph::SceneGraph,
-    gui::{inspector::InspectorContextArgs, window::Window},
-};
-use std::sync::Arc;
+use fyrox::gui::inspector::editors::inspectable::InspectablePropertyEditorDefinition;
+use fyrox::gui::inspector::Inspector;
+use std::sync::{mpsc::Sender, Arc};
 
 pub struct SceneSettingsWindow {
-    pub window: Handle<UiNode>,
-    inspector: Handle<UiNode>,
+    pub window: Handle<Window>,
+    inspector: Handle<Inspector>,
     property_definitions: Arc<PropertyEditorDefinitionContainer>,
 }
 
 impl SceneSettingsWindow {
     pub fn new(
         ctx: &mut BuildContext,
-        sender: MessageSender,
-        resource_manager: ResourceManager,
+        property_definitions: Arc<PropertyEditorDefinitionContainer>,
     ) -> Self {
         let inspector;
         let window = WindowBuilder::new(
@@ -90,102 +90,113 @@ impl SceneSettingsWindow {
         .with_title(WindowTitle::text("Scene Settings"))
         .build(ctx);
 
-        let container = make_property_editors_container(sender, resource_manager);
-
-        container.register_inheritable_inspectable::<Graph>();
-        container.register_inheritable_inspectable::<IntegrationParameters>();
-        container.register_inheritable_inspectable::<PhysicsWorld>();
-        container.register_inheritable_inspectable::<dim2::physics::PhysicsWorld>();
-        container.register_inheritable_inspectable::<SceneRenderingOptions>();
-        container.insert(EnumPropertyEditorDefinition::<Color>::new_optional());
+        property_definitions.insert(InspectablePropertyEditorDefinition::<Graph>::new());
+        property_definitions.register_inheritable_inspectable::<IntegrationParameters>();
+        property_definitions.insert(InspectablePropertyEditorDefinition::<PhysicsWorld>::new());
+        property_definitions.insert(InspectablePropertyEditorDefinition::<
+            dim2::physics::PhysicsWorld,
+        >::new());
+        property_definitions.register_inheritable_inspectable::<SceneRenderingOptions>();
+        property_definitions.insert(EnumPropertyEditorDefinition::<Color>::new_optional());
 
         Self {
             window,
             inspector,
-            property_definitions: Arc::new(container),
+            property_definitions,
         }
     }
 
-    pub fn open(&self, game_scene: &GameScene, engine: &mut Engine, sender: MessageSender) {
+    pub fn open(
+        &self,
+        controller: &dyn SceneController,
+        engine: &mut Engine,
+        sender: MessageSender,
+        icon_request_sender: Sender<IconRequest>,
+    ) {
         let ui = engine.user_interfaces.first();
-        ui.send_message(WindowMessage::open(
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
-        self.sync_to_model(true, game_scene, engine, sender);
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
+        self.sync_to_model(true, controller, engine, sender, icon_request_sender);
     }
 
     pub fn sync_to_model(
         &self,
         force: bool,
-        game_scene: &GameScene,
+        controller: &dyn SceneController,
         engine: &mut Engine,
         sender: MessageSender,
+        icon_request_sender: Sender<IconRequest>,
     ) {
         let ui = engine.user_interfaces.first_mut();
-        if !force
-            && !ui
-                .try_get_of_type::<Window>(self.window)
-                .unwrap()
-                .is_globally_visible()
-        {
+        if !force && !ui[self.window].is_globally_visible() {
             return;
         }
 
-        let scene = &engine.scenes[game_scene.scene];
+        let object = if let Some(game_scene) = controller.downcast_ref::<GameScene>() {
+            &engine.scenes[game_scene.scene] as &dyn Reflect
+        } else if let Some(ui_scene) = controller.downcast_ref::<UiScene>() {
+            &ui_scene.ui as &dyn Reflect
+        } else {
+            return;
+        };
 
         let environment = Arc::new(EditorEnvironment {
             resource_manager: engine.resource_manager.clone(),
             serialization_context: engine.serialization_context.clone(),
+            dyn_type_constructors: engine.dyn_type_constructors.clone(),
             available_animations: Default::default(),
             sender,
+            icon_request_sender,
+            style: None,
         });
 
         let context = InspectorContext::from_object(InspectorContextArgs {
-            object: scene,
+            object,
             ctx: &mut ui.build_ctx(),
             definition_container: self.property_definitions.clone(),
             environment: Some(environment),
-            sync_flag: MSG_SYNC_FLAG,
             layer_index: 0,
             generate_property_string_values: false,
             filter: PropertyFilter::new(|property| {
-                let mut pass = true;
-
-                property.downcast_ref::<NodePool>(&mut |v| {
-                    if v.is_some() {
-                        pass = false;
-                    }
-                });
-
-                property.downcast_ref::<Option<Lightmap>>(&mut |v| {
-                    if v.is_some() {
-                        pass = false;
-                    }
-                });
-
-                pass
+                property.downcast_ref::<NodePool>().is_none()
+                    && property.downcast_ref::<WidgetPool>().is_none()
+                    && property.downcast_ref::<Option<Lightmap>>().is_none()
             }),
             name_column_width: 150.0,
+            hide_name_column: false,
             base_path: Default::default(),
+            has_parent_object: false,
         });
 
-        ui.send_message(InspectorMessage::context(
-            self.inspector,
-            MessageDirection::ToWidget,
-            context,
-        ));
+        ui.send(self.inspector, InspectorMessage::Context(context));
     }
 
-    pub fn handle_ui_message(&self, message: &UiMessage, sender: &MessageSender) {
+    pub fn handle_ui_message(
+        &self,
+        controller: &dyn SceneController,
+        message: &UiMessage,
+        sender: &MessageSender,
+    ) {
         if let Some(InspectorMessage::PropertyChanged(property_changed)) = message.data() {
             if message.destination() == self.inspector {
-                if let Some(command) = make_command(property_changed, |ctx| {
-                    ctx.get_mut::<GameSceneContext>().scene as &mut dyn Reflect
-                }) {
-                    sender.send(Message::DoCommand(command));
+                if controller.downcast_ref::<GameScene>().is_some() {
+                    if let Some(command) = make_command(property_changed, |ctx| {
+                        Some(ctx.get_mut::<GameSceneContext>().scene as &mut dyn Reflect)
+                    }) {
+                        sender.send(Message::DoCommand(command));
+                    }
+                } else if controller.downcast_ref::<UiScene>().is_some() {
+                    if let Some(command) = make_command(property_changed, |ctx| {
+                        Some(ctx.get_mut::<UiSceneContext>().ui as &mut dyn Reflect)
+                    }) {
+                        sender.send(Message::DoCommand(command));
+                    }
                 }
             }
         }

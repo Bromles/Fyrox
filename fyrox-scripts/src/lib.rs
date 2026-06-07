@@ -31,18 +31,19 @@ pub mod camera;
 /// ```rust,no_run
 /// # use fyrox::{
 /// #     core::pool::Handle, core::visitor::prelude::*, core::reflect::prelude::*,
-/// #     plugin::{Plugin, PluginContext, PluginRegistrationContext},
+/// #     plugin::{Plugin, PluginContext, PluginRegistrationContext, error::GameResult},
 /// #     scene::Scene,
 /// # };
 /// #
 /// # #[derive(Visit, Reflect, Debug)]
-/// # #[reflect(non_cloneable)]
+/// # #[reflect(non_cloneable, type_uuid = "38a3d4cf-65e1-4e86-a730-365804c51cff")]
 /// # struct Game;
 /// #
 /// # impl Plugin for Game {
 ///   // This is PluginConstructor::register method of your GameConstructor.
-///   fn register(&self, context: PluginRegistrationContext) {
-///       fyrox_scripts::register(&context.serialization_context.script_constructors)
+///   fn register(&self, context: PluginRegistrationContext) -> GameResult {
+///         fyrox_scripts::register(&context.serialization_context.script_constructors);
+///         Ok(())
 ///   }
 /// # }
 /// ```

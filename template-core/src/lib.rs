@@ -67,6 +67,8 @@ pub enum NameError {
     InvalidCharacter(char),
 }
 
+impl std::error::Error for NameError {}
+
 impl Display for NameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -125,6 +127,10 @@ pub fn check_name(name: &str) -> Result<&str, NameError> {
     Ok(name)
 }
 
+pub fn convert_name(name: &str) -> String {
+    name.replace("-", "_").to_lowercase()
+}
+
 fn init_game(base_path: &Path, name: &str) -> Result<(), String> {
     Command::new("cargo")
         .args(["init", "--lib", "--vcs", "none"])
@@ -156,73 +162,60 @@ dylib-engine = ["fyrox/dylib"]
     write_file(
         base_path.join("game/src/lib.rs"),
         r#"//! Game project.
+#[allow(unused_imports)]
+use fyrox::graph::prelude::*;
 use fyrox::{
     core::pool::Handle, core::visitor::prelude::*, core::reflect::prelude::*,
     event::Event,
-    gui::message::UiMessage,
-    plugin::{Plugin, PluginContext, PluginRegistrationContext},
-    scene::Scene,
+    gui::{message::UiMessage, UserInterface},
+    plugin::{Plugin, PluginContext, PluginRegistrationContext, error::GameResult},
 };
-use std::path::Path;
 
 // Re-export the engine.
 pub use fyrox;
 
 #[derive(Default, Visit, Reflect, Debug)]
-#[reflect(non_cloneable)]
-pub struct Game {
-    scene: Handle<Scene>,
-}
+#[reflect(non_cloneable, type_uuid = "84a89ed3-796e-4592-92d6-d24c2db302c9")]
+pub struct Game { }
 
 impl Plugin for Game {
-    fn register(&self, _context: PluginRegistrationContext) {
+    fn register(&self, _context: PluginRegistrationContext) -> GameResult {
         // Register your scripts here.
+        Ok(())
     }
 
-    fn init(&mut self, scene_path: Option<&str>, context: PluginContext) {
-        context
-            .async_scene_loader
-            .request(scene_path.unwrap_or("data/scene.rgs"));
+    fn init(&mut self, scene_path: Option<&str>, mut context: PluginContext) -> GameResult {
+        context.load_scene_or_ui::<Self>(scene_path.unwrap_or("data/scene.rgs"));
+        Ok(())
     }
 
-    fn on_deinit(&mut self, _context: PluginContext) {
+    fn on_deinit(&mut self, _context: PluginContext) -> GameResult {
         // Do a cleanup here.
+        Ok(())
     }
 
-    fn update(&mut self, _context: &mut PluginContext) {
+    fn update(&mut self, _context: &mut PluginContext) -> GameResult {
         // Add your global update code here.
+        Ok(())
     }
 
     fn on_os_event(
         &mut self,
         _event: &Event<()>,
         _context: PluginContext,
-    ) {
+    ) -> GameResult {
         // Do something on OS event here.
+        Ok(())
     }
 
     fn on_ui_message(
         &mut self,
         _context: &mut PluginContext,
         _message: &UiMessage,
-    ) {
+        _ui_handle: Handle<UserInterface>
+    ) -> GameResult {
         // Handle UI events here.
-    }
-
-    fn on_scene_begin_loading(&mut self, _path: &Path, ctx: &mut PluginContext) {
-        if self.scene.is_some() {
-            ctx.scenes.remove(self.scene);
-        }
-    }
-
-    fn on_scene_loaded(
-        &mut self,
-        _path: &Path,
-        scene: Handle<Scene>,
-        _data: &[u8],
-        _context: &mut PluginContext,
-    ) {
-        self.scene = scene;
+        Ok(())
     }
 }
 "#,
@@ -296,6 +289,56 @@ fn main() {{
     )
 }
 
+fn init_export_cli(base_path: &Path, name: &str) -> Result<(), String> {
+    Command::new("cargo")
+        .args(["init", "--bin", "--vcs", "none"])
+        .arg(base_path.join("export-cli"))
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    // Write Cargo.toml
+    write_file(
+        base_path.join("export-cli/Cargo.toml"),
+        format!(
+            r#"
+[package]
+name = "export-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fyrox = {{ workspace = true }}
+fyrox-build-tools = {{ workspace = true }}
+{name} = {{ path = "../game" }}
+"#,
+        ),
+    )?;
+
+    // Write main.rs
+    write_file(
+        base_path.join("export-cli/src/main.rs"),
+        format!(
+            r#"//! Exporter command line interface (CLI) with your game connected to it as a plugin.
+//! This tool can be used to automate project export in CI/CD.
+//! Typical usage: `cargo run --package export-cli -- --target-platform pc`
+//!             or `cargo run --package export-cli -- --help` for the docs.
+
+use {name}::Game;
+use fyrox::core::log::Log;
+use fyrox::engine::executor::Executor;
+use fyrox::event_loop::EventLoop;
+use fyrox_build_tools::export::cli_export;
+
+fn main() {{
+    Log::set_file_name("{name}Export.log");
+    let mut executor = Executor::new(EventLoop::new().ok());
+    executor.add_plugin(Game::default());
+    cli_export(executor.resource_manager.clone())
+}}"#,
+        ),
+    )
+}
+
 fn init_wasm_executor(base_path: &Path, name: &str) -> Result<(), String> {
     Command::new("cargo")
         .args(["init", "--lib", "--vcs", "none"])
@@ -328,47 +371,15 @@ fyrox = {{workspace = true}}
         format!(
             r#"//! Executor with your game connected to it as a plugin.
 #![cfg(target_arch = "wasm32")]
+
 use fyrox::engine::executor::Executor;
 use fyrox::event_loop::EventLoop;
-use {name}::Game;
 use fyrox::core::wasm_bindgen::{{self, prelude::*}};
 
-#[wasm_bindgen]
-extern "C" {{
-    #[wasm_bindgen(js_namespace = console)]
-    fn error(msg: String);
-
-    type Error;
-
-    #[wasm_bindgen(constructor)]
-    fn new() -> Error;
-
-    #[wasm_bindgen(structural, method, getter)]
-    fn stack(error: &Error) -> String;
-}}
-
-fn custom_panic_hook(info: &std::panic::PanicHookInfo) {{
-    let mut msg = info.to_string();
-    msg.push_str("\n\nStack:\n\n");
-    let e = Error::new();
-    let stack = e.stack();
-    msg.push_str(&stack);
-    msg.push_str("\n\n");
-    error(msg);
-}}
-
-#[inline]
-pub fn set_panic_hook() {{
-    use std::sync::Once;
-    static SET_HOOK: Once = Once::new();
-    SET_HOOK.call_once(|| {{
-        std::panic::set_hook(Box::new(custom_panic_hook));
-    }});
-}}
+use {name}::Game;
 
 #[wasm_bindgen]
 pub fn main() {{
-    set_panic_hook();
     let mut executor = Executor::new(Some(EventLoop::new().unwrap()));
     executor.add_plugin(Game::default());
     executor.run()
@@ -445,6 +456,7 @@ fn main() {{
         Some(StartupData {{
             working_directory: Default::default(),
             scenes: vec!["data/scene.rgs".into()],
+            named_objects: false
         }}),
     );
 
@@ -538,7 +550,7 @@ version = "0.1.0"
 edition = "2021"
 
 [package.metadata.android]
-# This folder is used as a temporary storage for assets. Project exporter will clone everything 
+# This folder is used as a temporary storage for assets. Project exporter will clone everything
 # from data folder to this folder and cargo-apk will create the apk with these assets.
 assets = "assets"
 strip = "strip"
@@ -578,6 +590,7 @@ fn android_main(app: fyrox::platform::android::activity::AndroidApp) {{
     io::ANDROID_APP
         .set(app.clone())
         .expect("ANDROID_APP cannot be set twice.");
+    #[allow(deprecated)]
     let event_loop = EventLoopBuilder::new().with_android_app(app).build().unwrap();
     let mut executor = Executor::from_params(Some(event_loop), Default::default());
     executor.add_plugin(Game::default());
@@ -615,7 +628,7 @@ fn init_workspace(base_path: &Path, vcs: &str) -> Result<(), String> {
         format!(
             r#"
 [workspace]
-members = ["editor", "executor", "executor-wasm", "executor-android", "game", "game-dylib"]
+members = ["editor", "executor", "executor-wasm", "executor-android", "export-cli", "game", "game-dylib"]
 resolver = "2"
 
 [workspace.dependencies.fyrox]
@@ -624,6 +637,8 @@ default-features = false
 [workspace.dependencies.fyroxed_base]
 version = "{CURRENT_EDITOR_VERSION}"
 default-features = false
+[workspace.dependencies.fyrox-build-tools]
+version = "{CURRENT_EDITOR_VERSION}"
 
 # Separate build profiles for hot reloading. These profiles ensures that build artifacts for
 # hot reloading will be placed into their own folders and does not interfere with standard (static)
@@ -653,6 +668,12 @@ opt-level = 3
 "#,
         )?;
     }
+
+    // Write flake.nix for nixOS
+    write_file_binary(
+        base_path.join("flake.nix"),
+        include_bytes!("nixos/flake.nix"),
+    )?;
 
     Ok(())
 }
@@ -690,38 +711,46 @@ pub fn init_script(root_path: &Path, raw_name: &str) -> Result<(), String> {
         file_name,
         format!(
             r#"
+#[allow(unused_imports)]
+use fyrox::graph::prelude::*;
 use fyrox::{{
-    core::{{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*}},
+    core::{{visitor::prelude::*, reflect::prelude::*}},
     event::Event, script::{{ScriptContext, ScriptDeinitContext, ScriptTrait}},
+    plugin::error::GameResult
 }};
 
-#[derive(Visit, Reflect, Default, Debug, Clone, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "{script_uuid}")]
+#[derive(Visit, Reflect, Default, Debug, Clone)]
+#[reflect(type_uuid = "{script_uuid}")]
 #[visit(optional)]
 pub struct {script_name} {{
     // Add fields here.
 }}
 
 impl ScriptTrait for {script_name} {{
-    fn on_init(&mut self, context: &mut ScriptContext) {{
+    fn on_init(&mut self, context: &mut ScriptContext) -> GameResult {{
         // Put initialization logic here.
+        Ok(())
     }}
 
-    fn on_start(&mut self, context: &mut ScriptContext) {{
+    fn on_start(&mut self, context: &mut ScriptContext) -> GameResult {{
         // There should be a logic that depends on other scripts in scene.
         // It is called right after **all** scripts were initialized.
+        Ok(())
     }}
 
-    fn on_deinit(&mut self, context: &mut ScriptDeinitContext) {{
+    fn on_deinit(&mut self, context: &mut ScriptDeinitContext) -> GameResult {{
         // Put de-initialization logic here.
+        Ok(())
     }}
 
-    fn on_os_event(&mut self, event: &Event<()>, context: &mut ScriptContext) {{
+    fn on_os_event(&mut self, event: &Event<()>, context: &mut ScriptContext) -> GameResult {{
         // Respond to OS events here.
+        Ok(())
     }}
 
-    fn on_update(&mut self, context: &mut ScriptContext) {{
+    fn on_update(&mut self, context: &mut ScriptContext) -> GameResult {{
         // Put object logic here.
+        Ok(())
     }}
 }}
     "#
@@ -762,14 +791,16 @@ pub fn init_project(
         ));
     }
 
+    let name = convert_name(name);
     init_workspace(base_path, vcs)?;
     init_data(base_path, style)?;
-    init_game(base_path, name)?;
-    init_game_dylib(base_path, name)?;
-    init_editor(base_path, name)?;
-    init_executor(base_path, name)?;
-    init_wasm_executor(base_path, name)?;
-    init_android_executor(base_path, name)
+    init_game(base_path, &name)?;
+    init_game_dylib(base_path, &name)?;
+    init_editor(base_path, &name)?;
+    init_executor(base_path, &name)?;
+    init_wasm_executor(base_path, &name)?;
+    init_android_executor(base_path, &name)?;
+    init_export_cli(base_path, &name)
 }
 
 pub fn upgrade_project(root_path: &Path, version: &str, local: bool) -> Result<(), String> {
@@ -848,12 +879,22 @@ pub fn upgrade_project(root_path: &Path, version: &str, local: bool) -> Result<(
                                         scripts_table["path"] = value("../Fyrox/fyrox-scripts");
                                         dependencies["fyrox_scripts"] = scripts_table;
                                     }
+
+                                    if dependencies.contains_key("fyrox-build-tools") {
+                                        let mut scripts_table = table();
+                                        scripts_table["path"] = value("../Fyrox/fyrox-build-tools");
+                                        dependencies["fyrox-build-tools"] = scripts_table;
+                                    }
                                 } else {
                                     dependencies["fyrox"] = value(CURRENT_ENGINE_VERSION);
                                     dependencies["fyroxed_base"] = value(CURRENT_EDITOR_VERSION);
                                     if dependencies.contains_key("fyrox_scripts") {
                                         dependencies["fyrox_scripts"] =
                                             value(CURRENT_SCRIPTS_VERSION);
+                                    }
+                                    if dependencies.contains_key("fyrox-build-tools") {
+                                        dependencies["fyrox-build-tools"] =
+                                            value(CURRENT_ENGINE_VERSION);
                                     }
                                 }
                             } else if version == "nightly" {
@@ -862,6 +903,7 @@ pub fn upgrade_project(root_path: &Path, version: &str, local: bool) -> Result<(
 
                                 dependencies["fyrox"] = table.clone();
                                 dependencies["fyroxed_base"] = table.clone();
+                                dependencies["fyrox-build-tools"] = table.clone();
                             } else {
                                 dependencies["fyrox"] = value(version);
                                 if let Some((editor_version, scripts_version)) =
@@ -872,6 +914,9 @@ pub fn upgrade_project(root_path: &Path, version: &str, local: bool) -> Result<(
                                         if dependencies.contains_key("fyrox_scripts") {
                                             dependencies["fyrox_scripts"] = value(scripts_version);
                                         }
+                                    }
+                                    if dependencies.contains_key("fyrox-build-tools") {
+                                        dependencies["fyrox-build-tools"] = value(version);
                                     }
                                 } else {
                                     println!("WARNING: matching editor/scripts version not found!");

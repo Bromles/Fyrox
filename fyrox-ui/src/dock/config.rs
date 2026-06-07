@@ -18,15 +18,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::window::Window;
 use crate::{
     core::{algebra::Vector2, log::Log, pool::Handle, visitor::prelude::*, ImmutableString},
     dock::{Tile, TileBuilder, TileContent},
-    message::MessageDirection,
-    widget::WidgetBuilder,
-    window::WindowMessage,
-    Orientation, UiNode, UserInterface,
+    widget::{WidgetBuilder, WidgetMessage},
+    Orientation, UserInterface,
 };
-use fyrox_graph::{BaseSceneGraph, SceneGraph};
+use fyrox_graph::SceneGraph;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize)]
@@ -137,8 +136,8 @@ impl TileContentDescriptor {
 fn find_window(
     window_name: &ImmutableString,
     ui: &mut UserInterface,
-    windows: &[Handle<UiNode>],
-) -> Handle<UiNode> {
+    windows: &[Handle<Window>],
+) -> Handle<Window> {
     if window_name.is_empty() {
         Log::warn(
             "Window name is empty, wrong widget will be used as a \
@@ -147,11 +146,15 @@ fn find_window(
         );
     }
 
-    let window_handle = ui.find_handle(ui.root(), &mut |n| n.name == *window_name);
+    let window_handle = ui
+        .find_handle(ui.root(), &mut |n| {
+            n.is_or_has_field::<Window>() && n.name == *window_name
+        })
+        .to_variant();
 
     if window_handle.is_none() {
         for other_window_handle in windows.iter().cloned() {
-            if let Some(window_node) = ui.try_get(other_window_handle) {
+            if let Ok(window_node) = ui.try_get(other_window_handle) {
                 if &window_node.name == window_name {
                     return other_window_handle;
                 }
@@ -162,40 +165,29 @@ fn find_window(
 }
 
 impl TileDescriptor {
-    pub(super) fn from_tile_handle(handle: Handle<UiNode>, ui: &UserInterface) -> Self {
+    pub(super) fn from_tile_handle(handle: Handle<Tile>, ui: &UserInterface) -> Self {
         ui.try_get(handle)
-            .and_then(|t| t.query_component::<Tile>())
             .map(|t| Self {
                 content: TileContentDescriptor::from_tile(&t.content, ui),
             })
             .unwrap_or_default()
     }
 
-    fn from_tile_handle_slice(slice: &[Handle<UiNode>; 2], ui: &UserInterface) -> [Box<Self>; 2] {
+    fn from_tile_handle_slice(slice: &[Handle<Tile>; 2], ui: &UserInterface) -> [Box<Self>; 2] {
         [
             Box::new(Self::from_tile_handle(slice[0], ui)),
             Box::new(Self::from_tile_handle(slice[1], ui)),
         ]
     }
 
-    pub fn create_tile(
-        &self,
-        ui: &mut UserInterface,
-        windows: &[Handle<UiNode>],
-    ) -> Handle<UiNode> {
+    pub fn create_tile(&self, ui: &mut UserInterface, windows: &[Handle<Window>]) -> Handle<Tile> {
         TileBuilder::new(WidgetBuilder::new())
             .with_content(match &self.content {
                 TileContentDescriptor::Empty => TileContent::Empty,
                 TileContentDescriptor::Window(window_name) => {
                     let window_handle = find_window(window_name, ui, windows);
                     if window_handle.is_some() {
-                        ui.send_message(WindowMessage::open(
-                            window_handle,
-                            MessageDirection::ToWidget,
-                            false,
-                            true,
-                        ));
-
+                        ui.send(window_handle, WidgetMessage::Visibility(true));
                         TileContent::Window(window_handle)
                     } else {
                         TileContent::Empty

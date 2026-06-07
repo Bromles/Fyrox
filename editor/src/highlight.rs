@@ -22,17 +22,17 @@ use crate::{
     fyrox::{
         core::{color::Color, pool::Handle, sstorage::ImmutableString},
         fxhash::FxHashSet,
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
+        graphics::{
+            error::FrameworkError,
+            framebuffer::{Attachment, GpuFrameBuffer},
+            gpu_texture::PixelKind,
+            server::GraphicsServer,
+        },
         renderer::{
             bundle::{BundleRenderContext, RenderContext, RenderDataBundleStorage},
             cache::shader::{
                 binding, property, PropertyGroup, RenderMaterial, RenderPassContainer,
-            },
-            framework::{
-                error::FrameworkError,
-                framebuffer::{Attachment, GpuFrameBuffer},
-                gpu_texture::PixelKind,
-                server::GraphicsServer,
             },
             make_viewport_matrix, RenderPassStatistics, SceneRenderPass, SceneRenderPassContext,
         },

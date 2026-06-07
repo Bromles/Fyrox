@@ -19,65 +19,68 @@
 // SOFTWARE.
 
 use fyrox::scene::terrain::brushstroke::{BrushSender, BrushThreadMessage, UndoData};
+use std::fmt::{Debug, Formatter};
 
-use crate::fyrox::core::uuid::{uuid, Uuid};
-use crate::fyrox::core::TypeUuidProvider;
-use crate::fyrox::graph::BaseSceneGraph;
-use crate::fyrox::gui::{HorizontalAlignment, Thickness, VerticalAlignment};
-use crate::fyrox::{
-    core::{
-        algebra::{Matrix2, Matrix4, Vector2, Vector3},
-        arrayvec::ArrayVec,
-        color::Color,
-        log::{Log, MessageKind},
-        math::vector_to_quat,
-        pool::Handle,
-    },
-    engine::Engine,
-    gui::{
-        inspector::{
-            editors::{
-                enumeration::EnumPropertyEditorDefinition, PropertyEditorDefinitionContainer,
-            },
-            Inspector, InspectorBuilder, InspectorContext, InspectorMessage, PropertyAction,
-        },
-        key::HotKey,
-        message::{MessageDirection, UiMessage},
-        widget::{WidgetBuilder, WidgetMessage},
-        window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, UiNode, UserInterface,
-    },
-    scene::{
-        base::BaseBuilder,
-        camera::Camera,
-        graph::Graph,
-        mesh::{
-            surface::{SurfaceBuilder, SurfaceData, SurfaceResource},
-            MeshBuilder, RenderPath,
-        },
-        node::Node,
-        terrain::brushstroke::{Brush, BrushMode, BrushShape, BrushStroke, BrushTarget},
-        terrain::{Terrain, TerrainRayCastResult},
-    },
-};
-use crate::interaction::make_interaction_mode_button;
-use crate::scene::controller::SceneController;
-use crate::scene::SelectionContainer;
 use crate::{
-    interaction::InteractionMode,
+    fyrox::{
+        core::{
+            algebra::{Matrix2, Matrix4, Vector2, Vector3},
+            arrayvec::ArrayVec,
+            color::Color,
+            log::{Log, MessageKind},
+            math::vector_to_quat,
+            pool::Handle,
+            reflect::prelude::*,
+            uuid::{uuid, Uuid},
+        },
+        engine::Engine,
+        graph::SceneGraph,
+        gui::{
+            inspector::{
+                editors::{
+                    enumeration::EnumPropertyEditorDefinition, PropertyEditorDefinitionContainer,
+                },
+                Inspector, InspectorBuilder, InspectorContext, InspectorMessage, PropertyAction,
+            },
+            key::HotKey,
+            message::UiMessage,
+            widget::{WidgetBuilder, WidgetMessage},
+            window::{WindowBuilder, WindowMessage, WindowTitle},
+            BuildContext, UserInterface,
+        },
+        gui::{HorizontalAlignment, Thickness, VerticalAlignment},
+        scene::{
+            base::BaseBuilder,
+            graph::Graph,
+            mesh::{
+                surface::{SurfaceBuilder, SurfaceData, SurfaceResource},
+                MeshBuilder, RenderPath,
+            },
+            node::Node,
+            terrain::{
+                brushstroke::{Brush, BrushMode, BrushShape, BrushStroke, BrushTarget},
+                Terrain, TerrainRayCastResult,
+            },
+        },
+    },
+    interaction::{make_interaction_mode_button, InteractionMode},
     make_color_material,
     message::MessageSender,
     scene::{
         commands::terrain::{
             ModifyTerrainHeightCommand, ModifyTerrainHolesCommand, ModifyTerrainLayerMaskCommand,
         },
-        GameScene, Selection,
+        controller::SceneController,
+        GameScene, Selection, SelectionContainer,
     },
     settings::Settings,
-    MSG_SYNC_FLAG,
 };
 
+use fyrox::gui::button::Button;
+use fyrox::gui::image::Image;
 use fyrox::gui::inspector::InspectorContextArgs;
+use fyrox::gui::window::{Window, WindowAlignment};
+use fyrox::scene::mesh::Mesh;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 
@@ -103,6 +106,12 @@ fn handle_undo_chunks(undo_chunks: UndoData, sender: &MessageSender) {
     }
 }
 
+#[derive(Reflect)]
+#[reflect(
+    non_cloneable,
+    type_uuid = "bc19eff3-3e3a-49c0-9a9d-17d36fccc34e",
+    hide_all
+)]
 pub struct TerrainInteractionMode {
     message_sender: MessageSender,
     brush_sender: Option<BrushSender>,
@@ -113,7 +122,13 @@ pub struct TerrainInteractionMode {
     brush_value: f32,
     brush: Brush,
     brush_panel: BrushPanel,
-    scene_viewer_frame: Handle<UiNode>,
+    scene_viewer_frame: Handle<Image>,
+}
+
+impl Debug for TerrainInteractionMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TerrainInteractionMode")
+    }
 }
 
 impl TerrainInteractionMode {
@@ -121,7 +136,7 @@ impl TerrainInteractionMode {
         game_scene: &GameScene,
         engine: &mut Engine,
         message_sender: MessageSender,
-        scene_viewer_frame: Handle<UiNode>,
+        scene_viewer_frame: Handle<Image>,
     ) -> Self {
         let brush = Brush {
             shape: BrushShape::Circle { radius: 1.0 },
@@ -229,7 +244,7 @@ impl TerrainInteractionMode {
 }
 
 pub struct BrushGizmo {
-    brush: Handle<Node>,
+    brush: Handle<Mesh>,
 }
 
 impl BrushGizmo {
@@ -261,12 +276,6 @@ impl BrushGizmo {
     }
 }
 
-impl TypeUuidProvider for TerrainInteractionMode {
-    fn type_uuid() -> Uuid {
-        uuid!("bc19eff3-3e3a-49c0-9a9d-17d36fccc34e")
-    }
-}
-
 impl InteractionMode for TerrainInteractionMode {
     fn on_left_mouse_button_down(
         &mut self,
@@ -290,31 +299,27 @@ impl InteractionMode for TerrainInteractionMode {
                     .shift;
                 let graph = &mut engine.scenes[game_scene.scene].graph;
                 let handle = selection.nodes()[0];
-                let ray = graph[game_scene.camera_controller.camera]
-                    .cast::<Camera>()
-                    .map(|cam| cam.make_ray(mouse_pos, frame_size));
+                let ray =
+                    graph[game_scene.camera_controller.camera].make_ray(mouse_pos, frame_size);
                 if let Some(terrain) = graph[handle].cast_mut::<Terrain>() {
                     // Pick height value at the point of interaction.
                     if let BrushMode::Flatten = &mut self.brush.mode {
-                        if let Some(ray) = ray {
-                            let mut intersections = ArrayVec::<TerrainRayCastResult, 128>::new();
-                            terrain.raycast(ray, &mut intersections, true);
+                        let mut intersections = ArrayVec::<TerrainRayCastResult, 128>::new();
+                        terrain.raycast(ray, &mut intersections, true);
 
-                            let first = intersections.first();
-                            if let (Some(closest), BrushTarget::HeightMap) =
-                                (first, self.brush.target)
-                            {
-                                self.brush_value = closest.height;
-                            } else if let Some(closest) = first {
-                                let p = terrain.project(closest.position);
-                                self.brush_value = if let Some(position) = p {
-                                    terrain.interpolate_value(position, self.brush.target)
-                                } else {
-                                    0.0
-                                };
+                        let first = intersections.first();
+                        if let (Some(closest), BrushTarget::HeightMap) = (first, self.brush.target)
+                        {
+                            self.brush_value = closest.height;
+                        } else if let Some(closest) = first {
+                            let p = terrain.project(closest.position);
+                            self.brush_value = if let Some(position) = p {
+                                terrain.interpolate_value(position, self.brush.target)
                             } else {
-                                self.brush_value = 0.0;
-                            }
+                                0.0
+                            };
+                        } else {
+                            self.brush_value = 0.0;
                         }
                     }
                     if self.brush.target == BrushTarget::HoleMask && !terrain.holes_enabled() {
@@ -369,35 +374,34 @@ impl InteractionMode for TerrainInteractionMode {
                 let handle = selection.nodes()[0];
 
                 let camera = &graph[game_scene.camera_controller.camera];
-                if let Some(camera) = camera.cast::<Camera>() {
-                    let ray = camera.make_ray(mouse_position, frame_size);
-                    if let Some(terrain) = graph[handle].cast_mut::<Terrain>() {
-                        let mut intersections = ArrayVec::<TerrainRayCastResult, 128>::new();
-                        terrain.raycast(ray, &mut intersections, true);
 
-                        if let Some(closest) = intersections.first() {
-                            self.brush_position = closest.position;
-                            gizmo_visible = true;
+                let ray = camera.make_ray(mouse_position, frame_size);
+                if let Some(terrain) = graph[handle].cast_mut::<Terrain>() {
+                    let mut intersections = ArrayVec::<TerrainRayCastResult, 128>::new();
+                    terrain.raycast(ray, &mut intersections, true);
 
-                            if self.interacting {
-                                self.draw(terrain);
-                            }
+                    if let Some(closest) = intersections.first() {
+                        self.brush_position = closest.position;
+                        gizmo_visible = true;
 
-                            let scale = match self.brush.shape {
-                                BrushShape::Circle { radius } => {
-                                    Vector3::new(radius * 2.0, radius * 2.0, 1.0)
-                                }
-                                BrushShape::Rectangle { width, length } => {
-                                    Vector3::new(width, length, 1.0)
-                                }
-                            };
-
-                            graph[self.brush_gizmo.brush]
-                                .local_transform_mut()
-                                .set_position(closest.position)
-                                .set_scale(scale)
-                                .set_rotation(vector_to_quat(closest.normal));
+                        if self.interacting {
+                            self.draw(terrain);
                         }
+
+                        let scale = match self.brush.shape {
+                            BrushShape::Circle { radius } => {
+                                Vector3::new(radius * 2.0, radius * 2.0, 1.0)
+                            }
+                            BrushShape::Rectangle { width, length } => {
+                                Vector3::new(width, length, 1.0)
+                            }
+                        };
+
+                        graph[self.brush_gizmo.brush]
+                            .local_transform_mut()
+                            .set_position(closest.position)
+                            .set_scale(scale)
+                            .set_rotation(vector_to_quat(closest.normal));
                     }
                 }
             }
@@ -421,19 +425,19 @@ impl InteractionMode for TerrainInteractionMode {
         self.brush_panel
             .sync_to_model(engine.user_interfaces.first_mut(), &self.brush);
 
-        engine
-            .user_interfaces
-            .first_mut()
-            .send_message(WindowMessage::open_and_align(
-                self.brush_panel.window,
-                MessageDirection::ToWidget,
-                self.scene_viewer_frame,
-                HorizontalAlignment::Right,
-                VerticalAlignment::Top,
-                Thickness::top_right(5.0),
-                false,
-                false,
-            ));
+        engine.user_interfaces.first_mut().send(
+            self.brush_panel.window,
+            WindowMessage::Open {
+                alignment: WindowAlignment::Relative {
+                    relative_to: self.scene_viewer_frame.to_base(),
+                    horizontal_alignment: HorizontalAlignment::Right,
+                    vertical_alignment: VerticalAlignment::Top,
+                    margin: Thickness::top_right(5.0),
+                },
+                modal: false,
+                focus_content: false,
+            },
+        );
     }
 
     fn deactivate(&mut self, controller: &dyn SceneController, engine: &mut Engine) {
@@ -448,11 +452,8 @@ impl InteractionMode for TerrainInteractionMode {
 
         engine
             .user_interfaces
-            .first_mut()
-            .send_message(WindowMessage::close(
-                self.brush_panel.window,
-                MessageDirection::ToWidget,
-            ));
+            .first()
+            .send(self.brush_panel.window, WindowMessage::Close);
     }
 
     fn handle_ui_message(
@@ -472,11 +473,8 @@ impl InteractionMode for TerrainInteractionMode {
     fn on_drop(&mut self, engine: &mut Engine) {
         engine
             .user_interfaces
-            .first_mut()
-            .send_message(WidgetMessage::remove(
-                self.brush_panel.window,
-                MessageDirection::ToWidget,
-            ));
+            .first()
+            .send(self.brush_panel.window, WidgetMessage::Remove);
     }
 
     fn on_hot_key_pressed(
@@ -542,7 +540,7 @@ impl InteractionMode for TerrainInteractionMode {
         processed
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         let terrain_mode_tooltip =
             "Edit Terrain - Shortcut: [6]\n\nTerrain edit mode allows you to modify selected \
         terrain.";
@@ -556,13 +554,13 @@ impl InteractionMode for TerrainInteractionMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        Self::type_info().type_uuid
     }
 }
 
 struct BrushPanel {
-    window: Handle<UiNode>,
-    inspector: Handle<UiNode>,
+    window: Handle<Window>,
+    inspector: Handle<Inspector>,
 }
 
 fn make_brush_mode_enum_property_editor_definition() -> EnumPropertyEditorDefinition<BrushMode> {
@@ -645,12 +643,13 @@ impl BrushPanel {
             ctx,
             definition_container: Arc::new(property_editors),
             environment: None,
-            sync_flag: MSG_SYNC_FLAG,
             layer_index: 0,
             generate_property_string_values: true,
             filter: Default::default(),
             name_column_width: 150.0,
+            hide_name_column: false,
             base_path: Default::default(),
+            has_parent_object: false,
         });
 
         let inspector;
@@ -671,13 +670,7 @@ impl BrushPanel {
     }
 
     fn sync_to_model(&self, ui: &mut UserInterface, brush: &Brush) {
-        let ctx = ui
-            .node(self.inspector)
-            .cast::<Inspector>()
-            .expect("Must be Inspector!")
-            .context()
-            .clone();
-
+        let ctx = ui[self.inspector].context().clone();
         if let Err(e) = ctx.sync(brush, ui, 0, true, Default::default(), Default::default()) {
             Log::writeln(
                 MessageKind::Error,
@@ -687,19 +680,16 @@ impl BrushPanel {
     }
 
     fn handle_ui_message(&self, message: &UiMessage, brush: &mut Brush) -> Option<()> {
-        if message.destination() == self.inspector
-            && message.direction() == MessageDirection::FromWidget
+        if let Some(InspectorMessage::PropertyChanged(msg)) =
+            message.data_from::<InspectorMessage>(self.inspector)
         {
-            if let Some(InspectorMessage::PropertyChanged(msg)) = message.data::<InspectorMessage>()
-            {
-                PropertyAction::from_field_kind(&msg.value).apply(
-                    &msg.path(),
-                    brush,
-                    &mut |result| {
-                        Log::verify(result);
-                    },
-                );
-            }
+            PropertyAction::from_field_action(&msg.action).apply(
+                &msg.path(),
+                brush,
+                &mut |result| {
+                    Log::verify(result);
+                },
+            );
         }
         Some(())
     }

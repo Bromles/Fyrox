@@ -19,15 +19,11 @@
 // SOFTWARE.
 
 use crate::fyrox::{
-    core::{
-        log::Log, parking_lot::Mutex, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, visitor::prelude::*,
-    },
+    core::{log::Log, parking_lot::Mutex, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     engine::SerializationContext,
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     gui::{
         button::{ButtonBuilder, ButtonMessage},
-        define_constructor,
         dropdown_list::{DropdownList, DropdownListMessage},
         grid::{GridBuilder, GridDimension},
         inspector::{
@@ -36,7 +32,7 @@ use crate::fyrox::{
                 PropertyEditorDefinitionContainer, PropertyEditorInstance,
                 PropertyEditorMessageContext, PropertyEditorTranslationContext,
             },
-            make_expander_container, FieldKind, Inspector, InspectorBuilder, InspectorContext,
+            make_expander_container, FieldAction, Inspector, InspectorBuilder, InspectorContext,
             InspectorEnvironment, InspectorError, InspectorMessage, PropertyChanged,
             PropertyFilter,
         },
@@ -50,13 +46,15 @@ use crate::fyrox::{
 };
 use crate::plugins::inspector::EditorEnvironment;
 use crate::{
-    send_sync_message,
     settings::{general::ScriptEditor, SettingsData},
-    DropdownListBuilder, MSG_SYNC_FLAG,
+    DropdownListBuilder,
 };
 
+use fyrox::gui::button::Button;
 use fyrox::gui::inspector::InspectorContextArgs;
+use fyrox::gui::message::MessageData;
 use fyrox::gui::utils::make_dropdown_list_option;
+use fyrox::gui::{Thickness, VerticalAlignment};
 use std::{
     any::TypeId,
     cell::Cell,
@@ -69,19 +67,18 @@ pub enum ScriptPropertyEditorMessage {
     Value(Option<Uuid>),
     PropertyChanged(PropertyChanged),
 }
+impl MessageData for ScriptPropertyEditorMessage {}
 
-impl ScriptPropertyEditorMessage {
-    define_constructor!(ScriptPropertyEditorMessage:Value => fn value(Option<Uuid>), layout: false);
-    define_constructor!(ScriptPropertyEditorMessage:PropertyChanged => fn property_changed(PropertyChanged), layout: false);
-}
-
-#[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "f43c3bfb-8b39-4cc0-be77-04141a45822e"
+)]
 pub struct ScriptPropertyEditor {
     widget: Widget,
-    inspector: Handle<UiNode>,
+    inspector: Handle<Inspector>,
     variant_selector: Handle<UiNode>,
-    open_in_ide_button: Handle<UiNode>,
+    open_in_ide_button: Handle<Button>,
     selected_script_uuid: Option<Uuid>,
     need_context_update: Cell<bool>,
 }
@@ -100,96 +97,82 @@ impl DerefMut for ScriptPropertyEditor {
     }
 }
 
-uuid_provider!(ScriptPropertyEditor = "f43c3bfb-8b39-4cc0-be77-04141a45822e");
-
 impl Control for ScriptPropertyEditor {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(ScriptPropertyEditorMessage::Value(id)) = message.data() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-                && self.selected_script_uuid != *id
-            {
+        if let Some(ScriptPropertyEditorMessage::Value(id)) = message.data_for(self.handle()) {
+            if self.selected_script_uuid != *id {
                 self.selected_script_uuid = *id;
                 self.need_context_update.set(true);
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
             }
         } else if let Some(InspectorMessage::PropertyChanged(property_changed)) =
-            message.data::<InspectorMessage>()
+            message.data_from(self.inspector)
         {
-            if message.destination() == self.inspector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                ui.send_message(ScriptPropertyEditorMessage::property_changed(
-                    self.handle(),
-                    MessageDirection::FromWidget,
-                    property_changed.clone(),
-                ))
-            }
+            ui.post(
+                self.handle(),
+                ScriptPropertyEditorMessage::PropertyChanged(property_changed.clone()),
+            )
         }
     }
 
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
-        if let Some(ButtonMessage::Click) = message.data() {
-            if message.destination() == self.open_in_ide_button
-                && message.direction() == MessageDirection::FromWidget
-            {
-                if let Some(uuid) = self.selected_script_uuid {
-                    if let Some(selected_item) = ui
-                        .node(self.variant_selector)
-                        .cast::<DropdownList>()
-                        .expect("Must be DropdownList")
-                        .items
-                        .iter()
-                        .map(|el| {
-                            ui.node(*el)
-                                .user_data_cloned::<(Uuid, Option<String>)>()
-                                .expect("Must be script (UUID, Option<String>)")
-                        })
-                        .find(|el| el.0 == uuid)
-                    {
-                        let (_, script_path) = selected_item;
+        if let Some(ButtonMessage::Click) = message.data_from(self.open_in_ide_button) {
+            if let Some(uuid) = self.selected_script_uuid {
+                if let Some(selected_item) = ui
+                    .node(self.variant_selector)
+                    .cast::<DropdownList>()
+                    .expect("Must be DropdownList")
+                    .items
+                    .iter()
+                    .map(|el| {
+                        ui.node(*el)
+                            .user_data_cloned::<(Uuid, Option<String>)>()
+                            .expect("Must be script (UUID, Option<String>)")
+                    })
+                    .find(|el| el.0 == uuid)
+                {
+                    let (_, script_path) = selected_item;
 
-                        let cd = std::env::current_dir().expect("Must be current directory");
+                    let cd = std::env::current_dir().expect("Must be current directory");
 
-                        if let (cd, Some(script_path)) = (cd, script_path) {
-                            if let Some(cd) = cd.to_str() {
-                                let script_full_path = format!("{cd}/{script_path}");
+                    if let (cd, Some(script_path)) = (cd, script_path) {
+                        if let Some(cd) = cd.to_str() {
+                            let script_full_path = format!("{cd}/{script_path}");
 
-                                let settings = SettingsData::load();
+                            let settings = SettingsData::load();
 
-                                let script_editor = settings
-                                    .expect("Must be editor settings data")
-                                    .general
-                                    .script_editor;
+                            let script_editor = settings
+                                .expect("Must be editor settings data")
+                                .general
+                                .script_editor;
 
-                                let script_editor = match &script_editor {
-                                    ScriptEditor::VSCode => {
-                                        #[cfg(target_os = "macos")]
-                                        let app_name = "Visual Studio Code";
-                                        #[cfg(not(target_os = "macos"))]
-                                        let app_name = "code";
+                            let script_editor = match &script_editor {
+                                ScriptEditor::VSCode => {
+                                    #[cfg(target_os = "macos")]
+                                    let app_name = "Visual Studio Code";
+                                    #[cfg(not(target_os = "macos"))]
+                                    let app_name = "code";
 
-                                        Some(app_name)
-                                    }
-                                    ScriptEditor::XCode => Some("xcode"),
-                                    ScriptEditor::Emacs => Some("emacs"),
-                                    ScriptEditor::Zed => Some("zed"),
-                                    ScriptEditor::SystemDefault => None,
-                                };
+                                    Some(app_name)
+                                }
+                                ScriptEditor::XCode => Some("xcode"),
+                                ScriptEditor::Emacs => Some("emacs"),
+                                ScriptEditor::Zed => Some("zed"),
+                                ScriptEditor::SystemDefault => None,
+                            };
 
-                                let open_result = if let Some(editor) = script_editor {
-                                    open::with(&script_full_path, editor)
-                                } else {
-                                    open::that(&script_full_path)
-                                };
+                            let open_result = if let Some(editor) = script_editor {
+                                open::with(&script_full_path, editor)
+                            } else {
+                                open::that(&script_full_path)
+                            };
 
-                                if let Err(e) = open_result {
-                                    Log::err(format!(
+                            if let Err(e) = open_result {
+                                Log::err(format!(
                                         "Error opening script {script_full_path} in external editor: {e}"
                                     ))
-                                }
                             }
                         }
                     }
@@ -197,27 +180,24 @@ impl Control for ScriptPropertyEditor {
             }
         }
 
-        if let Some(DropdownListMessage::SelectionChanged(Some(i))) = message.data() {
-            if message.destination() == self.variant_selector
-                && message.direction() == MessageDirection::FromWidget
-            {
-                let selected_item = ui
-                    .node(self.variant_selector)
-                    .cast::<DropdownList>()
-                    .expect("Must be DropdownList")
-                    .items[*i];
+        if let Some(DropdownListMessage::Selection(Some(i))) =
+            message.data_from(self.variant_selector)
+        {
+            let selected_item = ui
+                .node(self.variant_selector)
+                .cast::<DropdownList>()
+                .expect("Must be DropdownList")
+                .items[*i];
 
-                let new_selected_script_data = ui
-                    .node(selected_item)
-                    .user_data_cloned::<(Uuid, Option<String>)>()
-                    .expect("Must be script (UUID, Option<String>)");
+            let new_selected_script_data = ui
+                .node(selected_item)
+                .user_data_cloned::<(Uuid, Option<String>)>()
+                .expect("Must be script (UUID, Option<String>)");
 
-                ui.send_message(ScriptPropertyEditorMessage::value(
-                    self.handle(),
-                    MessageDirection::ToWidget,
-                    Some(new_selected_script_data.0),
-                ));
-            }
+            ui.send(
+                self.handle(),
+                ScriptPropertyEditorMessage::Value(Some(new_selected_script_data.0)),
+            );
         }
     }
 }
@@ -233,31 +213,32 @@ impl ScriptPropertyEditorBuilder {
 
     pub fn build(
         self,
-        open_in_ide_button: Handle<UiNode>,
+        open_in_ide_button: Handle<Button>,
         variant_selector: Handle<UiNode>,
         script_uuid: Option<Uuid>,
         environment: Option<Arc<dyn InspectorEnvironment>>,
-        sync_flag: u64,
         layer_index: usize,
         generate_property_string_values: bool,
         filter: PropertyFilter,
         script: &Option<Script>,
         definition_container: Arc<PropertyEditorDefinitionContainer>,
         name_column_width: f32,
+        has_parent_object: bool,
         ctx: &mut BuildContext,
-    ) -> Handle<UiNode> {
+    ) -> Handle<ScriptPropertyEditor> {
         let context = script.as_ref().map(|script| {
             InspectorContext::from_object(InspectorContextArgs {
                 object: script,
                 ctx,
                 definition_container,
                 environment,
-                sync_flag,
                 layer_index,
                 generate_property_string_values,
                 filter,
                 name_column_width,
+                hide_name_column: false,
                 base_path: Default::default(),
+                has_parent_object,
             })
         });
 
@@ -265,7 +246,7 @@ impl ScriptPropertyEditorBuilder {
             .with_opt_context(context)
             .build(ctx);
 
-        ctx.add_node(UiNode::new(ScriptPropertyEditor {
+        ctx.add(ScriptPropertyEditor {
             widget: self
                 .widget_builder
                 .with_preview_messages(true)
@@ -276,7 +257,7 @@ impl ScriptPropertyEditorBuilder {
             open_in_ide_button,
             inspector,
             need_context_update: Cell::new(false),
-        }))
+        })
     }
 }
 
@@ -350,16 +331,19 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                 selected_script(environment.serialization_context.clone(), value).unwrap_or(0),
             )
             .with_items(items)
-            .build(ctx.build_context);
+            .build(ctx.build_context)
+            .to_base();
 
         let open_in_ide = ButtonBuilder::new(
             WidgetBuilder::new()
+                .with_margin(Thickness::left(4.0))
                 .on_column(1)
                 .with_tooltip(make_simple_tooltip(ctx.build_context, "Open in IDE")),
         )
         .with_content(
-            TextBuilder::new(WidgetBuilder::new())
+            TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(3.0)))
                 .with_text("Edit...")
+                .with_vertical_text_alignment(VerticalAlignment::Center)
                 .build(ctx.build_context),
         )
         .build(ctx.build_context);
@@ -378,7 +362,7 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
-            ctx.property_info.description,
+            ctx.property_info.doc,
             script_selector_panel,
             {
                 editor = ScriptPropertyEditorBuilder::new(WidgetBuilder::new()).build(
@@ -386,22 +370,26 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                     variant_selector,
                     value.as_ref().map(|s| s.id()),
                     ctx.environment.clone(),
-                    ctx.sync_flag,
                     ctx.layer_index,
                     ctx.generate_property_string_values,
                     ctx.filter,
                     value,
                     ctx.definition_container.clone(),
                     ctx.name_column_width,
+                    ctx.has_parent_object,
                     ctx.build_context,
                 );
                 editor
             },
             ctx.name_column_width,
+            ctx.hide_name_column,
             ctx.build_context,
         );
 
-        Ok(PropertyEditorInstance::Custom { container, editor })
+        Ok(PropertyEditorInstance::Custom {
+            container,
+            editor: editor.to_base(),
+        })
     }
 
     fn create_message(
@@ -438,21 +426,13 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                 .values()
                 .count()
         {
-            send_sync_message(
-                ctx.ui,
-                DropdownListMessage::items(
-                    instance_ref.variant_selector,
-                    MessageDirection::ToWidget,
-                    new_script_definitions_items,
-                ),
+            ctx.ui.send_sync(
+                instance_ref.variant_selector,
+                DropdownListMessage::Items(new_script_definitions_items),
             );
-            send_sync_message(
-                ctx.ui,
-                ScriptPropertyEditorMessage::value(
-                    ctx.instance,
-                    MessageDirection::ToWidget,
-                    value.as_ref().map(|s| s.id()),
-                ),
+            ctx.ui.send_sync(
+                ctx.instance,
+                ScriptPropertyEditorMessage::Value(value.as_ref().map(|s| s.id())),
             );
         }
 
@@ -461,13 +441,9 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
         {
             instance_ref.need_context_update.set(false);
 
-            send_sync_message(
-                ctx.ui,
-                ScriptPropertyEditorMessage::value(
-                    ctx.instance,
-                    MessageDirection::ToWidget,
-                    value.as_ref().map(|s| s.id()),
-                ),
+            ctx.ui.send_sync(
+                ctx.instance,
+                ScriptPropertyEditorMessage::Value(value.as_ref().map(|s| s.id())),
             );
 
             let inspector = instance_ref.inspector;
@@ -480,29 +456,24 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                         ctx: &mut ctx.ui.build_ctx(),
                         definition_container: ctx.definition_container.clone(),
                         environment: ctx.environment.clone(),
-                        sync_flag: ctx.sync_flag,
                         layer_index: ctx.layer_index + 1,
                         generate_property_string_values: ctx.generate_property_string_values,
                         filter: ctx.filter,
                         name_column_width: ctx.name_column_width,
+                        hide_name_column: false,
                         base_path: Default::default(),
+                        has_parent_object: ctx.has_parent_object,
                     })
                 })
                 .unwrap_or_default();
 
-            let mut msg = InspectorMessage::context(inspector, MessageDirection::ToWidget, context);
-            msg.flags = MSG_SYNC_FLAG;
-            Ok(Some(msg))
+            Ok(Some(UiMessage::for_widget(
+                inspector,
+                InspectorMessage::Context(context),
+            )))
         } else {
             let layer_index = ctx.layer_index;
-            let inspector_ctx = ctx
-                .ui
-                .node(instance_ref.inspector)
-                .cast::<Inspector>()
-                .expect("Must be Inspector!")
-                .context()
-                .clone();
-
+            let inspector_ctx = ctx.ui[instance_ref.inspector].context().clone();
             if let Some(value) = value.as_ref() {
                 if let Err(e) = inspector_ctx.sync(
                     value,
@@ -537,7 +508,7 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
 
                             return Some(PropertyChanged {
                                 name: ctx.name.to_string(),
-                                value: FieldKind::object(script),
+                                action: FieldAction::object(script),
                             });
                         }
                     }
@@ -547,7 +518,9 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                             // It is needed because we're editing compound type in this editor.
                             name: ctx.name.to_string() + ".Some@0",
 
-                            value: FieldKind::Inspectable(Box::new(property_changed.clone())),
+                            action: FieldAction::InspectableAction(Box::new(
+                                property_changed.clone(),
+                            )),
                         });
                     }
                 }

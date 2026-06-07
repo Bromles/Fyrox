@@ -26,7 +26,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     widget::WidgetBuilder,
@@ -55,12 +55,9 @@ impl PropertyEditorDefinition for CurvePropertyEditorDefinition {
         .with_curves(vec![value.clone()])
         .build(ctx.build_context);
         ctx.build_context
-            .send_message(CurveEditorMessage::zoom_to_fit(
-                editor,
-                MessageDirection::ToWidget,
-                true,
-            ));
-        Ok(PropertyEditorInstance::Simple { editor })
+            .inner()
+            .send(editor, CurveEditorMessage::ZoomToFit { after_layout: true });
+        Ok(PropertyEditorInstance::simple(editor))
     }
 
     fn create_message(
@@ -68,10 +65,9 @@ impl PropertyEditorDefinition for CurvePropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Curve>()?;
-        Ok(Some(CurveEditorMessage::sync(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            vec![value.clone()],
+            CurveEditorMessage::Sync(vec![value.clone()]),
         )))
     }
 
@@ -81,7 +77,7 @@ impl PropertyEditorDefinition for CurvePropertyEditorDefinition {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
 
-                    value: FieldKind::object(value.first().cloned().unwrap()),
+                    action: FieldAction::object(value.first().cloned().unwrap()),
                 });
             }
         }

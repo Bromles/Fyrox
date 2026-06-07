@@ -24,19 +24,13 @@
 //! widgets and does its own synchronization and message handling, while
 //! `TileInspector` is just responsible for managing the `TileEditor` objects.
 
-use std::fmt::Debug;
-
 use crate::{
     command::{Command, CommandGroup},
     plugins::material::editor::{MaterialFieldEditorBuilder, MaterialFieldMessage},
-    send_sync_message, MSG_SYNC_FLAG,
 };
 use fyrox::{
     asset::ResourceDataRef,
-    core::{
-        algebra::Vector2, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
+    core::{algebra::Vector2, pool::Handle, reflect::prelude::*, visitor::prelude::*, SafeLock},
     gui::{
         button::{Button, ButtonMessage},
         decorator::DecoratorMessage,
@@ -53,9 +47,16 @@ use fyrox::{
     material::{MaterialResource, MaterialResourceExtension},
     scene::tilemap::{brush::*, tileset::*, *},
 };
+use std::fmt::Debug;
+use std::sync::mpsc::Sender;
 
 use super::*;
+use crate::asset::preview::cache::IconRequest;
+use crate::plugins::material::editor::MaterialFieldEditor;
 use commands::*;
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::grid::Grid;
+use fyrox::gui::text::Text;
 use palette::*;
 
 pub const FIELD_LABEL_WIDTH: f32 = 100.0;
@@ -72,8 +73,8 @@ impl<I: Iterator> Iterator for OptionIterator<I> {
 
 pub struct TileEditorStateRef {
     pub page: Option<Vector2<i32>>,
-    pub pages_palette: Handle<UiNode>,
-    pub tiles_palette: Handle<UiNode>,
+    pub pages_palette: Handle<PaletteWidget>,
+    pub tiles_palette: Handle<PaletteWidget>,
     pub state: TileDrawStateRef,
     pub tile_book: TileBook,
 }
@@ -98,10 +99,10 @@ pub struct TileEditorState<'a> {
     page: Option<Vector2<i32>>,
     /// The handle of the palette widget for pages. This is used with `state` to determine whether
     /// the current selection is a page.
-    pages_palette: Handle<UiNode>,
+    pages_palette: Handle<PaletteWidget>,
     /// The handle of the palette widget for tiles. This is used with `state` to determine whether
     /// the current selection is a tile.
-    tiles_palette: Handle<UiNode>,
+    tiles_palette: Handle<PaletteWidget>,
     /// The [`TileDrawState`] that contains the currently selected tiles.
     /// It is Option so that it can be briefly taken and then returned as needed,
     /// but otherwise it can always be safely assumed to be `Some`.
@@ -441,7 +442,7 @@ fn make_button(
     row: usize,
     column: usize,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_row(row)
@@ -454,30 +455,26 @@ fn make_button(
     .build(ctx)
 }
 
-fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_label(name: &str, ctx: &mut BuildContext) -> Handle<Text> {
     TextBuilder::new(WidgetBuilder::new())
         .with_text(name)
         .build(ctx)
 }
 
-fn highlight_tool_button(button: Handle<UiNode>, highlight: bool, ui: &UserInterface) {
+fn highlight_tool_button(button: Handle<Button>, highlight: bool, ui: &UserInterface) {
     if button.is_none() {
         return;
     }
-    let decorator = *ui.try_get_of_type::<Button>(button).unwrap().decorator;
-    ui.send_message(DecoratorMessage::select(
-        decorator,
-        MessageDirection::ToWidget,
-        highlight,
-    ));
+    let decorator = *ui[button].decorator;
+    ui.send(decorator, DecoratorMessage::Select(highlight));
 }
 
-fn send_visibility(ui: &UserInterface, destination: Handle<UiNode>, visible: bool) {
-    ui.send_message(WidgetMessage::visibility(
-        destination,
-        MessageDirection::ToWidget,
-        visible,
-    ));
+fn send_visibility(
+    ui: &UserInterface,
+    destination: Handle<impl ObjectOrVariant<UiNode>>,
+    visible: bool,
+) {
+    ui.send(destination, WidgetMessage::Visibility(visible));
 }
 
 fn make_property_editors(
@@ -548,8 +545,9 @@ fn find_collider_value(
 }
 
 #[derive(Clone, Default, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "9c65682b-0160-443c-95fc-0b88f86a497b")]
 struct InspectorField {
-    handle: Handle<UiNode>,
+    handle: Handle<Grid>,
     field: Handle<UiNode>,
 }
 
@@ -574,6 +572,7 @@ impl InspectorField {
 
 /// Object that keeps track of the editors for all the property layers.
 #[derive(Clone, Default, Visit, Reflect)]
+#[reflect(type_uuid = "89171a35-a7e7-4ce7-a017-124e8eec5746")]
 struct PropertyEditors {
     handle: Handle<UiNode>,
     content: Handle<UiNode>,
@@ -596,14 +595,16 @@ impl PropertyEditors {
         let mut editors = Vec::default();
         make_property_editors(state, &mut editors, ctx);
         let content = StackPanelBuilder::new(
-            WidgetBuilder::new().with_children(editors.iter().map(|v| v.1.lock().handle())),
+            WidgetBuilder::new().with_children(editors.iter().map(|v| v.1.safe_lock().handle())),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Self {
             handle: ExpanderBuilder::new(WidgetBuilder::new())
                 .with_header(make_label("Properties", ctx))
                 .with_content(content)
-                .build(ctx),
+                .build(ctx)
+                .to_base(),
             content,
             editors,
         }
@@ -616,23 +617,19 @@ impl PropertyEditors {
         if self.needs_rebuild(state) {
             // The list has changed somehow, so remove the old editors and construct an all new editor for each layer.
             for (_, editor) in self.editors.iter() {
-                ui.send_message(WidgetMessage::remove(
-                    editor.lock().handle(),
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(editor.safe_lock().handle(), WidgetMessage::Remove);
             }
             make_property_editors(state, &mut self.editors, &mut ui.build_ctx());
             for (_, editor) in self.editors.iter() {
-                ui.send_message(WidgetMessage::link(
-                    editor.lock().handle(),
-                    MessageDirection::ToWidget,
-                    self.content,
-                ));
+                ui.send(
+                    editor.safe_lock().handle(),
+                    WidgetMessage::LinkWith(self.content),
+                );
             }
         } else {
             // The list has not changed, so just sync each editor because one of the layers may have changed.
             for (_, editor) in self.editors.iter() {
-                editor.lock().sync_to_model(state, ui);
+                editor.safe_lock().sync_to_model(state, ui);
             }
         }
     }
@@ -649,6 +646,7 @@ impl PropertyEditors {
 
 /// Object that keeps track of the editors for all the collider layers.
 #[derive(Clone, Default, Visit, Reflect)]
+#[reflect(type_uuid = "97acc27d-c6fc-491b-9faa-6ad2f124f126")]
 struct ColliderEditors {
     handle: Handle<UiNode>,
     content: Handle<UiNode>,
@@ -671,14 +669,16 @@ impl ColliderEditors {
         let mut editors = Vec::default();
         make_collider_editors(state, &mut editors, ctx);
         let content = StackPanelBuilder::new(
-            WidgetBuilder::new().with_children(editors.iter().map(|v| v.1.lock().handle())),
+            WidgetBuilder::new().with_children(editors.iter().map(|v| v.1.safe_lock().handle())),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Self {
             handle: ExpanderBuilder::new(WidgetBuilder::new())
                 .with_header(make_label("Colliders", ctx))
                 .with_content(content)
-                .build(ctx),
+                .build(ctx)
+                .to_base(),
             content,
             editors,
         }
@@ -691,23 +691,19 @@ impl ColliderEditors {
         if self.needs_rebuild(state) {
             // The list has changed somehow, so remove the old editors and construct an all new editor for each layer.
             for (_, editor) in self.editors.iter() {
-                ui.send_message(WidgetMessage::remove(
-                    editor.lock().handle(),
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(editor.safe_lock().handle(), WidgetMessage::Remove);
             }
             make_collider_editors(state, &mut self.editors, &mut ui.build_ctx());
             for (_, editor) in self.editors.iter() {
-                ui.send_message(WidgetMessage::link(
-                    editor.lock().handle(),
-                    MessageDirection::ToWidget,
-                    self.content,
-                ));
+                ui.send(
+                    editor.safe_lock().handle(),
+                    WidgetMessage::LinkWith(self.content),
+                );
             }
         } else {
             // The list has not changed, so just sync each editor because one of the layers may have changed.
             for (_, editor) in self.editors.iter() {
-                editor.lock().sync_to_model(state, ui);
+                editor.safe_lock().sync_to_model(state, ui);
             }
         }
     }
@@ -723,6 +719,7 @@ impl ColliderEditors {
 }
 
 #[derive(Visit, Reflect, Clone)]
+#[reflect(type_uuid = "cd0f6716-3d7c-4c39-a2aa-98274ca6efa2")]
 pub struct TileInspector {
     handle: Handle<UiNode>,
     /// The shared state that represents the user's currently selected tool and tiles.
@@ -734,15 +731,15 @@ pub struct TileInspector {
     /// The tile set editor palette widget that allows the user to select a page.
     /// This is *not* a widget within the TileInspector, but the TileInspector needs to have
     /// the handle in order to determine where the user is selecting.
-    pages_palette: Handle<UiNode>,
+    pages_palette: Handle<PaletteWidget>,
     /// The tile set editor palette widget that allows the user to select a tile.
     /// This is *not* a widget within the TileInspector, but the TileInspector needs to have
     /// the handle in order to determine where the user is selecting.
-    tiles_palette: Handle<UiNode>,
+    tiles_palette: Handle<PaletteWidget>,
     /// The current resource to be edited.
     tile_book: TileBook,
     /// The collection of buttons for creating a new tile set page.
-    tile_set_page_creator: Handle<UiNode>,
+    tile_set_page_creator: Handle<Grid>,
     /// The panel containing the button for creating a new brush page.
     brush_page_creator: Handle<UiNode>,
     /// The editor for changing the size of tiles in a tile atlas page.
@@ -750,17 +747,17 @@ pub struct TileInspector {
     /// The editor for changing the frame rate of an animation page.
     animation_speed_inspector: InspectorField,
     /// Button for creating a brush tile.
-    create_tile: Handle<UiNode>,
+    create_tile: Handle<Button>,
     /// Button for creating a brush page.
-    create_page: Handle<UiNode>,
+    create_page: Handle<Button>,
     /// Button for creating an atlas page in a tile set.
-    create_atlas: Handle<UiNode>,
+    create_atlas: Handle<Button>,
     /// Button for creating a freeform page in a tile set.
-    create_free: Handle<UiNode>,
+    create_free: Handle<Button>,
     /// Button for creating a transform set page in a tile set.
-    create_transform: Handle<UiNode>,
+    create_transform: Handle<Button>,
     /// Button for creating a animation page in a tile set.
-    create_animation: Handle<UiNode>,
+    create_animation: Handle<Button>,
     /// A list of tile editors.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -768,9 +765,9 @@ pub struct TileInspector {
     /// Inspector for setting the material of an atlas page.
     page_material_inspector: InspectorField,
     /// Handle of the material field of an atlas page.
-    page_material_field: Handle<UiNode>,
+    page_material_field: Handle<MaterialFieldEditor>,
     /// Field for setting the icon of a page.
-    page_icon_field: Handle<UiNode>,
+    page_icon_field: Handle<TileHandleField>,
     /// Editors for every property layer.
     property_editors: PropertyEditors,
     /// Editors for every collider layer.
@@ -790,10 +787,11 @@ impl TileInspector {
         state: TileDrawStateRef,
         macro_list: BrushMacroListRef,
         cell_sets: MacroCellSetListRef,
-        pages_palette: Handle<UiNode>,
-        tiles_palette: Handle<UiNode>,
+        pages_palette: Handle<PaletteWidget>,
+        tiles_palette: Handle<PaletteWidget>,
         tile_book: TileBook,
         sender: MessageSender,
+        icon_request_sender: Sender<IconRequest>,
         resource_manager: ResourceManager,
         ctx: &mut BuildContext,
     ) -> Self {
@@ -807,6 +805,7 @@ impl TileInspector {
             Arc::new(Mutex::new(TileMaterialEditor::new(
                 ctx,
                 sender.clone(),
+                icon_request_sender.clone(),
                 resource_manager.clone(),
             ))) as TileEditorRef,
             Arc::new(Mutex::new(TileColorEditor::new(ctx))) as TileEditorRef,
@@ -826,7 +825,8 @@ impl TileInspector {
                     create_page
                 }),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         let create_tile = make_button("Create Tile", "Add a tile to this page.", 0, 0, ctx);
         let tile_set_page_creator =
             GridBuilder::new(WidgetBuilder::new()
@@ -864,16 +864,20 @@ impl TileInspector {
                 ctx,
                 sender.clone(),
                 DEFAULT_TILE_MATERIAL.deep_copy(),
+                icon_request_sender,
                 resource_manager,
             );
-        let page_material_inspector = InspectorField::new("Material", page_material_field, ctx);
-        let tile_size_field =
-            Vec2EditorBuilder::<u32>::new(WidgetBuilder::new().on_column(1)).build(ctx);
+        let page_material_inspector =
+            InspectorField::new("Material", page_material_field.to_base(), ctx);
+        let tile_size_field = Vec2EditorBuilder::<u32>::new(WidgetBuilder::new().on_column(1))
+            .build(ctx)
+            .to_base();
         let tile_size_inspector = InspectorField::new("Tile Size", tile_size_field, ctx);
         let frame_rate_field = NumericUpDownBuilder::<f32>::new(WidgetBuilder::new().on_column(1))
             .with_min_value(0.0)
             .build(ctx);
-        let animation_speed_inspector = InspectorField::new("Frame Rate", frame_rate_field, ctx);
+        let animation_speed_inspector =
+            InspectorField::new("Frame Rate", frame_rate_field.to_base(), ctx);
         let page_icon_field = TileHandleFieldBuilder::new(WidgetBuilder::new())
             .with_label("Page Icon")
             .build(ctx);
@@ -903,12 +907,13 @@ impl TileInspector {
                 .with_child(tile_size_inspector.handle)
                 .with_child(animation_speed_inspector.handle)
                 .with_child(create_tile)
-                .with_children(tile_editors.iter().map(|e| e.lock().handle()))
+                .with_children(tile_editors.iter().map(|e| e.safe_lock().handle()))
                 .with_child(property_editors.handle)
                 .with_child(collider_editors.handle)
                 .with_child(macro_inspector.handle()),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Self {
             handle,
             state,
@@ -945,10 +950,7 @@ impl TileInspector {
         let page = if self.state.lock().selection_palette() != self.tiles_palette {
             None
         } else {
-            ui.node(self.tiles_palette)
-                .cast::<PaletteWidget>()
-                .unwrap()
-                .page
+            ui[self.tiles_palette].page
         };
         TileEditorStateRef {
             page,
@@ -1005,13 +1007,9 @@ impl TileInspector {
         send_visibility(ui, self.collider_editors.handle, tile_data_selected);
         self.sync_to_page(&state, ui);
         let page_icon = self.find_page_icon(&state);
-        send_sync_message(
-            ui,
-            TileHandleEditorMessage::value(
-                self.page_icon_field,
-                MessageDirection::ToWidget,
-                page_icon,
-            ),
+        ui.send_sync(
+            self.page_icon_field,
+            TileHandleEditorMessage::Value(page_icon),
         );
         let iter = self
             .tile_editors
@@ -1053,36 +1051,25 @@ impl TileInspector {
     }
     fn sync_to_page(&mut self, state: &TileEditorState, ui: &mut UserInterface) {
         if let Some((_, mat)) = state.material_page() {
-            send_sync_message(
-                ui,
-                Vec2EditorMessage::value(
-                    self.tile_size_inspector.field,
-                    MessageDirection::ToWidget,
-                    mat.tile_size,
-                ),
+            ui.send_sync(
+                self.tile_size_inspector.field,
+                Vec2EditorMessage::Value(mat.tile_size),
             );
-            send_sync_message(
-                ui,
-                MaterialFieldMessage::material(
-                    self.page_material_inspector.field,
-                    MessageDirection::ToWidget,
-                    mat.material.clone(),
-                ),
+
+            ui.send_sync(
+                self.page_material_inspector.field,
+                MaterialFieldMessage::Material(mat.material.clone()),
             );
         } else if let Some((_, anim)) = state.animation_page() {
-            send_sync_message(
-                ui,
-                NumericUpDownMessage::value(
-                    self.animation_speed_inspector.field,
-                    MessageDirection::ToWidget,
-                    anim.frame_rate,
-                ),
+            ui.send_sync(
+                self.animation_speed_inspector.field,
+                NumericUpDownMessage::Value(anim.frame_rate),
             );
         }
     }
     pub fn handle_ui_message(&mut self, message: &UiMessage, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
-        if message.flags == MSG_SYNC_FLAG || message.direction() == MessageDirection::ToWidget {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
         if !ui.is_node_child_of(message.destination(), self.handle()) {
@@ -1105,7 +1092,7 @@ impl TileInspector {
             .chain(self.property_editors.iter())
             .chain(self.collider_editors.iter());
         for editor in iter {
-            editor.lock().handle_ui_message(
+            editor.safe_lock().handle_ui_message(
                 &mut tile_editor_state,
                 message,
                 ui,
@@ -1149,7 +1136,7 @@ impl TileInspector {
                     .chain(self.property_editors.iter())
                     .chain(self.collider_editors.iter());
                 for editor_ref in iter {
-                    let draw_button = editor_ref.lock().draw_button();
+                    let draw_button = editor_ref.safe_lock().draw_button();
                     if message.destination() == draw_button {
                         if tile_editor_state.is_active_editor(editor_ref) {
                             tile_editor_state.set_active_editor(None);

@@ -17,13 +17,11 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-
-use crate::command::SetPropertyCommand;
 use crate::{
     asset::item::AssetItem,
     audio::AudioBusSelection,
     camera::{CameraController, PickingOptions},
-    command::{make_command, Command, CommandGroup, CommandStack},
+    command::{Command, CommandGroup, CommandStack},
     fyrox::{
         asset::manager::ResourceManager,
         core::{
@@ -37,11 +35,10 @@ use crate::{
             pool::{ErasedHandle, Handle},
             reflect::Reflect,
             visitor::Visitor,
-            Uuid,
         },
         engine::{Engine, SerializationContext},
         fxhash::FxHashSet,
-        graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+        graph::{NodeWrapper, SceneGraph},
         gui::{
             inspector::PropertyChanged,
             message::UiMessage,
@@ -56,7 +53,6 @@ use crate::{
             texture::{Texture, TextureKind, TextureResource, TextureResourceExtension},
         },
         scene::{
-            animation::{absm::AnimationBlendingStateMachine, AnimationPlayer},
             base::BaseBuilder,
             camera::{Camera, Projection},
             debug::{Line, SceneDrawingContext},
@@ -70,7 +66,6 @@ use crate::{
             navmesh::NavigationalMesh,
             node::Node,
             pivot::PivotBuilder,
-            sound::AudioBus,
             terrain::Terrain,
             Scene, SceneContainer,
         },
@@ -79,11 +74,8 @@ use crate::{
     interaction::navmesh::selection::NavmeshSelection,
     message::MessageSender,
     plugins::{
-        absm::{
-            command::fetch_machine,
-            selection::{AbsmSelection, SelectedEntity},
-        },
-        animation::{self, command::fetch_animations_container, selection::AnimationSelection},
+        absm::selection::AbsmSelection,
+        animation::selection::AnimationSelection,
         inspector::editors::handle::{
             HandlePropertyEditorHierarchyMessage, HandlePropertyEditorNameMessage,
         },
@@ -103,7 +95,12 @@ use crate::{
     world::selection::GraphSelection,
     Message, Settings,
 };
+use fyrox::core::blank_reflect_ref;
+use fyrox::core::uuid::Uuid;
+use fyrox::engine::GraphicsContext;
+use fyrox::gui::file_browser::FileType;
 use fyrox::scene::collider::BitMask;
+use fyrox::scene::pivot::Pivot;
 use std::{
     cell::RefCell,
     fmt::Debug,
@@ -113,12 +110,13 @@ use std::{
     rc::Rc,
     sync::{
         mpsc::{self, Receiver},
-        Arc,
+        Arc, LazyLock,
     },
 };
 
 pub mod clipboard;
 pub mod dialog;
+mod nullscene;
 pub mod property;
 pub mod selector;
 pub mod settings;
@@ -136,7 +134,7 @@ pub struct PreviewInstance {
 pub struct GameScene {
     pub scene: Handle<Scene>,
     // Handle to a root for all editor nodes.
-    pub editor_objects_root: Handle<Node>,
+    pub editor_objects_root: Handle<Pivot>,
     pub scene_content_root: Handle<Node>,
     pub clipboard: Clipboard,
     pub camera_controller: CameraController,
@@ -149,21 +147,19 @@ pub struct GameScene {
     pub highlighter: Option<Rc<RefCell<HighlightRenderPass>>>,
     pub resource_manager: ResourceManager,
     pub serialization_context: Arc<SerializationContext>,
-    pub grid: Handle<Node>,
+    pub grid: Handle<Mesh>,
     pub grid_material: MaterialResource,
     pub settings_receiver: Receiver<SettingsMessage>,
 }
 
-lazy_static! {
-    static ref GRID_SHADER: ShaderResource = {
-        ShaderResource::from_str(
-            Uuid::new_v4(),
-            include_str!("../../resources/shaders/grid.shader",),
-            Default::default(),
-        )
-        .unwrap()
-    };
-}
+static GRID_SHADER: LazyLock<ShaderResource> = LazyLock::new(|| {
+    ShaderResource::from_str(
+        Uuid::new_v4(),
+        include_str!("../../resources/shaders/grid.shader"),
+        Default::default(),
+    )
+    .unwrap()
+});
 
 fn make_grid_material() -> MaterialResource {
     let material = Material::from_shader(GRID_SHADER.clone());
@@ -211,16 +207,19 @@ impl GameScene {
         let camera_controller = CameraController::new(
             &mut scene.graph,
             editor_objects_root,
+            settings,
             path.as_ref()
-                .and_then(|p| settings.scene_settings.get(*p).map(|s| &s.camera_settings)),
+                .and_then(|p| {
+                    settings
+                        .scene_settings
+                        .get(*p)
+                        .map(|s| s.camera_settings.clone())
+                })
+                .unwrap_or_default(),
             grid,
             editor_objects_root,
             scene_content_root,
         );
-
-        // Freeze physics simulation in while editing scene by setting time step to zero.
-        scene.graph.physics.integration_parameters.dt = Some(0.0);
-        scene.graph.physics2d.integration_parameters.dt = Some(0.0);
 
         GameScene {
             editor_objects_root,
@@ -231,6 +230,8 @@ impl GameScene {
             clipboard: Default::default(),
             preview_camera: Default::default(),
             graph_switches: GraphUpdateSwitches {
+                // Freeze physics simulation while editing scene by setting time step to zero.
+                physics_dt: false,
                 physics2d: true,
                 physics: true,
                 // Prevent engine to update lifetime of the nodes and to delete "dead" nodes. Otherwise
@@ -258,6 +259,7 @@ impl GameScene {
         let editor_root = self.editor_objects_root;
         let (pure_scene, _) = scene.clone_ex(
             self.scene_content_root,
+            true,
             &mut |node, _| node != editor_root,
             &mut |_, _| {},
             &mut |_, _, _| {},
@@ -309,7 +311,7 @@ impl GameScene {
 
         if let Some(selection) = editor_selection.as_graph() {
             for &node in selection.nodes() {
-                if let Some(node) = scene.graph.try_get(node) {
+                if let Ok(node) = scene.graph.try_get_node(node) {
                     scene.drawing_context.draw_oob(
                         &node.local_bounding_box(),
                         node.global_transform(),
@@ -351,21 +353,21 @@ impl GameScene {
                 if settings.debugging.show_tbn {
                     node.debug_draw(ctx);
                 }
-            } else if node.component_ref::<Camera>().is_some() {
+            } else if node.self_or_field_ref::<Camera>().is_some() {
                 if settings.debugging.show_camera_bounds {
                     node.debug_draw(ctx);
                 }
-            } else if node.component_ref::<PointLight>().is_some()
-                || node.component_ref::<SpotLight>().is_some()
+            } else if node.self_or_field_ref::<PointLight>().is_some()
+                || node.self_or_field_ref::<SpotLight>().is_some()
             {
                 if settings.debugging.show_light_bounds {
                     node.debug_draw(ctx);
                 }
-            } else if node.component_ref::<Terrain>().is_some() {
+            } else if node.self_or_field_ref::<Terrain>().is_some() {
                 if settings.debugging.show_terrains {
                     node.debug_draw(ctx);
                 }
-            } else if let Some(navmesh) = node.component_ref::<NavigationalMesh>() {
+            } else if let Some(navmesh) = node.self_or_field_ref::<NavigationalMesh>() {
                 if settings.navmesh.draw_all {
                     let selection = editor_selection.as_navmesh();
 
@@ -449,6 +451,7 @@ impl GameScene {
                 source_scene.graph.copy_node(
                     root_node,
                     &mut dest_scene.graph,
+                    false,
                     &mut |_, _| true,
                     &mut |_, _| {},
                     &mut |_, _, _| {},
@@ -474,13 +477,11 @@ impl GameScene {
     }
 
     fn select_object(&mut self, handle: ErasedHandle, engine: &Engine) {
-        if engine.scenes[self.scene]
-            .graph
-            .is_valid_handle(handle.into())
-        {
+        let handle = Handle::<Node>::from(handle);
+        if engine.scenes[self.scene].graph.is_valid_handle(handle) {
             self.sender
                 .do_command(ChangeSelectionCommand::new(Selection::new(
-                    GraphSelection::single_or_empty(handle.into()),
+                    GraphSelection::single_or_empty(handle),
                 )))
         }
     }
@@ -635,16 +636,14 @@ impl SceneController for GameScene {
                         ignore_back_faces: settings.selection.ignore_back_faces,
                         // We need info only about closest intersection.
                         use_picking_loop: false,
-                        only_meshes: false,
+                        method: Default::default(),
                         settings: &settings.selection,
                     },
                 ) {
                     Some(result.position)
                 } else {
                     // In case of empty space, check intersection with oXZ plane (3D) or oXY (2D).
-                    let camera = graph[self.camera_controller.camera]
-                        .component_ref::<Camera>()
-                        .unwrap();
+                    let camera = &graph[self.camera_controller.camera];
 
                     let normal = match camera.projection() {
                         Projection::Perspective(_) => Vector3::new(0.0, 1.0, 0.0),
@@ -722,7 +721,7 @@ impl SceneController for GameScene {
                             filter: None,
                             ignore_back_faces: settings.selection.ignore_back_faces,
                             use_picking_loop: true,
-                            only_meshes: false,
+                            method: Default::default(),
                             settings: &settings.selection,
                         },
                     ) {
@@ -749,8 +748,11 @@ impl SceneController for GameScene {
             .clone()
     }
 
-    fn extension(&self) -> &str {
-        "rgs"
+    fn file_type(&self) -> FileType {
+        FileType {
+            description: "Game Scene".to_string(),
+            extension: "rgs".to_string(),
+        }
     }
 
     fn save(
@@ -912,14 +914,15 @@ impl SceneController for GameScene {
                 ));
                 new_render_target.clone_from(&scene.rendering_options.render_target);
 
-                let gc = engine.graphics_context.as_initialized_mut();
-
-                if let Some(highlighter) = self.highlighter.as_ref() {
-                    highlighter.borrow_mut().resize(
-                        &*gc.renderer.server,
-                        frame_size.x as usize,
-                        frame_size.y as usize,
-                    );
+                if let GraphicsContext::Initialized(ref graphics_context) = engine.graphics_context
+                {
+                    if let Some(highlighter) = self.highlighter.as_ref() {
+                        highlighter.borrow_mut().resize(
+                            &*graphics_context.renderer.server,
+                            frame_size.x as usize,
+                            frame_size.y as usize,
+                        );
+                    }
                 }
             }
         }
@@ -929,7 +932,7 @@ impl SceneController for GameScene {
             node_overrides.insert(handle);
         }
 
-        let camera = scene.graph[self.camera_controller.camera].as_camera_mut();
+        let camera = &mut scene.graph[self.camera_controller.camera];
 
         let projection = camera.projection_mut();
         projection.set_z_near(settings.graphics.z_near);
@@ -1056,7 +1059,8 @@ impl SceneController for GameScene {
                     UiMessage::with_data(HandlePropertyEditorNameMessage(
                         scene
                             .graph
-                            .try_get((*handle).into())
+                            .try_get_node((*handle).into())
+                            .ok()
                             .map(|n| n.name_owned()),
                     ))
                     .with_destination(*view)
@@ -1112,401 +1116,6 @@ impl SceneController for GameScene {
             })
             .collect::<Vec<_>>()
     }
-
-    fn first_selected_entity(
-        &self,
-        selection: &Selection,
-        scenes: &SceneContainer,
-        callback: &mut dyn FnMut(&dyn Reflect),
-    ) {
-        let scene = &scenes[self.scene];
-        if let Some(selection) = selection.as_graph() {
-            if let Some(node) = selection
-                .nodes
-                .first()
-                .and_then(|handle| scene.graph.try_get(*handle))
-            {
-                (callback)(node as &dyn Reflect);
-            }
-        } else if let Some(selection) = selection.as_audio_bus() {
-            let state = scene.graph.sound_context.state();
-            if let Some(effect) = selection
-                .buses
-                .first()
-                .and_then(|handle| state.bus_graph_ref().try_get_bus_ref(*handle))
-            {
-                (callback)(effect as &dyn Reflect);
-            }
-        } else if let Some(selection) = selection.as_animation() {
-            if let Some(player) = scene
-                .graph
-                .try_get_of_type::<AnimationPlayer>(selection.animation_player)
-            {
-                if let Some(animation) = player.animations().try_get(selection.animation) {
-                    if let Some(animation::selection::SelectedEntity::Signal(id)) =
-                        selection.entities.first()
-                    {
-                        if let Some(signal) = animation.signals().iter().find(|s| s.id == *id) {
-                            (callback)(signal as &dyn Reflect);
-                        } else {
-                            (callback)(player as &dyn Reflect);
-                        }
-                    } else {
-                        (callback)(player as &dyn Reflect);
-                    }
-                } else {
-                    (callback)(player as &dyn Reflect);
-                }
-            }
-        } else if let Some(selection) = selection.as_absm() {
-            if let Some(node) = scene
-                .graph
-                .try_get_of_type::<AnimationBlendingStateMachine>(selection.absm_node_handle)
-            {
-                if let Some(first) = selection.entities.first() {
-                    let machine = node.machine();
-                    if let Some(layer_index) = selection.layer {
-                        if let Some(layer) = machine.layers().get(layer_index) {
-                            match first {
-                                SelectedEntity::Transition(transition) => {
-                                    (callback)(&layer.transitions()[*transition] as &dyn Reflect)
-                                }
-                                SelectedEntity::State(state) => {
-                                    (callback)(&layer.states()[*state] as &dyn Reflect)
-                                }
-                                SelectedEntity::PoseNode(pose) => {
-                                    (callback)(&layer.nodes()[*pose] as &dyn Reflect)
-                                }
-                            };
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn on_property_changed(
-        &mut self,
-        args: &PropertyChanged,
-        selection: &Selection,
-        engine: &mut Engine,
-    ) {
-        let scene = &mut engine.scenes[self.scene];
-
-        let group = if let Some(selection) = selection.as_graph() {
-            selection
-                .nodes
-                .iter()
-                .filter_map(|&node_handle| {
-                    if scene.graph.is_valid_handle(node_handle) {
-                        self.node_property_changed_handler.handle(
-                            args,
-                            node_handle,
-                            &mut scene.graph[node_handle],
-                        )
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        } else if let Some(selection) = selection.as_audio_bus() {
-            selection
-                .buses
-                .iter()
-                .filter_map(|&handle| {
-                    make_command(args, move |ctx| {
-                        let mut state = ctx
-                            .get_mut::<GameSceneContext>()
-                            .scene
-                            .graph
-                            .sound_context
-                            .state();
-                        let bus = state.bus_graph_mut().try_get_bus_mut(handle).unwrap();
-                        // FIXME: HACK!
-                        unsafe {
-                            std::mem::transmute::<&'_ mut AudioBus, &'static mut AudioBus>(bus)
-                        }
-                    })
-                })
-                .collect::<Vec<_>>()
-        } else if let Some(selection) = selection.as_animation() {
-            if scene
-                .graph
-                .try_get_of_type::<AnimationPlayer>(selection.animation_player)
-                .and_then(|player| player.animations().try_get(selection.animation))
-                .is_some()
-            {
-                let animation_player = selection.animation_player;
-                let animation = selection.animation;
-                selection
-                    .entities
-                    .iter()
-                    .filter_map(|e| {
-                        if let &animation::selection::SelectedEntity::Signal(id) = e {
-                            make_command(args, move |ctx| {
-                                fetch_animations_container(animation_player, ctx)[animation]
-                                    .signals_mut()
-                                    .iter_mut()
-                                    .find(|s| s.id == id)
-                                    .unwrap()
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                vec![]
-            }
-        } else if let Some(selection) = selection.as_absm() {
-            if scene
-                .graph
-                .try_get(selection.absm_node_handle)
-                .and_then(|n| n.component_ref::<AnimationBlendingStateMachine>())
-                .is_some()
-            {
-                if let Some(layer_index) = selection.layer {
-                    let absm_node_handle = selection.absm_node_handle;
-                    selection
-                        .entities
-                        .iter()
-                        .filter_map(|ent| match *ent {
-                            SelectedEntity::Transition(transition) => {
-                                make_command(args, move |ctx| {
-                                    let machine = fetch_machine(ctx, absm_node_handle);
-                                    &mut machine.layers_mut()[layer_index].transitions_mut()
-                                        [transition]
-                                })
-                            }
-                            SelectedEntity::State(state) => make_command(args, move |ctx| {
-                                let machine = fetch_machine(ctx, absm_node_handle);
-                                &mut machine.layers_mut()[layer_index].states_mut()[state]
-                            }),
-                            SelectedEntity::PoseNode(pose) => make_command(args, move |ctx| {
-                                let machine = fetch_machine(ctx, absm_node_handle);
-                                &mut machine.layers_mut()[layer_index].nodes_mut()[pose]
-                            }),
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
-
-        if group.is_empty() {
-            if !args.is_inheritable() {
-                Log::err(format!("Failed to handle a property {}", args.path()))
-            }
-        } else if group.len() == 1 {
-            self.sender
-                .send(Message::DoCommand(group.into_iter().next().unwrap()))
-        } else {
-            self.sender.do_command(CommandGroup::from(group));
-        }
-    }
-
-    fn paste_property(
-        &mut self,
-        path: &str,
-        value: &dyn Reflect,
-        selection: &Selection,
-        engine: &mut Engine,
-    ) {
-        let scene = &mut engine.scenes[self.scene];
-
-        let group = if let Some(selection) = selection.as_graph() {
-            selection
-                .nodes
-                .iter()
-                .filter_map(|&node_handle| {
-                    value.try_clone_box().and_then(|value| {
-                        if scene.graph.is_valid_handle(node_handle) {
-                            Some(Command::new(SetPropertyCommand::new(
-                                path.to_string(),
-                                value,
-                                move |ctx| {
-                                    &mut ctx.get_mut::<GameSceneContext>().scene.graph[node_handle]
-                                        as &mut dyn Reflect
-                                },
-                            )))
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect::<Vec<_>>()
-        } else if let Some(selection) = selection.as_audio_bus() {
-            selection
-                .buses
-                .iter()
-                .filter_map(|&handle| {
-                    value.try_clone_box().map(|value| {
-                        Command::new(SetPropertyCommand::new(
-                            path.to_string(),
-                            value,
-                            move |ctx| {
-                                let mut state = ctx
-                                    .get_mut::<GameSceneContext>()
-                                    .scene
-                                    .graph
-                                    .sound_context
-                                    .state();
-                                let bus = state.bus_graph_mut().try_get_bus_mut(handle).unwrap();
-                                // FIXME: HACK!
-                                unsafe {
-                                    std::mem::transmute::<&'_ mut AudioBus, &'static mut AudioBus>(
-                                        bus,
-                                    )
-                                }
-                            },
-                        ))
-                    })
-                })
-                .collect::<Vec<_>>()
-        } else if let Some(selection) = selection.as_animation() {
-            if scene
-                .graph
-                .try_get_of_type::<AnimationPlayer>(selection.animation_player)
-                .and_then(|player| player.animations().try_get(selection.animation))
-                .is_some()
-            {
-                let animation_player = selection.animation_player;
-                let animation = selection.animation;
-                selection
-                    .entities
-                    .iter()
-                    .filter_map(|e| {
-                        if let &animation::selection::SelectedEntity::Signal(id) = e {
-                            value.try_clone_box().map(|value| {
-                                Command::new(SetPropertyCommand::new(
-                                    path.to_string(),
-                                    value,
-                                    move |ctx| {
-                                        fetch_animations_container(animation_player, ctx)[animation]
-                                            .signals_mut()
-                                            .iter_mut()
-                                            .find(|s| s.id == id)
-                                            .unwrap()
-                                    },
-                                ))
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                vec![]
-            }
-        } else if let Some(selection) = selection.as_absm() {
-            if scene
-                .graph
-                .try_get(selection.absm_node_handle)
-                .and_then(|n| n.component_ref::<AnimationBlendingStateMachine>())
-                .is_some()
-            {
-                if let Some(layer_index) = selection.layer {
-                    let absm_node_handle = selection.absm_node_handle;
-                    selection
-                        .entities
-                        .iter()
-                        .filter_map(|ent| match *ent {
-                            SelectedEntity::Transition(transition) => {
-                                value.try_clone_box().map(|value| {
-                                    Command::new(SetPropertyCommand::new(
-                                        path.to_string(),
-                                        value,
-                                        move |ctx| {
-                                            let machine = fetch_machine(ctx, absm_node_handle);
-                                            &mut machine.layers_mut()[layer_index].transitions_mut()
-                                                [transition]
-                                        },
-                                    ))
-                                })
-                            }
-                            SelectedEntity::State(state) => value.try_clone_box().map(|value| {
-                                Command::new(SetPropertyCommand::new(
-                                    path.to_string(),
-                                    value,
-                                    move |ctx| {
-                                        let machine = fetch_machine(ctx, absm_node_handle);
-                                        &mut machine.layers_mut()[layer_index].states_mut()[state]
-                                    },
-                                ))
-                            }),
-                            SelectedEntity::PoseNode(pose) => value.try_clone_box().map(|value| {
-                                Command::new(SetPropertyCommand::new(
-                                    path.to_string(),
-                                    value,
-                                    move |ctx| {
-                                        let machine = fetch_machine(ctx, absm_node_handle);
-                                        &mut machine.layers_mut()[layer_index].nodes_mut()[pose]
-                                    },
-                                ))
-                            }),
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
-
-        if group.len() == 1 {
-            self.sender
-                .send(Message::DoCommand(group.into_iter().next().unwrap()))
-        } else {
-            self.sender.do_command(CommandGroup::from(group));
-        }
-    }
-
-    fn provide_docs(&self, selection: &Selection, engine: &Engine) -> Option<String> {
-        let scene = &engine.scenes[self.scene];
-
-        if let Some(graph_selection) = selection.as_graph() {
-            graph_selection
-                .nodes
-                .first()
-                .map(|h| scene.graph[*h].doc().to_string())
-        } else if let Some(navmesh_selection) = selection.as_navmesh() {
-            Some(
-                scene.graph[navmesh_selection.navmesh_node()]
-                    .doc()
-                    .to_string(),
-            )
-        } else if let Some(audio_bus_selection) = selection.as_audio_bus() {
-            audio_bus_selection.buses.first().and_then(|h| {
-                scene
-                    .graph
-                    .sound_context
-                    .state()
-                    .bus_graph_ref()
-                    .try_get_bus_ref(*h)
-                    .map(|bus| bus.doc().to_string())
-            })
-        } else if let Some(absm_selection) = selection.as_absm::<Node>() {
-            Some(
-                scene.graph[absm_selection.absm_node_handle]
-                    .doc()
-                    .to_string(),
-            )
-        } else {
-            selection.as_animation::<Node>().map(|animation_selection| {
-                scene.graph[animation_selection.animation_player]
-                    .doc()
-                    .to_string()
-            })
-        }
-    }
 }
 
 define_as_any_trait!(SelectionContainerAsAny => SelectionContainer);
@@ -1533,6 +1142,22 @@ where
     }
 }
 
+pub struct EntityInfo<'a> {
+    pub entity: &'a dyn Reflect,
+    pub has_inheritance_parent: bool,
+    pub read_only: bool,
+}
+
+impl<'a> EntityInfo<'a> {
+    pub fn with_no_parent(entity: &'a dyn Reflect) -> Self {
+        Self {
+            entity,
+            has_inheritance_parent: false,
+            read_only: false,
+        }
+    }
+}
+
 pub trait SelectionContainer: BaseSelectionContainer {
     fn len(&self) -> usize;
 
@@ -1547,6 +1172,25 @@ pub trait SelectionContainer: BaseSelectionContainer {
     fn is_multi_selection(&self) -> bool {
         self.len() > 1
     }
+
+    fn first_selected_entity(
+        &self,
+        controller: &dyn SceneController,
+        scenes: &SceneContainer,
+        callback: &mut dyn FnMut(EntityInfo),
+    );
+
+    fn on_property_changed(
+        &mut self,
+        controller: &mut dyn SceneController,
+        args: &PropertyChanged,
+        engine: &mut Engine,
+        sender: &MessageSender,
+    );
+
+    fn paste_property(&mut self, path: &str, value: &dyn Reflect, sender: &MessageSender);
+
+    fn provide_docs(&self, controller: &dyn SceneController, engine: &Engine) -> Option<String>;
 }
 
 impl dyn SelectionContainer {
@@ -1561,6 +1205,10 @@ impl dyn SelectionContainer {
 
 #[derive(Debug, Default)]
 pub struct Selection(pub Option<Box<dyn SelectionContainer>>);
+
+impl Reflect for &'static mut Selection {
+    blank_reflect_ref!("f740f60a-ade1-4357-ac6f-7088e9189518");
+}
 
 impl PartialEq for Selection {
     fn eq(&self, other: &Self) -> bool {
@@ -1624,6 +1272,14 @@ impl Selection {
         self.0.as_ref().is_some_and(|s| s.is_multi_selection())
     }
 
+    pub fn as_ref<N: SelectionContainer>(&self) -> Option<&N> {
+        self.0.as_ref().and_then(|v| v.downcast_ref::<N>())
+    }
+
+    pub fn as_mut<N: SelectionContainer>(&mut self) -> Option<&mut N> {
+        self.0.as_mut().and_then(|v| v.downcast_mut::<N>())
+    }
+
     define_downcast!(GraphSelection, as_graph, as_graph_mut, is_graph);
 
     define_downcast!(NavmeshSelection, as_navmesh, as_navmesh_mut, is_navmesh);
@@ -1656,4 +1312,43 @@ impl Selection {
     }
 
     define_downcast!(UiSelection, as_ui, as_ui_mut, is_ui);
+
+    pub fn first_selected_entity(
+        &self,
+        controller: &dyn SceneController,
+        scenes: &SceneContainer,
+        callback: &mut dyn FnMut(EntityInfo),
+    ) {
+        if let Some(container) = self.0.as_ref() {
+            container.first_selected_entity(controller, scenes, callback);
+        }
+    }
+
+    pub fn on_property_changed(
+        &mut self,
+        controller: &mut dyn SceneController,
+        args: &PropertyChanged,
+        engine: &mut Engine,
+        sender: &MessageSender,
+    ) {
+        if let Some(container) = self.0.as_mut() {
+            container.on_property_changed(controller, args, engine, sender);
+        }
+    }
+
+    pub fn paste_property(&mut self, path: &str, value: &dyn Reflect, sender: &MessageSender) {
+        if let Some(container) = self.0.as_mut() {
+            container.paste_property(path, value, sender);
+        }
+    }
+
+    pub fn provide_docs(
+        &self,
+        controller: &dyn SceneController,
+        engine: &Engine,
+    ) -> Option<String> {
+        self.0
+            .as_ref()
+            .and_then(|c| c.provide_docs(controller, engine))
+    }
 }

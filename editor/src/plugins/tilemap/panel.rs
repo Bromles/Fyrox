@@ -25,11 +25,12 @@
 //! will be used by that tool. It has buttons that allow the selected tiles to
 //! be rotated and flipped before they are used in the tile map.
 
+use super::*;
 use crate::{
     asset::item::AssetItem,
     fyrox::{
         core::pool::Handle,
-        graph::{BaseSceneGraph, SceneGraph},
+        graph::SceneGraph,
         gui::{
             border::BorderBuilder,
             brush::Brush,
@@ -59,18 +60,15 @@ use crate::{
     },
 };
 use fyrox::asset::manager::ResourceManager;
-
-use super::*;
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::text::Text;
+use fyrox::gui::window::WindowAlignment;
 
 const DEFAULT_PAGE: Vector2<i32> = Vector2::new(0, 0);
 
-fn highlight_tool_button(button: Handle<UiNode>, highlight: bool, ui: &UserInterface) {
-    let decorator = *ui.try_get_of_type::<Button>(button).unwrap().decorator;
-    ui.send_message(DecoratorMessage::select(
-        decorator,
-        MessageDirection::ToWidget,
-        highlight,
-    ));
+fn highlight_tool_button(button: Handle<Button>, highlight: bool, ui: &UserInterface) {
+    let decorator = *ui[button].decorator;
+    ui.send(decorator, DecoratorMessage::Select(highlight));
 }
 
 fn make_resource_chooser(
@@ -79,7 +77,7 @@ fn make_resource_chooser(
     tooltip: &str,
     tab_index: Option<usize>,
     column: usize,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .on_column(column)
@@ -119,46 +117,46 @@ pub struct TileMapPanel {
     /// The resource that is the source for the tiles that the user may select.
     pub tile_book: TileBook,
     /// The window that contains this control panel.
-    pub window: Handle<UiNode>,
+    pub window: Handle<Window>,
     /// The currently selected brush. This brush can be set by choosing a tile map
     /// with an active brush, or by dragging a brush resource into the control panel window.
     brush: Option<TileMapBrushResource>,
     /// The name of the tile set or brush from which tiles are being displayed.
-    tile_set_name: Handle<UiNode>,
+    tile_set_name: Handle<Text>,
     /// The widget that displays a preview of the tiles that the selected tool will use.
-    preview: Handle<UiNode>,
+    preview: Handle<PanelPreview>,
     /// The palette widget that allows the user to select the page.
-    pages: Handle<UiNode>,
+    pages: Handle<PaletteWidget>,
     /// The palette widget that allows the user to select the tiles to draw with.
-    palette: Handle<UiNode>,
+    palette: Handle<PaletteWidget>,
     /// The button that switches the control to using the current brush, if there is one.
-    brush_button: Handle<UiNode>,
+    brush_button: Handle<Button>,
     /// The button that switches the control to using the current tile set.
-    tile_set_button: Handle<UiNode>,
+    tile_set_button: Handle<Button>,
     /// Tool selection button for the draw tool.
-    draw_button: Handle<UiNode>,
+    draw_button: Handle<Button>,
     /// Tool selection button for the erase tool.
-    erase_button: Handle<UiNode>,
+    erase_button: Handle<Button>,
     /// Tool selection button for the flood fill tool.
-    flood_fill_button: Handle<UiNode>,
+    flood_fill_button: Handle<Button>,
     /// Tool selection button for the pick tool.
-    pick_button: Handle<UiNode>,
+    pick_button: Handle<Button>,
     /// Tool selection button for the rectangle fill tool.
-    rect_fill_button: Handle<UiNode>,
+    rect_fill_button: Handle<Button>,
     /// Tool selection button for the nine slice fill tool.
-    nine_slice_button: Handle<UiNode>,
+    nine_slice_button: Handle<Button>,
     /// Tool selection button for the line tool.
-    line_button: Handle<UiNode>,
+    line_button: Handle<Button>,
     /// Button that toggles the tools into random mode.
-    random_button: Handle<UiNode>,
+    random_button: Handle<Button>,
     /// Button to rotate the selected tiles counter-clockwise by 90 degrees.
-    left_button: Handle<UiNode>,
+    left_button: Handle<Button>,
     /// Button to rotate the selected tiles clockwise by 90 degrees.
-    right_button: Handle<UiNode>,
+    right_button: Handle<Button>,
     /// Button to horizontally flip the selected tiles.
-    flip_x_button: Handle<UiNode>,
+    flip_x_button: Handle<Button>,
     /// Button to vertically flip the selected tiles.
-    flip_y_button: Handle<UiNode>,
+    flip_y_button: Handle<Button>,
 }
 
 impl TileMapPanel {
@@ -416,61 +414,47 @@ impl TileMapPanel {
     }
 
     /// Bring the window to the front and move it to the top-right of the given node.
-    pub fn align(&self, relative_to: Handle<UiNode>, ui: &UserInterface) {
-        if ui.node(self.window).visibility() {
-            ui.send_message(WidgetMessage::align(
+    pub fn align(&self, relative_to: Handle<impl ObjectOrVariant<UiNode>>, ui: &UserInterface) {
+        let relative_to = relative_to.to_base();
+        if ui[self.window].visibility() {
+            ui.send(
                 self.window,
-                MessageDirection::ToWidget,
-                relative_to,
-                HorizontalAlignment::Right,
-                VerticalAlignment::Top,
-                Thickness::uniform(2.0),
-            ));
-            ui.send_message(WidgetMessage::topmost(
-                self.window,
-                MessageDirection::ToWidget,
-            ));
-            ui.send_message(WidgetMessage::focus(
-                ui.node(self.window).cast::<Window>().unwrap().content,
-                MessageDirection::ToWidget,
-            ));
+                WidgetMessage::Align {
+                    relative_to,
+                    horizontal_alignment: HorizontalAlignment::Right,
+                    vertical_alignment: VerticalAlignment::Top,
+                    margin: Thickness::uniform(2.0),
+                },
+            );
+            ui.send(self.window, WidgetMessage::Topmost);
+            ui.send(ui[self.window].content, WidgetMessage::Focus);
         } else {
-            ui.send_message(WindowMessage::open_and_align(
+            ui.send(
                 self.window,
-                MessageDirection::ToWidget,
-                relative_to,
-                HorizontalAlignment::Right,
-                VerticalAlignment::Top,
-                Thickness::uniform(2.0),
-                false,
-                true,
-            ));
+                WindowMessage::Open {
+                    alignment: WindowAlignment::Relative {
+                        relative_to,
+                        horizontal_alignment: HorizontalAlignment::Right,
+                        vertical_alignment: VerticalAlignment::Top,
+                        margin: Thickness::uniform(2.0),
+                    },
+                    modal: false,
+                    focus_content: true,
+                },
+            );
         }
     }
 
     /// Bring the window to the top.
     pub fn to_top(&self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::topmost(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::focus(
-            ui.node(self.window).cast::<Window>().unwrap().content,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::visibility(
-            self.window,
-            MessageDirection::ToWidget,
-            true,
-        ));
+        ui.send(self.window, WidgetMessage::Topmost);
+        ui.send(ui[self.window].content, WidgetMessage::Focus);
+        ui.send(self.window, WidgetMessage::Visibility(true));
     }
 
     /// Close the window.
     pub fn destroy(self, ui: &UserInterface) {
-        ui.send_message(WidgetMessage::remove(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.window, WidgetMessage::Remove);
     }
 
     /// Set the source for the control panel's tiles.
@@ -535,18 +519,20 @@ impl TileMapPanel {
 
     /// Inform the palette widgets that they need to display the current resource.
     fn send_tile_resource(&self, ui: &mut UserInterface) {
-        ui.send_message(PaletteMessage::set_page(
+        ui.send(
             self.pages,
-            MessageDirection::ToWidget,
-            self.tile_book.clone(),
-            Some(DEFAULT_PAGE),
-        ));
-        ui.send_message(PaletteMessage::set_page(
+            PaletteMessage::SetPage {
+                source: self.tile_book.clone(),
+                page: Some(DEFAULT_PAGE),
+            },
+        );
+        ui.send(
             self.palette,
-            MessageDirection::ToWidget,
-            self.tile_book.clone(),
-            Some(DEFAULT_PAGE),
-        ));
+            PaletteMessage::SetPage {
+                source: self.tile_book.clone(),
+                page: Some(DEFAULT_PAGE),
+            },
+        );
     }
 
     /// True if the current resource is a brush.
@@ -566,37 +552,27 @@ impl TileMapPanel {
     /// Open the page of the given handle and center the view on the tile.
     pub fn set_focus(&mut self, handle: TileDefinitionHandle, ui: &mut UserInterface) {
         let mut state = self.state.lock_mut("set_focus");
-        state.selection.source = SelectionSource::Widget(self.palette);
+        state.selection.source = SelectionSource::Widget(self.palette.to_base());
         let sel = state.selection_positions_mut();
         sel.clear();
         sel.insert(handle.tile());
-        ui.send_message(PaletteMessage::set_page(
+        ui.send(
             self.pages,
-            MessageDirection::ToWidget,
-            self.tile_book.clone(),
-            Some(handle.page()),
-        ));
-        ui.send_message(PaletteMessage::set_page(
+            PaletteMessage::SetPage {
+                source: self.tile_book.clone(),
+                page: Some(handle.page()),
+            },
+        );
+        ui.send(
             self.palette,
-            MessageDirection::ToWidget,
-            self.tile_book.clone(),
-            Some(handle.page()),
-        ));
-        ui.send_message(PaletteMessage::center(
-            self.pages,
-            MessageDirection::ToWidget,
-            handle.page(),
-        ));
-        ui.send_message(PaletteMessage::center(
-            self.palette,
-            MessageDirection::ToWidget,
-            handle.tile(),
-        ));
-        ui.send_message(PaletteMessage::select_one(
-            self.palette,
-            MessageDirection::ToWidget,
-            handle.tile(),
-        ));
+            PaletteMessage::SetPage {
+                source: self.tile_book.clone(),
+                page: Some(handle.page()),
+            },
+        );
+        ui.send(self.pages, PaletteMessage::Center(handle.page()));
+        ui.send(self.palette, PaletteMessage::Center(handle.tile()));
+        ui.send(self.palette, PaletteMessage::SelectOne(handle.tile()));
     }
 
     /// Process the effect of pressing one of the buttons.
@@ -660,7 +636,7 @@ impl TileMapPanel {
                 ui.send_message(
                     message
                         .clone()
-                        .with_destination(self.palette)
+                        .with_destination(self.palette.to_base())
                         .with_direction(MessageDirection::ToWidget),
                 );
             }
@@ -687,35 +663,26 @@ impl TileMapPanel {
     /// have changed.
     pub fn sync_to_model(&self, ui: &mut UserInterface, resource_manager: &ResourceManager) {
         let name = self.tile_book.name(resource_manager);
-        ui.send_message(TextMessage::text(
-            self.tile_set_name,
-            MessageDirection::ToWidget,
-            name,
-        ));
+        ui.send(self.tile_set_name, TextMessage::Text(name));
         highlight_tool_button(self.brush_button, self.tile_book.is_brush(), ui);
         highlight_tool_button(self.tile_set_button, self.tile_book.is_tile_set(), ui);
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             self.brush_button,
-            MessageDirection::ToWidget,
-            self.brush.is_some(),
-        ));
+            WidgetMessage::Enabled(self.brush.is_some()),
+        );
         let has_tile_set = match &self.tile_book {
             TileBook::Empty => false,
             TileBook::TileSet(_) => true,
             TileBook::Brush(brush) => brush.data_ref().tile_set.is_some(),
         };
-        ui.send_message(WidgetMessage::enabled(
-            self.tile_set_button,
-            MessageDirection::ToWidget,
-            has_tile_set,
-        ));
+        ui.send(self.tile_set_button, WidgetMessage::Enabled(has_tile_set));
         self.sync_to_state(ui);
     }
     /// Use the given UI to update the panel after the data the [`TileDrawState`] may have changed.
     pub fn sync_to_state(&self, ui: &mut UserInterface) {
         fn highlight_all_except(
-            button: Handle<UiNode>,
-            buttons: &[Handle<UiNode>],
+            button: Handle<Button>,
+            buttons: &[Handle<Button>],
             highlight: bool,
             ui: &UserInterface,
         ) {
@@ -727,7 +694,7 @@ impl TileMapPanel {
                 }
             }
         }
-        fn highlight_all(buttons: &[Handle<UiNode>], highlight: bool, ui: &UserInterface) {
+        fn highlight_all(buttons: &[Handle<Button>], highlight: bool, ui: &UserInterface) {
             for button in buttons {
                 highlight_tool_button(*button, highlight, ui);
             }
@@ -769,11 +736,12 @@ impl TileMapPanel {
                 highlight_all(&buttons, false, ui);
             }
         }
-        for destination in [self.preview, self.pages, self.palette] {
-            ui.send_message(PaletteMessage::sync_to_state(
-                destination,
-                MessageDirection::ToWidget,
-            ));
+        for destination in [
+            self.preview.to_base::<UiNode>(),
+            self.pages.to_base(),
+            self.palette.to_base(),
+        ] {
+            ui.send(destination, PaletteMessage::SyncToState);
         }
     }
 }

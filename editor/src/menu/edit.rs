@@ -21,29 +21,37 @@
 use crate::fyrox::{
     core::pool::Handle,
     gui::{
-        menu::MenuItemMessage,
-        message::{MessageDirection, UiMessage},
-        widget::WidgetMessage,
-        BuildContext, UiNode, UserInterface,
+        menu::MenuItemMessage, message::UiMessage, widget::WidgetMessage, BuildContext,
+        UserInterface,
     },
 };
 use crate::scene::controller::SceneController;
 use crate::{
+    load_image,
     menu::{create_menu_item_shortcut, create_root_menu_item},
     message::MessageSender,
     scene::{commands::PasteCommand, GameScene, Selection},
     Engine, Message, Mode,
 };
+use fyrox::core::uuid::{uuid, Uuid};
+use fyrox::gui::menu;
+use fyrox::gui::menu::MenuItem;
 
 pub struct EditMenu {
-    pub menu: Handle<UiNode>,
-    pub undo: Handle<UiNode>,
-    pub redo: Handle<UiNode>,
-    pub copy: Handle<UiNode>,
-    pub paste: Handle<UiNode>,
+    pub menu: Handle<MenuItem>,
+    pub undo: Handle<MenuItem>,
+    pub redo: Handle<MenuItem>,
+    pub copy: Handle<MenuItem>,
+    pub paste: Handle<MenuItem>,
 }
 
 impl EditMenu {
+    pub const EDIT: Uuid = uuid!("947547a7-d705-405f-81a8-7c498a22dbcc");
+    pub const UNDO: Uuid = uuid!("8d25d35f-bcbe-4647-8d43-5eb0fbacc9ca");
+    pub const REDO: Uuid = uuid!("ee825148-feab-435f-9db5-c3f2c89a989a");
+    pub const COPY: Uuid = uuid!("7d3ad96c-06f0-43ee-b9d1-6f86a0b783d1");
+    pub const PASTE: Uuid = uuid!("ae45f10b-7833-4c01-b426-37d1a29c4a8a");
+
     pub fn new(ctx: &mut BuildContext) -> Self {
         let redo;
         let undo;
@@ -51,21 +59,45 @@ impl EditMenu {
         let paste;
         let menu = create_root_menu_item(
             "Edit",
+            Self::EDIT,
             vec![
                 {
-                    undo = create_menu_item_shortcut("Undo", "Ctrl+Z", vec![], ctx);
+                    undo = create_menu_item_shortcut(
+                        "Undo",
+                        load_image!("../../resources/undo.png"),
+                        Self::UNDO,
+                        "Ctrl+Z",
+                        vec![],
+                        ctx,
+                    );
                     undo
                 },
                 {
-                    redo = create_menu_item_shortcut("Redo", "Ctrl+Y", vec![], ctx);
+                    redo = create_menu_item_shortcut(
+                        "Redo",
+                        load_image!("../../resources/redo.png"),
+                        Self::REDO,
+                        "Ctrl+Y",
+                        vec![],
+                        ctx,
+                    );
                     redo
                 },
+                menu::make_menu_splitter(ctx).to_variant(),
                 {
-                    copy = create_menu_item_shortcut("Copy", "Ctrl+C", vec![], ctx);
+                    copy =
+                        create_menu_item_shortcut("Copy", None, Self::COPY, "Ctrl+C", vec![], ctx);
                     copy
                 },
                 {
-                    paste = create_menu_item_shortcut("Paste", "Ctrl+V", vec![], ctx);
+                    paste = create_menu_item_shortcut(
+                        "Paste",
+                        None,
+                        Self::PASTE,
+                        "Ctrl+V",
+                        vec![],
+                        ctx,
+                    );
                     paste
                 },
             ],
@@ -115,10 +147,6 @@ impl EditMenu {
     }
 
     pub fn on_mode_changed(&mut self, ui: &UserInterface, mode: &Mode) {
-        ui.send_message(WidgetMessage::enabled(
-            self.menu,
-            MessageDirection::ToWidget,
-            mode.is_edit(),
-        ));
+        ui.send(self.menu, WidgetMessage::Enabled(mode.is_edit()));
     }
 }

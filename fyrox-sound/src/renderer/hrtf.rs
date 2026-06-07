@@ -42,6 +42,7 @@
 //! use fyrox_sound::context::{self, SoundContext};
 //! use fyrox_sound::renderer::hrtf::{HrirSphereResource, HrirSphereResourceExt, HrtfRenderer};
 //! use fyrox_sound::renderer::Renderer;
+//! use fyrox_sound::engine::SoundEngine;
 //! use std::path::{Path, PathBuf};
 //! use hrtf::HrirSphere;
 //! use fyrox_resource::untyped::ResourceKind;
@@ -50,9 +51,9 @@
 //!     // IRC_1002_C.bin is HRIR sphere in binary format, can be any valid HRIR sphere
 //!     // from base mentioned above.
 //!     let hrir_path = PathBuf::from("examples/data/IRC_1002_C.bin");
-//!     let hrir_sphere = HrirSphere::from_file(&hrir_path, context::SAMPLE_RATE).unwrap();
+//!     let hrir_sphere = HrirSphere::from_file(&hrir_path, SoundEngine::DEFAULT_SAMPLE_RATE).unwrap();
 //!
-//!     context.state().set_renderer(Renderer::HrtfRenderer(HrtfRenderer::new(HrirSphereResource::from_hrir_sphere(hrir_sphere, ResourceKind::Embedded))));
+//!     context.state().set_renderer(Renderer::HrtfRenderer(HrtfRenderer::new(SoundEngine::DEFAULT_SAMPLE_RATE, HrirSphereResource::from_hrir_sphere(hrir_sphere, ResourceKind::Embedded))));
 //! }
 //! ```
 //!
@@ -74,7 +75,7 @@
 //! Clicks can be reproduced by using clean sine wave of 440 Hz on some source moving around listener.
 
 use crate::{
-    context::{self, DistanceModel, SoundContext},
+    context::{DistanceModel, SoundContext},
     listener::Listener,
     renderer::render_source_2d_only,
     source::SoundSource,
@@ -84,7 +85,6 @@ use fyrox_core::{
     reflect::prelude::*,
     uuid::{uuid, Uuid},
     visitor::{Visit, VisitResult, Visitor},
-    TypeUuidProvider,
 };
 use fyrox_resource::untyped::ResourceKind;
 use fyrox_resource::{
@@ -94,12 +94,55 @@ use fyrox_resource::{
     Resource, ResourceData,
 };
 use hrtf::HrirSphere;
-use std::error::Error;
-use std::path::Path;
+use std::io::Cursor;
+use std::{error::Error, ops::Deref};
 use std::{fmt::Debug, fmt::Formatter, path::PathBuf, sync::Arc};
+use std::{fmt::Display, path::Path};
+
+/// An error that occurs during HRIR sphere loading.
+pub struct HrtfError(pub hrtf::HrtfError);
+
+impl std::error::Error for HrtfError {}
+
+impl From<hrtf::HrtfError> for HrtfError {
+    fn from(value: hrtf::HrtfError) -> Self {
+        Self(value)
+    }
+}
+
+impl From<HrtfError> for hrtf::HrtfError {
+    fn from(value: HrtfError) -> Self {
+        value.0
+    }
+}
+
+impl Deref for HrtfError {
+    type Target = hrtf::HrtfError;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Debug for HrtfError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(&self.0, f)
+    }
+}
+
+impl Display for HrtfError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            hrtf::HrtfError::IoError(error) => Display::fmt(error, f),
+            hrtf::HrtfError::InvalidFileFormat => f.write_str("Invalid file format"),
+            hrtf::HrtfError::InvalidLength(n) => write!(f, "Invalid length {n}"),
+        }
+    }
+}
 
 /// See module docs.
 #[derive(Clone, Debug, Default, Reflect)]
+#[reflect(type_uuid = "c6149a3b-7992-44a8-9b9f-16651a5d2b15")]
 pub struct HrtfRenderer {
     hrir_resource: Option<HrirSphereResource>,
     #[reflect(hidden)]
@@ -118,16 +161,12 @@ impl Visit for HrtfRenderer {
 
 impl HrtfRenderer {
     /// Creates new HRTF renderer using specified HRTF sphere. See module docs for more info.
-    pub fn new(hrir_sphere_resource: HrirSphereResource) -> Self {
+    pub fn new(sample_rate: u32, hrir_sphere_resource: HrirSphereResource) -> Self {
+        let processor = hrir_sphere_resource
+            .data_ref()
+            .make_hrtf_processor(sample_rate);
         Self {
-            processor: Some(hrtf::HrtfProcessor::new(
-                {
-                    let sphere = hrir_sphere_resource.data_ref().hrir_sphere.clone().unwrap();
-                    sphere
-                },
-                SoundContext::HRTF_INTERPOLATION_STEPS,
-                SoundContext::HRTF_BLOCK_LEN,
-            )),
+            processor,
             hrir_resource: Some(hrir_sphere_resource),
         }
     }
@@ -146,6 +185,7 @@ impl HrtfRenderer {
 
     pub(crate) fn render_source(
         &mut self,
+        sample_rate: u32,
         source: &mut SoundSource,
         listener: &Listener,
         distance_model: DistanceModel,
@@ -157,11 +197,7 @@ impl HrtfRenderer {
             if let Some(resource) = self.hrir_resource.as_ref() {
                 let mut header = resource.state();
                 if let Some(hrir) = header.data() {
-                    self.processor = Some(hrtf::HrtfProcessor::new(
-                        hrir.hrir_sphere.clone().unwrap(),
-                        SoundContext::HRTF_INTERPOLATION_STEPS,
-                        SoundContext::HRTF_BLOCK_LEN,
-                    ));
+                    self.processor = hrir.make_hrtf_processor(sample_rate);
                 }
             }
         }
@@ -201,13 +237,42 @@ impl HrtfRenderer {
     }
 }
 
+#[derive(Clone)]
+enum HrirSource {
+    Preloaded(HrirSphere),
+    RawData(Vec<u8>),
+}
+
+impl Default for HrirSource {
+    fn default() -> Self {
+        Self::RawData(Default::default())
+    }
+}
+
 /// Wrapper for [`HrirSphere`] to be able to use it in the resource manager, that will handle async resource
 /// loading automatically.
 #[derive(Reflect, Default, Clone, Visit)]
+#[reflect(type_uuid = "c92a0fa3-0ed3-49a9-be44-8f06271c6be2")]
 pub struct HrirSphereResourceData {
     #[reflect(hidden)]
     #[visit(skip)]
-    hrir_sphere: Option<HrirSphere>,
+    source: HrirSource,
+}
+
+impl HrirSphereResourceData {
+    fn make_hrtf_processor(&self, sample_rate: u32) -> Option<hrtf::HrtfProcessor> {
+        let hrir_sphere = match self.source {
+            HrirSource::Preloaded(ref sphere) => sphere.clone(),
+            HrirSource::RawData(ref raw_data) => {
+                HrirSphere::new(Cursor::new(raw_data), sample_rate).ok()?
+            }
+        };
+        Some(hrtf::HrtfProcessor::new(
+            hrir_sphere,
+            SoundContext::HRTF_INTERPOLATION_STEPS,
+            SoundContext::HRTF_BLOCK_LEN,
+        ))
+    }
 }
 
 impl Debug for HrirSphereResourceData {
@@ -216,17 +281,7 @@ impl Debug for HrirSphereResourceData {
     }
 }
 
-impl TypeUuidProvider for HrirSphereResourceData {
-    fn type_uuid() -> Uuid {
-        uuid!("c92a0fa3-0ed3-49a9-be44-8f06271c6be2")
-    }
-}
-
 impl ResourceData for HrirSphereResourceData {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, _path: &Path) -> Result<(), Box<dyn Error>> {
         Err("Saving is not supported!".to_string().into())
     }
@@ -249,16 +304,13 @@ impl ResourceLoader for HrirSphereLoader {
     }
 
     fn data_type_uuid(&self) -> Uuid {
-        <HrirSphereResourceData as TypeUuidProvider>::type_uuid()
+        <HrirSphereResourceData as Reflect>::type_info().type_uuid
     }
 
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
         Box::pin(async move {
-            let reader = io.file_reader(&path).await.map_err(LoadError::new)?;
-            let hrir_sphere =
-                HrirSphere::new(reader, context::SAMPLE_RATE).map_err(LoadError::new)?;
             Ok(LoaderPayload::new(HrirSphereResourceData {
-                hrir_sphere: Some(hrir_sphere),
+                source: HrirSource::RawData(io.load_file(&path).await.map_err(LoadError::new)?),
             }))
         })
     }
@@ -280,7 +332,7 @@ impl HrirSphereResourceExt for HrirSphereResource {
             Uuid::new_v4(),
             kind,
             HrirSphereResourceData {
-                hrir_sphere: Some(hrir_sphere),
+                source: HrirSource::Preloaded(hrir_sphere),
             },
         )
     }

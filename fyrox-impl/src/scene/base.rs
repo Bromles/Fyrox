@@ -22,6 +22,7 @@
 //!
 //! For more info see [`Base`]
 
+use super::collider::BitMask;
 use crate::{
     core::{
         algebra::{Matrix4, Vector3},
@@ -29,50 +30,42 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext},
         pool::{ErasedHandle, Handle},
         reflect::prelude::*,
-        type_traits::prelude::*,
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
         ImmutableString,
     },
     engine::SerializationContext,
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     resource::model::ModelResource,
     scene::{node::Node, transform::Transform},
     script::{Script, ScriptTrait},
 };
 use fyrox_core::algebra::UnitQuaternion;
+use fyrox_core::pool::ObjectOrVariant;
 use fyrox_core::visitor::error::VisitError;
 use serde::{Deserialize, Serialize};
 use std::{
-    any::Any,
     cell::Cell,
     ops::{Deref, DerefMut},
     sync::mpsc::Sender,
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
-use super::collider::BitMask;
-
 /// Level of detail is a collection of objects for given normalized distance range.
 /// Objects will be rendered **only** if they're in specified range.
 /// Normalized distance is a distance in (0; 1) range where 0 - closest to camera,
 /// 1 - farthest. Real distance can be obtained by multiplying normalized distance
 /// with z_far of current projection matrix.
-#[derive(Debug, Default, Clone, Visit, Reflect, PartialEq, TypeUuidProvider)]
-#[type_uuid(id = "576b31a2-2b39-4c79-95dd-26aeaf381d8b")]
+#[derive(Debug, Default, Clone, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "576b31a2-2b39-4c79-95dd-26aeaf381d8b")]
 pub struct LevelOfDetail {
-    #[reflect(
-        description = "Beginning of the range in which the level will be visible. \
-    It is expressed in normalized coordinates: where 0.0 - closest to camera, 1.0 - \
-    farthest from camera."
-    )]
+    /// Beginning of the range in which the level will be visible. It is expressed in normalized
+    /// coordinates: where 0.0 - closest to camera, 1.0 - farthest from camera.
     begin: f32,
-    #[reflect(description = "End of the range in which the level will be visible. \
-    It is expressed in normalized coordinates: where 0.0 - closest to camera, 1.0 - \
-    farthest from camera.")]
+    /// End of the range in which the level will be visible. It is expressed in normalized coordinates:
+    /// where 0.0 - closest to camera, 1.0 - farthest from camera.
     end: f32,
-    /// List of objects, where each object represents level of detail of parent's
-    /// LOD group.
+    /// List of objects, where each object represents level of detail of parent's LOD group.
     pub objects: Vec<Handle<Node>>,
 }
 
@@ -131,83 +124,16 @@ impl LevelOfDetail {
 /// Lod group must contain non-overlapping cascades, each cascade with its own set of objects
 /// that belongs to level of detail. Engine does not care if you create overlapping cascades,
 /// it is your responsibility to create non-overlapping cascades.
-#[derive(Debug, Default, Clone, Visit, Reflect, PartialEq, TypeUuidProvider)]
-#[type_uuid(id = "8e7b18b1-c1e0-47d7-b952-4394c1d049e5")]
+#[derive(Debug, Default, Clone, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "8e7b18b1-c1e0-47d7-b952-4394c1d049e5")]
 pub struct LodGroup {
     /// Set of cascades.
     pub levels: Vec<LevelOfDetail>,
 }
 
-/// Mobility defines a group for scene node which has direct impact on performance
-/// and capabilities of nodes.
-#[derive(
-    Default,
-    Copy,
-    Clone,
-    PartialOrd,
-    PartialEq,
-    Ord,
-    Eq,
-    Debug,
-    Visit,
-    Reflect,
-    AsRefStr,
-    EnumString,
-    VariantNames,
-    TypeUuidProvider,
-)]
-#[type_uuid(id = "57c125ff-e408-4318-9874-f59485e95764")]
-#[repr(u32)]
-pub enum Mobility {
-    /// Transform cannot be changed.
-    ///
-    /// ## Scene and performance.
-    ///
-    /// Nodes with Static mobility should be used all the time you need unchangeable
-    /// node. Such nodes will have maximum optimization during the rendering.
-    ///
-    /// ### Meshes
-    ///
-    /// Static meshes will be baked into larger blocks to reduce draw call count per frame.
-    /// Also static meshes will participate in lightmap generation.
-    ///
-    /// ### Lights
-    ///
-    /// Static lights will be baked in lightmap. They lit only static geometry!
-    /// Specular lighting is not supported.
-    #[default]
-    Static = 0,
-
-    /// Transform cannot be changed, but other node-dependent properties are changeable.
-    ///
-    /// ## Scene and performance.
-    ///
-    /// ### Meshes
-    ///
-    /// Same as Static.
-    ///
-    /// ### Lights
-    ///
-    /// Stationary lights have complex route for shadows:
-    ///   - Shadows from Static/Stationary meshes will be baked into lightmap.
-    ///   - Shadows from Dynamic lights will be re-rendered each frame into shadow map.
-    /// Stationary lights support specular lighting.
-    Stationary = 1,
-
-    /// Transform can be freely changed.
-    ///
-    /// ## Scene and performance.
-    ///
-    /// Dynamic mobility should be used only for the objects that are designed to be
-    /// moving in the scene, for example - objects with physics, or dynamic lights, etc.
-    Dynamic = 2,
-}
-
 /// A property value.
-#[derive(
-    Debug, Visit, Reflect, PartialEq, Clone, AsRefStr, EnumString, VariantNames, TypeUuidProvider,
-)]
-#[type_uuid(id = "cce94b60-a57e-48ba-b6f4-e5e84788f7f8")]
+#[derive(Debug, Visit, Reflect, PartialEq, Clone, AsRefStr, EnumString, VariantNames)]
+#[reflect(type_uuid = "cce94b60-a57e-48ba-b6f4-e5e84788f7f8")]
 pub enum PropertyValue {
     /// A node handle.
     ///
@@ -254,8 +180,8 @@ impl Default for PropertyValue {
 }
 
 /// A custom property.
-#[derive(Debug, Visit, Reflect, Default, Clone, PartialEq, TypeUuidProvider)]
-#[type_uuid(id = "fc87fd21-a5e6-40d5-a79d-19f96b25d6c9")]
+#[derive(Debug, Visit, Reflect, Default, Clone, PartialEq)]
+#[reflect(type_uuid = "fc87fd21-a5e6-40d5-a79d-19f96b25d6c9")]
 pub struct Property {
     /// Name of the property.
     pub name: String,
@@ -301,7 +227,7 @@ pub enum NodeScriptMessage {
     Deserialize,
 )]
 #[repr(transparent)]
-#[reflect(hide_all)]
+#[reflect(type_uuid = "6cebe796-6e14-479d-93a6-9fb04665740c")]
 pub struct SceneNodeId(pub Uuid);
 
 impl Visit for SceneNodeId {
@@ -311,8 +237,8 @@ impl Visit for SceneNodeId {
 }
 
 /// A script container record.
-#[derive(Clone, Reflect, Debug, Default, TypeUuidProvider)]
-#[type_uuid(id = "51bc577b-5a50-4a97-9b31-eda2f3d46c9d")]
+#[derive(Clone, Reflect, Debug, Default)]
+#[reflect(type_uuid = "51bc577b-5a50-4a97-9b31-eda2f3d46c9d")]
 pub struct ScriptRecord {
     // Script is wrapped into `Option` to be able to do take-return trick to bypass borrow checker
     // issues.
@@ -432,15 +358,16 @@ impl<T> DerefMut for TrackedProperty<T> {
 /// # use fyrox_impl::scene::graph::Graph;
 /// # use fyrox_impl::scene::node::Node;
 /// # use fyrox_impl::core::pool::Handle;
-/// # use fyrox_impl::scene::pivot::PivotBuilder;
+/// # use fyrox_impl::scene::pivot::{Pivot, PivotBuilder};
 ///
-/// fn create_pivot_node(graph: &mut Graph) -> Handle<Node> {
+/// fn create_pivot_node(graph: &mut Graph) -> Handle<Pivot> {
 ///     PivotBuilder::new(BaseBuilder::new()
 ///         .with_name("BaseNode"))
 ///         .build(graph)
 /// }
 /// ```
 #[derive(Debug, Reflect, Clone)]
+#[reflect(type_uuid = "5bf7fb77-fd50-4b92-83d7-27153b7da531")]
 pub struct Base {
     #[reflect(hidden)]
     self_handle: Handle<Node>,
@@ -467,22 +394,13 @@ pub struct Base {
 
     /// Control whether this node should be rendered. A node should be rendered only if its render mask shares
     /// some set bits in common with the render mask of the camera.
-    #[reflect(
-        description = "Control whether this node should be rendered. A node should be rendered only if its render mask shares\
-        some set bits in common with the render mask of the camera."
-    )]
     pub render_mask: InheritableVariable<BitMask>,
 
-    #[reflect(
-        description = "Maximum amount of Some(time) that node will \"live\" or None if the node has unlimited lifetime."
-    )]
+    /// Maximum amount of Some(time) that node will \"live\" or None if the node has unlimited lifetime.
     pub(crate) lifetime: InheritableVariable<Option<f32>>,
 
     #[reflect(setter = "set_lod_group")]
     lod_group: InheritableVariable<Option<LodGroup>>,
-
-    #[reflect(setter = "set_mobility")]
-    mobility: InheritableVariable<Mobility>,
 
     #[reflect(setter = "set_tag")]
     tag: InheritableVariable<String>,
@@ -498,13 +416,13 @@ pub struct Base {
     #[reflect(setter = "set_frustum_culling")]
     frustum_culling: InheritableVariable<bool>,
 
-    // When `true` it means that this node is instance of `resource`.
-    // More precisely - this node is root of whole descendant nodes
-    // hierarchy which was instantiated from resource.
+    /// When `true` it means that this node is instance of `resource`.
+    /// More precisely - this node is root of whole descendant nodes
+    /// hierarchy which was instantiated from resource.
     #[reflect(read_only)]
     pub(crate) is_resource_instance_root: bool,
 
-    #[reflect(hidden)]
+    #[reflect(read_only)]
     pub(crate) global_visibility: Cell<bool>,
 
     #[reflect(hidden)]
@@ -513,7 +431,7 @@ pub struct Base {
     #[reflect(hidden)]
     pub(crate) children: Vec<Handle<Node>>,
 
-    #[reflect(hidden)]
+    #[reflect(read_only)]
     pub(crate) global_transform: Cell<Matrix4<f32>>,
 
     // Bone-specific matrix. Non-serializable.
@@ -531,8 +449,10 @@ pub struct Base {
     #[reflect(hidden)]
     pub(crate) original_handle_in_resource: Handle<Node>,
 
-    #[reflect(read_only)]
-    #[reflect(hidden)]
+    /// Unique id of a node, that could be used as a reliable "index" of the node. This id is mostly
+    /// useful for network games. Keep in mind, that this id **will** be randomized in case if you're
+    /// instantiating a prefab. In other words, all instances of a prefab will have unique instance
+    /// id.
     pub(crate) instance_id: SceneNodeId,
 
     // Scripts of the scene node.
@@ -543,7 +463,7 @@ pub struct Base {
     // Use it at your own risk only when you're completely sure what you are doing.
     pub(crate) scripts: Vec<ScriptRecord>,
 
-    #[reflect(hidden)]
+    #[reflect(read_only)]
     pub(crate) global_enabled: Cell<bool>,
 }
 
@@ -582,13 +502,6 @@ impl Base {
         self.name.to_mutable()
     }
 
-    /// Returns shared reference to local transform of a node, can be used to fetch
-    /// some local spatial properties, such as position, rotation, scale, etc.
-    #[inline]
-    pub fn local_transform(&self) -> &Transform {
-        &self.local_transform
-    }
-
     pub(crate) fn on_connected_to_graph(
         &mut self,
         self_handle: Handle<Node>,
@@ -616,6 +529,13 @@ impl Base {
         Log::verify(sender.send(NodeMessage::new(node, kind)));
     }
 
+    /// Returns shared reference to local transform of a node, can be used to fetch
+    /// some local spatial properties, such as position, rotation, scale, etc.
+    #[inline]
+    pub fn local_transform(&self) -> &Transform {
+        &self.local_transform
+    }
+
     /// Returns mutable reference to local transform of a node, can be used to set some local spatial
     /// properties, such as position, rotation, scale, etc. To set global position and rotation, use
     /// [`super::Graph::set_global_position`] and [`super::Graph::set_global_rotation`] methods respectively.
@@ -630,6 +550,66 @@ impl Base {
     pub fn set_local_transform(&mut self, transform: Transform) {
         self.local_transform.property = transform;
         self.notify(self.self_handle, NodeMessageKind::TransformChanged);
+    }
+
+    /// Sets the new position of the node in the parent's node coordinate system.
+    #[inline]
+    pub fn set_position(&mut self, position: Vector3<f32>) {
+        self.local_transform_mut().set_position(position);
+    }
+
+    /// Sets the new position of the node in the parent's node coordinate system.
+    #[inline]
+    pub fn set_position_xyz(&mut self, x: f32, y: f32, z: f32) {
+        self.set_position(Vector3::new(x, y, z))
+    }
+
+    /// Sets the new rotation of the node in the parent's node coordinate system.
+    #[inline]
+    pub fn set_rotation(&mut self, rotation: UnitQuaternion<f32>) {
+        self.local_transform_mut().set_rotation(rotation);
+    }
+
+    /// Sets the new rotation of the node in the parent's node coordinate system.
+    #[inline]
+    pub fn set_rotation_angles(&mut self, roll: f32, pitch: f32, yaw: f32) {
+        self.set_rotation(UnitQuaternion::from_euler_angles(roll, pitch, yaw))
+    }
+
+    /// Sets the new rotation of the node around X axis in the parent's node coordinate system.
+    #[inline]
+    pub fn set_rotation_x(&mut self, angle: f32) {
+        self.set_rotation(UnitQuaternion::from_axis_angle(&Vector3::x_axis(), angle))
+    }
+
+    /// Sets the new rotation of the node around Y axis in the parent's node coordinate system.
+    #[inline]
+    pub fn set_rotation_y(&mut self, angle: f32) {
+        self.set_rotation(UnitQuaternion::from_axis_angle(&Vector3::y_axis(), angle))
+    }
+
+    /// Sets the new rotation of the node around Z axis in the parent's node coordinate system.
+    #[inline]
+    pub fn set_rotation_z(&mut self, angle: f32) {
+        self.set_rotation(UnitQuaternion::from_axis_angle(&Vector3::z_axis(), angle))
+    }
+
+    /// Sets the new scale of the node in the parent's node coordinate system.
+    #[inline]
+    pub fn set_scale(&mut self, scale: Vector3<f32>) {
+        self.local_transform_mut().set_scale(scale);
+    }
+
+    /// Sets the new scale of the node in the parent's node coordinate system.
+    #[inline]
+    pub fn set_scale_xyz(&mut self, x: f32, y: f32, z: f32) {
+        self.set_scale(Vector3::new(x, y, z));
+    }
+
+    /// Sets the new scale of the node for all axes at once in the parent's node coordinate system.
+    #[inline]
+    pub fn set_uniform_scale(&mut self, scale: f32) {
+        self.set_scale(Vector3::repeat(scale))
     }
 
     /// Tries to find properties by the name. The method returns an iterator because it possible
@@ -752,18 +732,6 @@ impl Base {
             .transform(&self.global_transform())
     }
 
-    /// Set new mobility for the node. See [`Mobility`] docs for more info.
-    #[inline]
-    pub fn set_mobility(&mut self, mobility: Mobility) -> Mobility {
-        self.mobility.set_value_and_mark_modified(mobility)
-    }
-
-    /// Return current mobility of the node.
-    #[inline]
-    pub fn mobility(&self) -> Mobility {
-        *self.mobility
-    }
-
     /// Returns combined visibility of an node. This is the final visibility of a node. Global visibility calculated
     /// using visibility of all parent nodes until root one, so if some parent node upper on tree is invisible then
     /// all its children will be invisible. It defines if object will be rendered. It is *not* the same as real
@@ -782,6 +750,13 @@ impl Base {
     #[inline]
     pub fn original_handle_in_resource(&self) -> Handle<Node> {
         self.original_handle_in_resource
+    }
+
+    /// Returns `true` if the node has a parent object in a resource from which it may restore
+    /// values of its inheritable properties.
+    #[inline]
+    pub fn has_inheritance_parent(&self) -> bool {
+        self.original_handle_in_resource.is_some() && self.resource.is_some()
     }
 
     /// Returns position of the node in absolute coordinates.
@@ -1017,30 +992,30 @@ impl Base {
             .filter_map(|e| e.script.as_mut().and_then(|s| s.cast_mut::<T>()))
     }
 
-    /// Tries find a component of the given type `C` across **all** available scripts of the node.
-    /// If you want to search a component `C` in a particular script, then use [`Self::try_get_script`]
-    /// and then search for component in it.
+    /// Tries find a field of the given type `C` across **all** available scripts of the node.
+    /// If you want to search a field `C` in a particular script, then use [`Self::try_get_script`]
+    /// and then search for field in it.
     #[inline]
-    pub fn try_get_script_component<C>(&self) -> Option<&C>
+    pub fn try_get_script_field<C>(&self) -> Option<&C>
     where
-        C: Any,
+        C: Reflect,
     {
         self.scripts
             .iter()
-            .find_map(|s| s.as_ref().and_then(|s| s.query_component_ref::<C>()))
+            .find_map(|s| s.as_ref().and_then(|s| s.self_or_field_ref::<C>()))
     }
 
-    /// Tries find a component of the given type `C` across **all** available scripts of the node.
-    /// If you want to search a component `C` in a particular script, then use [`Self::try_get_script`]
-    /// and then search for component in it.
+    /// Tries find a field of the given type `C` across **all** available scripts of the node.
+    /// If you want to search a field `C` in a particular script, then use [`Self::try_get_script`]
+    /// and then search for field in it.
     #[inline]
-    pub fn try_get_script_component_mut<C>(&mut self) -> Option<&mut C>
+    pub fn try_get_script_field_mut<C>(&mut self) -> Option<&mut C>
     where
-        C: Any,
+        C: Reflect,
     {
         self.scripts
             .iter_mut()
-            .find_map(|s| s.as_mut().and_then(|s| s.query_component_mut::<C>()))
+            .find_map(|s| s.as_mut().and_then(|s| s.self_or_field_mut::<C>()))
     }
 
     /// Returns total count of scripts assigned to the node.
@@ -1124,10 +1099,10 @@ impl Base {
         if let Some(resource) = self.resource.as_ref() {
             let mut state = resource.state();
             if let Some(model) = state.data() {
-                if let Some(ancestor_node) = model
+                if let Ok(ancestor_node) = model
                     .get_scene()
                     .graph
-                    .try_get(self.original_handle_in_resource)
+                    .try_get_node(self.original_handle_in_resource)
                 {
                     return if ancestor_node.resource.is_none() {
                         Some(resource.clone())
@@ -1191,14 +1166,7 @@ impl Visit for Base {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         let mut region = visitor.enter_region(name)?;
 
-        if self.name.visit("Name", &mut region).is_err() {
-            // Name was wrapped into `InheritableVariable` previously, so we must maintain
-            // backward compatibility here.
-            let mut region = region.enter_region("Name")?;
-            let mut value = String::default();
-            value.visit("Value", &mut region)?;
-            self.name = ImmutableString::new(value);
-        }
+        self.name.visit("Name", &mut region)?;
         self.local_transform.visit("Transform", &mut region)?;
         self.visibility.visit("Visibility", &mut region)?;
         self.parent.visit("Parent", &mut region)?;
@@ -1208,16 +1176,15 @@ impl Visit for Base {
             .visit("IsResourceInstance", &mut region)?;
         self.lifetime.visit("Lifetime", &mut region)?;
         self.lod_group.visit("LodGroup", &mut region)?;
-        self.mobility.visit("Mobility", &mut region)?;
         self.original_handle_in_resource
             .visit("Original", &mut region)?;
         self.tag.visit("Tag", &mut region)?;
-        let _ = self.properties.visit("Properties", &mut region);
-        let _ = self.frustum_culling.visit("FrustumCulling", &mut region);
-        let _ = self.cast_shadows.visit("CastShadows", &mut region);
-        let _ = self.instance_id.visit("InstanceId", &mut region);
-        let _ = self.enabled.visit("Enabled", &mut region);
-        let _ = self.render_mask.visit("RenderMask", &mut region);
+        self.properties.visit("Properties", &mut region)?;
+        self.frustum_culling.visit("FrustumCulling", &mut region)?;
+        self.cast_shadows.visit("CastShadows", &mut region)?;
+        self.instance_id.visit("InstanceId", &mut region)?;
+        self.enabled.visit("Enabled", &mut region)?;
+        self.render_mask.visit("RenderMask", &mut region)?;
 
         // Script visiting may fail for various reasons:
         //
@@ -1227,15 +1194,6 @@ impl Visit for Base {
         //
         // None of the reasons are fatal and we should still give an ability to load such node
         // to edit or remove it.
-
-        // This block is needed for backward compatibility
-        let mut old_script = None;
-        if region.is_reading() && visit_opt_script("Script", &mut old_script, &mut region).is_ok() {
-            if let Some(old_script) = old_script {
-                self.scripts.push(ScriptRecord::new(old_script));
-            }
-            return Ok(());
-        }
 
         let _ = self.scripts.visit("Scripts", &mut region);
 
@@ -1251,7 +1209,6 @@ pub struct BaseBuilder {
     children: Vec<Handle<Node>>,
     lifetime: Option<f32>,
     lod_group: Option<LodGroup>,
-    mobility: Mobility,
     inv_bind_pose_transform: Matrix4<f32>,
     tag: String,
     frustum_culling: bool,
@@ -1278,7 +1235,6 @@ impl BaseBuilder {
             children: Default::default(),
             lifetime: None,
             lod_group: None,
-            mobility: Default::default(),
             inv_bind_pose_transform: Matrix4::identity(),
             tag: Default::default(),
             frustum_culling: true,
@@ -1287,13 +1243,6 @@ impl BaseBuilder {
             instance_id: SceneNodeId(Uuid::new_v4()),
             enabled: true,
         }
-    }
-
-    /// Sets desired mobility.
-    #[inline]
-    pub fn with_mobility(mut self, mobility: Mobility) -> Self {
-        self.mobility = mobility;
-        self
     }
 
     /// Sets desired name.
@@ -1330,16 +1279,11 @@ impl BaseBuilder {
         self
     }
 
-    /// Sets desired list of children nodes.
-    #[inline]
-    pub fn with_children<'a, I: IntoIterator<Item = &'a Handle<Node>>>(
-        mut self,
-        children: I,
-    ) -> Self {
-        for &child in children.into_iter() {
-            if child.is_some() {
-                self.children.push(child)
-            }
+    /// Adds a new child to the node. If the given handle is [`Handle::NONE`], then the handle will
+    /// be ignored.
+    pub fn with_child(mut self, handle: Handle<impl ObjectOrVariant<Node>>) -> Self {
+        if handle.is_some() {
+            self.children.push(handle.to_base())
         }
         self
     }
@@ -1426,7 +1370,6 @@ impl BaseBuilder {
             original_handle_in_resource: Handle::NONE,
             is_resource_instance_root: false,
             lod_group: self.lod_group.into(),
-            mobility: self.mobility.into(),
             tag: self.tag.into(),
             properties: Default::default(),
             frustum_culling: self.frustum_culling.into(),

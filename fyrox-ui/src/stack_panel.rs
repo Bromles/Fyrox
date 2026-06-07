@@ -24,35 +24,23 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
-    define_constructor,
-    message::{MessageDirection, UiMessage},
+    core::{algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, visitor::prelude::*},
+    message::{MessageData, UiMessage},
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, Orientation, UiNode, UserInterface,
 };
 
-use fyrox_core::uuid_provider;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
-use std::ops::{Deref, DerefMut};
+use fyrox_graph::SceneGraph;
 
 /// A set of possible [`StackPanel`] widget messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StackPanelMessage {
-    /// The message is used to change orientation of the stack panel.
+    /// The message is used to change the orientation of the stack panel.
     Orientation(Orientation),
 }
-
-impl StackPanelMessage {
-    define_constructor!(
-        /// Creates [`StackPanelMessage::Orientation`] message.
-        StackPanelMessage:Orientation => fn orientation(Orientation), layout: false
-    );
-}
+impl MessageData for StackPanelMessage {}
 
 /// Stack Panels are one of several methods to position multiple widgets in relation to each other. A Stack Panel Widget
 /// orders its children widgets linearly, aka in a stack of widgets, based on the order the widgets were added as children.
@@ -67,7 +55,9 @@ impl StackPanelMessage {
 /// #     text::TextBuilder,
 /// #     stack_panel::StackPanelBuilder,
 /// # };
-/// fn create_stack_panel(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// # use fyrox_ui::stack_panel::StackPanel;
+///
+/// fn create_stack_panel(ctx: &mut BuildContext) -> Handle<StackPanel> {
 ///     StackPanelBuilder::new(
 ///         WidgetBuilder::new()
 ///             .with_child(
@@ -117,8 +107,11 @@ impl StackPanelMessage {
 ///     .build(ctx);
 /// # }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "d868f554-a2c5-4280-abfc-396d10a0e1ed"
+)]
 pub struct StackPanel {
     /// Base widget of the stack panel.
     pub widget: Widget,
@@ -132,6 +125,7 @@ impl ConstructorProvider<UiNode, UserInterface> for StackPanel {
             .with_variant("Stack Panel", |ui| {
                 StackPanelBuilder::new(WidgetBuilder::new().with_name("Stack Panel"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Layout")
@@ -139,8 +133,6 @@ impl ConstructorProvider<UiNode, UserInterface> for StackPanel {
 }
 
 crate::define_widget_deref!(StackPanel);
-
-uuid_provider!(StackPanel = "d868f554-a2c5-4280-abfc-396d10a0e1ed");
 
 impl Control for StackPanel {
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
@@ -247,13 +239,10 @@ impl Control for StackPanel {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if message.destination() == self.handle && message.direction() == MessageDirection::ToWidget
-        {
-            if let Some(StackPanelMessage::Orientation(orientation)) = message.data() {
-                if *orientation != *self.orientation {
-                    self.orientation.set_value_and_mark_modified(*orientation);
-                    self.invalidate_layout();
-                }
+        if let Some(StackPanelMessage::Orientation(orientation)) = message.data_for(self.handle) {
+            if *orientation != *self.orientation {
+                self.orientation.set_value_and_mark_modified(*orientation);
+                self.invalidate_layout();
             }
         }
     }
@@ -295,8 +284,8 @@ impl StackPanelBuilder {
 
     /// Finishes stack panel building and adds the new stack panel widget instance to the user interface and
     /// returns its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(self.build_node(ctx))
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<StackPanel> {
+        ctx.add(self.build_stack_panel(ctx))
     }
 }
 

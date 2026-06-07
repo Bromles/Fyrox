@@ -28,11 +28,9 @@ use crate::{
     brush::Brush,
     check_box::{CheckBoxBuilder, CheckBoxMessage},
     core::{
-        algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
+        algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*, visitor::prelude::*,
     },
     decorator::{DecoratorBuilder, DecoratorMessage},
-    define_constructor,
     grid::{Column, GridBuilder, Row},
     message::KeyCode,
     message::{MessageDirection, UiMessage},
@@ -44,11 +42,14 @@ use crate::{
     BuildContext, Control, MouseButton, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 
-use fyrox_core::uuid_provider;
+use crate::check_box::CheckBox;
+use crate::message::MessageData;
+use crate::stack_panel::StackPanel;
+use fyrox_core::pool::{HandlesVecExtension, ObjectOrVariant};
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::{BaseSceneGraph, SceneGraph, SceneGraphNode};
+use fyrox_graph::SceneGraph;
 use std::collections::VecDeque;
-use std::ops::{Deref, DerefMut};
 
 /// Opaque selection state of a tree.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -77,16 +78,16 @@ pub enum TreeMessage {
         expansion_strategy: TreeExpansionStrategy,
     },
     /// A message, that is used to add an item to a tree.
-    AddItem(Handle<UiNode>),
+    AddItem(Handle<Tree>),
     /// A message, that is used to remove an item from a tree.
-    RemoveItem(Handle<UiNode>),
+    RemoveItem(Handle<Tree>),
     /// A message, that is used to prevent expander from being hidden when a tree does not have
     /// any child items.
-    SetExpanderShown(bool),
+    ExpanderVisible(bool),
     /// A message, that is used to specify a new set of children items of a tree.
     SetItems {
         /// A set of handles to new tree items.
-        items: Vec<Handle<UiNode>>,
+        items: Vec<Handle<Tree>>,
         /// A flag, that defines whether the previous items should be deleted or not. `false` is
         /// usually used to reorder existing items.
         remove_previous: bool,
@@ -95,45 +96,19 @@ pub enum TreeMessage {
     #[doc(hidden)]
     Select(SelectionState),
 }
-
-impl TreeMessage {
-    define_constructor!(
-        /// Creates [`TreeMessage::Expand`] message.
-        TreeMessage:Expand => fn expand(expand: bool, expansion_strategy: TreeExpansionStrategy), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeMessage::AddItem`] message.
-        TreeMessage:AddItem => fn add_item(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeMessage::RemoveItem`] message.
-        TreeMessage:RemoveItem => fn remove_item(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeMessage::SetExpanderShown`] message.
-        TreeMessage:SetExpanderShown => fn set_expander_shown(bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeMessage::SetItems`] message.
-        TreeMessage:SetItems => fn set_items(items: Vec<Handle<UiNode>>, remove_previous: bool), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeMessage::Select`] message.
-        TreeMessage:Select => fn select(SelectionState), layout: false
-    );
-}
+impl MessageData for TreeMessage {}
 
 /// A set of messages, that could be used to alternate the state of a [`TreeRoot`] widget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeRootMessage {
     /// A message, that is used to add a child item to a tree root.
-    AddItem(Handle<UiNode>),
+    AddItem(Handle<Tree>),
     /// A message, that is used to remove a child item from a tree root.
-    RemoveItem(Handle<UiNode>),
+    RemoveItem(Handle<Tree>),
     /// A message, that is used to specify a new set of children items of a tree root.
-    Items(Vec<Handle<UiNode>>),
+    Items(Vec<Handle<Tree>>),
     /// A message, that it is used to fetch or set current selection of a tree root.
-    Selected(Vec<Handle<UiNode>>),
+    Select(Vec<Handle<Tree>>),
     /// A message, that is used to expand all descendant trees in the hierarchy.
     ExpandAll,
     /// A message, that is used to collapse all descendant trees in the hierarchy.
@@ -141,37 +116,7 @@ pub enum TreeRootMessage {
     /// A message, that is used as a notification when tree root's items has changed.
     ItemsChanged,
 }
-
-impl TreeRootMessage {
-    define_constructor!(
-        /// Creates [`TreeRootMessage::AddItem`] message.
-        TreeRootMessage:AddItem => fn add_item(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeRootMessage::RemoveItem`] message.
-        TreeRootMessage:RemoveItem=> fn remove_item(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeRootMessage::Items`] message.
-        TreeRootMessage:Items => fn items(Vec<Handle<UiNode >>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeRootMessage::Selected`] message.
-        TreeRootMessage:Selected => fn select(Vec<Handle<UiNode >>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeRootMessage::ExpandAll`] message.
-        TreeRootMessage:ExpandAll => fn expand_all(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeRootMessage::CollapseAll`] message.
-        TreeRootMessage:CollapseAll => fn collapse_all(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`TreeRootMessage::ItemsChanged`] message.
-        TreeRootMessage:ItemsChanged => fn items_changed(), layout: false
-    );
-}
+impl MessageData for TreeRootMessage {}
 
 /// Tree widget allows you to create views for hierarchical data. It could be used to show file
 /// system entries, graphs, and anything else that could be represented as a tree.
@@ -188,9 +133,10 @@ impl TreeRootMessage {
 /// #     widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::tree::TreeRoot;
 /// #
-/// fn create_tree(ctx: &mut BuildContext) -> Handle<UiNode> {
-///     // Note, that `TreeRoot` widget is mandatory here. Otherwise some functionality of
+/// fn create_tree(ctx: &mut BuildContext) -> Handle<TreeRoot> {
+///     // Note, that `TreeRoot` widget is mandatory here. Otherwise, some functionality of
 ///     // descendant trees won't work.
 ///     TreeRootBuilder::new(WidgetBuilder::new())
 ///         .with_items(vec![TreeBuilder::new(WidgetBuilder::new())
@@ -230,7 +176,7 @@ impl TreeRootMessage {
 /// `Any Mouse Button` - select.
 /// `Ctrl+Click` - enables multi-selection.
 /// `Alt+Click` - prevents selection allowing you to use drag'n'drop.
-/// `Shift+Click` - selects a span of items.
+/// `Shift+Click` - select a span of items.
 /// `ArrowUp` - navigate up from the topmost selection.
 /// `ArrowDown` - navigate down from the lowermost selection.
 /// `ArrowRight` - expand the selected item (first from the selection) or (if it is expanded), go
@@ -262,11 +208,7 @@ impl TreeRootMessage {
 ///         )
 ///         .build(ctx);
 ///
-///     ui.send_message(TreeMessage::add_item(
-///         tree,
-///         MessageDirection::ToWidget,
-///         item,
-///     ));
+///     ui.send(tree, TreeMessage::AddItem(item));
 /// }
 /// ```
 ///
@@ -278,21 +220,18 @@ impl TreeRootMessage {
 /// # use fyrox_ui::{
 /// #     core::pool::Handle, message::MessageDirection, tree::TreeMessage, UiNode, UserInterface,
 /// # };
+/// # use fyrox_ui::tree::Tree;
 /// #
-/// fn remove_item(tree: Handle<UiNode>, item_to_remove: Handle<UiNode>, ui: &UserInterface) {
+/// fn remove_item(tree: Handle<UiNode>, item_to_remove: Handle<Tree>, ui: &UserInterface) {
 ///     // Note that the `ui` is borrowed as immutable here, which means that the item will **not**
 ///     // be removed immediately, but on the next update call.
-///     ui.send_message(TreeMessage::remove_item(
-///         tree,
-///         MessageDirection::ToWidget,
-///         item_to_remove,
-///     ));
+///     ui.send(tree, TreeMessage::RemoveItem(item_to_remove));
 /// }
 /// ```
 ///
 /// ## Setting New Items
 ///
-/// Tree's items could be changed all at once using the [`TreeMessage::SetItems`] message like so:
+/// Tree items could be changed all at once using the [`TreeMessage::SetItems`] message like so:
 ///
 /// ```rust
 /// # use fyrox_ui::{
@@ -324,14 +263,11 @@ impl TreeRootMessage {
 ///             .build(ctx),
 ///     ];
 ///
-///     // A flag, that tells that the UI system must destroy previous items first.
-///     let remove_previous = true;
-///     ui.send_message(TreeMessage::set_items(
-///         tree,
-///         MessageDirection::ToWidget,
+///     ui.send(tree, TreeMessage::SetItems{
 ///         items,
-///         remove_previous,
-///     ));
+///         // A flag, that tells that the UI system must destroy previous items first.
+///         remove_previous: true,
+///     });
 /// }
 /// ```
 ///
@@ -350,31 +286,32 @@ impl TreeRootMessage {
 /// # };
 /// #
 /// fn expand_tree(tree: Handle<UiNode>, ui: &UserInterface) {
-///     ui.send_message(TreeMessage::expand(
-///         tree,
-///         MessageDirection::ToWidget,
-///         true,
-///         TreeExpansionStrategy::RecursiveAncestors,
-///     ));
+///     ui.send(tree, TreeMessage::Expand{
+///         expand: true,
+///         expansion_strategy: TreeExpansionStrategy::RecursiveAncestors,
+///     });
 /// }
 /// ```
-#[derive(Default, Debug, Clone, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Debug, Clone, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "e090e913-393a-4192-a220-e1d87e272170"
+)]
 pub struct Tree {
     /// Base widget of the tree.
     pub widget: Widget,
     /// Current expander of the tree. Usually, it is just a handle of CheckBox widget.
-    pub expander: Handle<UiNode>,
+    pub expander: Handle<CheckBox>,
     /// Current content of the tree.
     pub content: Handle<UiNode>,
     /// Current layout panel, that used to arrange children items.
-    pub panel: Handle<UiNode>,
+    pub panel: Handle<StackPanel>,
     /// A flag, that indicates whether the tree is expanded or not.
     pub is_expanded: bool,
     /// Current background widget of the tree.
     pub background: Handle<UiNode>,
     /// Current set of items of the tree.
-    pub items: Vec<Handle<UiNode>>,
+    pub items: Vec<Handle<Tree>>,
     /// A flag, that defines whether the tree is selected or not.
     pub is_selected: bool,
     /// A flag, that defines whether the tree should always show its expander, even if there's no
@@ -388,6 +325,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Tree {
             .with_variant("Tree", |ui| {
                 TreeBuilder::new(WidgetBuilder::new().with_name("Tree"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Visual")
@@ -396,18 +334,15 @@ impl ConstructorProvider<UiNode, UserInterface> for Tree {
 
 crate::define_widget_deref!(Tree);
 
-uuid_provider!(Tree = "e090e913-393a-4192-a220-e1d87e272170");
-
 impl Control for Tree {
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
         let size = self.widget.arrange_override(ui, final_size);
 
         let expander_visibility = !self.items.is_empty() || self.always_show_expander;
-        ui.send_message(WidgetMessage::visibility(
+        ui.send(
             self.expander,
-            MessageDirection::ToWidget,
-            expander_visibility,
-        ));
+            WidgetMessage::Visibility(expander_visibility),
+        );
 
         size
     }
@@ -419,12 +354,13 @@ impl Control for Tree {
             if message.destination() == self.expander
                 && message.direction == MessageDirection::FromWidget
             {
-                ui.send_message(TreeMessage::expand(
+                ui.send(
                     self.handle(),
-                    MessageDirection::ToWidget,
-                    *expanded,
-                    TreeExpansionStrategy::Direct,
-                ));
+                    TreeMessage::Expand {
+                        expand: *expanded,
+                        expansion_strategy: TreeExpansionStrategy::Direct,
+                    },
+                );
             }
         } else if let Some(msg) = message.data::<WidgetMessage>() {
             if !message.handled() {
@@ -434,50 +370,50 @@ impl Control for Tree {
                         // Prevent selection changes by Alt+Click to be able to drag'n'drop tree items.
                         if !keyboard_modifiers.alt {
                             if let Some((tree_root_handle, tree_root)) =
-                                ui.find_component_up::<TreeRoot>(self.parent())
+                                ui.find_self_or_field_up::<TreeRoot>(self.parent())
                             {
                                 let selection = if keyboard_modifiers.control {
                                     let mut selection = tree_root.selected.clone();
                                     if let Some(existing) =
-                                        selection.iter().position(|&h| h == self.handle)
+                                        selection.iter().position(|&h| self.handle == h)
                                     {
                                         selection.remove(existing);
                                     } else {
-                                        selection.push(self.handle);
+                                        selection.push(self.handle.to_variant());
                                     }
                                     Some(selection)
                                 } else if keyboard_modifiers.shift {
                                     // Select range.
                                     let mut first_position = None;
                                     let mut this_position = None;
-                                    let mut flat_hierarchy = Vec::new();
+                                    let mut flat_hierarchy = Vec::<Handle<Tree>>::new();
 
                                     fn visit_widget(
                                         this_tree: &Tree,
                                         handle: Handle<UiNode>,
                                         ui: &UserInterface,
-                                        selection: &[Handle<UiNode>],
-                                        hierarchy: &mut Vec<Handle<UiNode>>,
+                                        selection: &[Handle<Tree>],
+                                        hierarchy: &mut Vec<Handle<Tree>>,
                                         first_position: &mut Option<usize>,
                                         this_position: &mut Option<usize>,
                                     ) {
                                         let node = if handle == this_tree.handle {
                                             *this_position = Some(hierarchy.len());
 
-                                            hierarchy.push(handle);
+                                            hierarchy.push(handle.to_variant());
 
                                             &this_tree.widget
                                         } else {
                                             let node = ui.node(handle);
 
                                             if let Some(first) = selection.first() {
-                                                if *first == handle {
+                                                if handle == *first {
                                                     *first_position = Some(hierarchy.len());
                                                 }
                                             }
 
-                                            if node.query_component::<Tree>().is_some() {
-                                                hierarchy.push(handle);
+                                            if node.self_or_field_ref::<Tree>().is_some() {
+                                                hierarchy.push(handle.to_variant());
                                             }
 
                                             node
@@ -518,32 +454,25 @@ impl Control for Tree {
                                         Some(vec![])
                                     }
                                 } else if !self.is_selected {
-                                    Some(vec![self.handle()])
+                                    Some(vec![self.handle().to_variant()])
                                 } else {
                                     None
                                 };
                                 if let Some(selection) = selection {
-                                    ui.send_message(TreeRootMessage::select(
-                                        tree_root_handle,
-                                        MessageDirection::ToWidget,
-                                        selection,
-                                    ));
+                                    ui.send(tree_root_handle, TreeRootMessage::Select(selection));
                                 }
                                 message.set_handled(true);
                             }
                         }
                     }
-                    WidgetMessage::DoubleClick { button } => {
-                        if *button == MouseButton::Left {
-                            // Mimic click on expander button to have uniform behavior.
-                            ui.send_message(CheckBoxMessage::checked(
-                                self.expander,
-                                MessageDirection::ToWidget,
-                                Some(!self.is_expanded),
-                            ));
+                    WidgetMessage::DoubleClick { button } if *button == MouseButton::Left => {
+                        // Mimic click on expander button to have uniform behavior.
+                        ui.send(
+                            self.expander,
+                            CheckBoxMessage::Check(Some(!self.is_expanded)),
+                        );
 
-                            message.set_handled(true);
-                        }
+                        message.set_handled(true);
                     }
                     _ => (),
                 }
@@ -557,27 +486,19 @@ impl Control for Tree {
                     } => {
                         self.is_expanded = expand;
 
-                        ui.send_message(WidgetMessage::visibility(
-                            self.panel,
-                            MessageDirection::ToWidget,
-                            self.is_expanded,
-                        ));
-
-                        ui.send_message(CheckBoxMessage::checked(
-                            self.expander,
-                            MessageDirection::ToWidget,
-                            Some(expand),
-                        ));
+                        ui.send(self.panel, WidgetMessage::Visibility(self.is_expanded));
+                        ui.send(self.expander, CheckBoxMessage::Check(Some(expand)));
 
                         match expansion_strategy {
                             TreeExpansionStrategy::RecursiveDescendants => {
                                 for &item in &self.items {
-                                    ui.send_message(TreeMessage::expand(
+                                    ui.send(
                                         item,
-                                        MessageDirection::ToWidget,
-                                        expand,
-                                        expansion_strategy,
-                                    ));
+                                        TreeMessage::Expand {
+                                            expand,
+                                            expansion_strategy,
+                                        },
+                                    );
                                 }
                             }
                             TreeExpansionStrategy::RecursiveAncestors => {
@@ -588,12 +509,13 @@ impl Control for Tree {
                                 let parent_tree =
                                     self.find_by_criteria_up(ui, |n| n.cast::<Tree>().is_some());
                                 if parent_tree.is_some() {
-                                    ui.send_message(TreeMessage::expand(
+                                    ui.send(
                                         parent_tree,
-                                        MessageDirection::ToWidget,
-                                        expand,
-                                        expansion_strategy,
-                                    ));
+                                        TreeMessage::Expand {
+                                            expand,
+                                            expansion_strategy,
+                                        },
+                                    );
                                 }
                             }
                             TreeExpansionStrategy::Direct => {
@@ -602,25 +524,17 @@ impl Control for Tree {
                             }
                         }
                     }
-                    &TreeMessage::SetExpanderShown(show) => {
+                    &TreeMessage::ExpanderVisible(show) => {
                         self.always_show_expander = show;
                         self.invalidate_arrange();
                     }
                     &TreeMessage::AddItem(item) => {
-                        ui.send_message(WidgetMessage::link(
-                            item,
-                            MessageDirection::ToWidget,
-                            self.panel,
-                        ));
-
+                        ui.send(item, WidgetMessage::link_with(self.panel));
                         self.items.push(item);
                     }
                     &TreeMessage::RemoveItem(item) => {
                         if let Some(pos) = self.items.iter().position(|&i| i == item) {
-                            ui.send_message(WidgetMessage::remove(
-                                item,
-                                MessageDirection::ToWidget,
-                            ));
+                            ui.send(item, WidgetMessage::Remove);
                             self.items.remove(pos);
                         }
                     }
@@ -630,29 +544,18 @@ impl Control for Tree {
                     } => {
                         if *remove_previous {
                             for &item in self.items.iter() {
-                                ui.send_message(WidgetMessage::remove(
-                                    item,
-                                    MessageDirection::ToWidget,
-                                ));
+                                ui.send(item, WidgetMessage::Remove);
                             }
                         }
                         for &item in items {
-                            ui.send_message(WidgetMessage::link(
-                                item,
-                                MessageDirection::ToWidget,
-                                self.panel,
-                            ));
+                            ui.send(item, WidgetMessage::link_with(self.panel));
                         }
                         self.items.clone_from(items);
                     }
                     &TreeMessage::Select(state) => {
                         if self.is_selected != state.0 {
                             self.is_selected = state.0;
-                            ui.send_message(DecoratorMessage::select(
-                                self.background,
-                                MessageDirection::ToWidget,
-                                self.is_selected,
-                            ));
+                            ui.send(self.background, DecoratorMessage::Select(self.is_selected));
                         }
                     }
                 }
@@ -664,8 +567,8 @@ impl Control for Tree {
 impl Tree {
     /// Adds new item to given tree. This method is meant to be used only on widget build stage,
     /// any runtime actions should be done via messages.
-    pub fn add_item(tree: Handle<UiNode>, item: Handle<UiNode>, ctx: &mut BuildContext) {
-        if let Some(tree) = ctx[tree].cast_mut::<Tree>() {
+    pub fn add_item(tree: Handle<Tree>, item: Handle<Tree>, ctx: &mut BuildContext) {
+        if let Ok(tree) = ctx.inner_mut().try_get_mut(tree) {
             tree.items.push(item);
             let panel = tree.panel;
             ctx.link(item, panel);
@@ -676,7 +579,7 @@ impl Tree {
 /// Tree builder creates [`Tree`] widget instances and adds them to the user interface.
 pub struct TreeBuilder {
     widget_builder: WidgetBuilder,
-    items: Vec<Handle<UiNode>>,
+    items: Vec<Handle<Tree>>,
     content: Handle<UiNode>,
     is_expanded: bool,
     always_show_expander: bool,
@@ -697,14 +600,14 @@ impl TreeBuilder {
     }
 
     /// Sets the desired children items of the tree.
-    pub fn with_items(mut self, items: Vec<Handle<UiNode>>) -> Self {
+    pub fn with_items(mut self, items: Vec<Handle<Tree>>) -> Self {
         self.items = items;
         self
     }
 
     /// Sets the desired content of the tree.
-    pub fn with_content(mut self, content: Handle<UiNode>) -> Self {
-        self.content = content;
+    pub fn with_content(mut self, content: Handle<impl ObjectOrVariant<UiNode>>) -> Self {
+        self.content = content.to_base();
         self
     }
 
@@ -714,7 +617,7 @@ impl TreeBuilder {
         self
     }
 
-    /// Sets whether the tree should always show its expander, no matter if has children items or
+    /// Sets whether the tree should always show its expander, no matter if it has children items or
     /// not.
     pub fn with_always_show_expander(mut self, state: bool) -> Self {
         self.always_show_expander = state;
@@ -727,7 +630,7 @@ impl TreeBuilder {
         self
     }
 
-    /// Builds the tree widget, but does not add it to user interface.
+    /// Builds the tree widget, but does not add it to the user interface.
     pub fn build_tree(self, ctx: &mut BuildContext) -> Tree {
         let expander = build_expander(
             self.always_show_expander,
@@ -770,6 +673,7 @@ impl TreeBuilder {
             .with_pressed_brush(Brush::Solid(Color::TRANSPARENT).into())
             .with_pressable(false)
             .build(ctx)
+            .to_base()
         });
 
         ctx.link(internals, item_background);
@@ -785,7 +689,7 @@ impl TreeBuilder {
                             .on_column(0)
                             .with_margin(Thickness::left(15.0))
                             .with_visibility(self.is_expanded)
-                            .with_children(self.items.iter().cloned()),
+                            .with_children(self.items.clone().to_base()),
                     )
                     .build(ctx);
                     panel
@@ -816,9 +720,9 @@ impl TreeBuilder {
 
     /// Finishes widget building and adds it to the user interface, returning a handle to the new
     /// instance.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<Tree> {
         let tree = self.build_tree(ctx);
-        ctx.add_node(UiNode::new(tree))
+        ctx.add(tree)
     }
 }
 
@@ -827,7 +731,7 @@ fn build_expander(
     items_populated: bool,
     is_expanded: bool,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<CheckBox> {
     let down_arrow = make_arrow(ctx, ArrowDirection::Bottom, 8.0);
     ctx[down_arrow].set_vertical_alignment(VerticalAlignment::Center);
 
@@ -855,13 +759,13 @@ fn build_expander(
     .build(ctx)
 }
 
-/// Tree root is special widget that handles the entire hierarchy of descendant [`Tree`] widgets. Its
-/// main purpose is to handle selection of descendant [`Tree`] widgets. Tree root cannot have a
+/// Tree root is a special widget that handles the entire hierarchy of descendant [`Tree`] widgets. Its
+/// main purpose is to handle the selection of descendant [`Tree`] widgets. Tree root cannot have a
 /// content and it only could have children tree items. See docs for [`Tree`] for usage examples.
 ///
 /// ## Selection
 ///
-/// Tree root handles selection in the entire descendant hierarchy, and you can use [`TreeRootMessage::Selected`]
+/// Tree root handles selection in the entire descendant hierarchy, and you can use [`TreeRootMessage::Select`]
 /// message to manipulate (or listen for changes) the current selection.
 ///
 /// ### Listening for Changes
@@ -877,7 +781,7 @@ fn build_expander(
 /// # };
 /// #
 /// fn listen_for_selection_changes(tree_root: Handle<UiNode>, message: &UiMessage) {
-///     if let Some(TreeRootMessage::Selected(new_selection)) = message.data() {
+///     if let Some(TreeRootMessage::Select(new_selection)) = message.data() {
 ///         if message.destination() == tree_root
 ///             && message.direction() == MessageDirection::FromWidget
 ///         {
@@ -895,30 +799,30 @@ fn build_expander(
 /// # use fyrox_ui::{
 /// #     core::pool::Handle, message::MessageDirection, tree::TreeRootMessage, UiNode, UserInterface,
 /// # };
+/// # use fyrox_ui::tree::Tree;
 /// #
 /// fn change_selection(
 ///     tree: Handle<UiNode>,
-///     new_selection: Vec<Handle<UiNode>>,
+///     new_selection: Vec<Handle<Tree>>,
 ///     ui: &UserInterface,
 /// ) {
-///     ui.send_message(TreeRootMessage::select(
-///         tree,
-///         MessageDirection::ToWidget,
-///         new_selection,
-///     ));
+///     ui.send(tree, TreeRootMessage::Select(new_selection));
 /// }
 /// ```
-#[derive(Default, Debug, Clone, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Debug, Clone, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "cf7c0476-f779-4e4b-8b7e-01a23ff51a72"
+)]
 pub struct TreeRoot {
     /// Base widget of the tree root.
     pub widget: Widget,
     /// Current layout panel of the tree root, that is used to arrange children trees.
-    pub panel: Handle<UiNode>,
+    pub panel: Handle<StackPanel>,
     /// Current items of the tree root.
-    pub items: Vec<Handle<UiNode>>,
+    pub items: Vec<Handle<Tree>>,
     /// Selected items of the tree root.
-    pub selected: Vec<Handle<UiNode>>,
+    pub selected: Vec<Handle<Tree>>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for TreeRoot {
@@ -927,6 +831,7 @@ impl ConstructorProvider<UiNode, UserInterface> for TreeRoot {
             .with_variant("Tree Root", |ui| {
                 TreeRootBuilder::new(WidgetBuilder::new().with_name("Tree Root"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Visual")
@@ -935,101 +840,66 @@ impl ConstructorProvider<UiNode, UserInterface> for TreeRoot {
 
 crate::define_widget_deref!(TreeRoot);
 
-uuid_provider!(TreeRoot = "cf7c0476-f779-4e4b-8b7e-01a23ff51a72");
-
 impl Control for TreeRoot {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(msg) = message.data::<TreeRootMessage>() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    &TreeRootMessage::AddItem(item) => {
-                        ui.send_message(WidgetMessage::link(
-                            item,
-                            MessageDirection::ToWidget,
-                            self.panel,
-                        ));
-
-                        self.items.push(item);
-                        ui.send_message(TreeRootMessage::items_changed(
-                            self.handle,
-                            MessageDirection::FromWidget,
-                        ));
+        if let Some(msg) = message.data_for::<TreeRootMessage>(self.handle()) {
+            match msg {
+                &TreeRootMessage::AddItem(item) => {
+                    ui.send(item, WidgetMessage::link_with(self.panel));
+                    self.items.push(item);
+                    ui.post(self.handle, TreeRootMessage::ItemsChanged);
+                }
+                &TreeRootMessage::RemoveItem(item) => {
+                    if let Some(pos) = self.items.iter().position(|&i| i == item) {
+                        ui.send(item, WidgetMessage::Remove);
+                        self.items.remove(pos);
+                        ui.post(self.handle, TreeRootMessage::ItemsChanged);
                     }
-                    &TreeRootMessage::RemoveItem(item) => {
-                        if let Some(pos) = self.items.iter().position(|&i| i == item) {
-                            ui.send_message(WidgetMessage::remove(
-                                item,
-                                MessageDirection::ToWidget,
-                            ));
-
-                            self.items.remove(pos);
-                            ui.send_message(TreeRootMessage::items_changed(
-                                self.handle,
-                                MessageDirection::FromWidget,
-                            ));
-                        }
+                }
+                TreeRootMessage::Items(items) => {
+                    for &item in self.items.iter() {
+                        ui.send(item, WidgetMessage::Remove);
                     }
-                    TreeRootMessage::Items(items) => {
-                        for &item in self.items.iter() {
-                            ui.send_message(WidgetMessage::remove(
-                                item,
-                                MessageDirection::ToWidget,
-                            ));
-                        }
-                        for &item in items {
-                            ui.send_message(WidgetMessage::link(
-                                item,
-                                MessageDirection::ToWidget,
-                                self.panel,
-                            ));
-                        }
-
-                        self.items = items.to_vec();
-                        ui.send_message(TreeRootMessage::items_changed(
-                            self.handle,
-                            MessageDirection::FromWidget,
-                        ));
+                    for &item in items {
+                        ui.send(item, WidgetMessage::link_with(self.panel));
                     }
-                    TreeRootMessage::Selected(selected) => {
-                        if &self.selected != selected {
-                            let mut items = self.items.clone();
-                            while let Some(handle) = items.pop() {
-                                if let Some(tree_ref) = ui.try_get_of_type::<Tree>(handle) {
-                                    items.extend_from_slice(&tree_ref.items);
 
-                                    let new_selection_state = if selected.contains(&handle) {
-                                        SelectionState(true)
-                                    } else {
-                                        SelectionState(false)
-                                    };
+                    self.items = items.to_vec();
+                    ui.post(self.handle, TreeRootMessage::ItemsChanged);
+                }
+                TreeRootMessage::Select(selected) => {
+                    if &self.selected != selected {
+                        let mut items = self.items.clone();
+                        while let Some(handle) = items.pop() {
+                            if let Ok(tree_ref) = ui.try_get(handle) {
+                                items.extend_from_slice(&tree_ref.items);
 
-                                    if tree_ref.is_selected != new_selection_state.0 {
-                                        ui.send_message(TreeMessage::select(
-                                            handle,
-                                            MessageDirection::ToWidget,
-                                            new_selection_state,
-                                        ));
-                                    }
+                                let new_selection_state = if selected.contains(&handle) {
+                                    SelectionState(true)
+                                } else {
+                                    SelectionState(false)
+                                };
+
+                                if tree_ref.is_selected != new_selection_state.0 {
+                                    ui.send(handle, TreeMessage::Select(new_selection_state));
                                 }
                             }
-
-                            self.selected.clone_from(selected);
-                            ui.send_message(message.reverse());
                         }
+
+                        self.selected.clone_from(selected);
+                        ui.try_send_response(message);
                     }
-                    TreeRootMessage::CollapseAll => {
-                        self.expand_all(ui, false);
-                    }
-                    TreeRootMessage::ExpandAll => {
-                        self.expand_all(ui, true);
-                    }
-                    TreeRootMessage::ItemsChanged => {
-                        // Do nothing.
-                    }
+                }
+                TreeRootMessage::CollapseAll => {
+                    self.expand_all(ui, false);
+                }
+                TreeRootMessage::ExpandAll => {
+                    self.expand_all(ui, true);
+                }
+                TreeRootMessage::ItemsChanged => {
+                    // Do nothing.
                 }
             }
         } else if let Some(WidgetMessage::KeyDown(key_code)) = message.data() {
@@ -1041,26 +911,23 @@ impl Control for TreeRoot {
                     }
                     KeyCode::ArrowLeft => {
                         if let Some(selection) = self.selected.first() {
-                            if let Some(item) = ui
-                                .try_get(*selection)
-                                .and_then(|n| n.component_ref::<Tree>())
-                            {
+                            if let Ok(item) = ui.try_get(*selection) {
                                 if item.is_expanded {
-                                    ui.send_message(TreeMessage::expand(
+                                    ui.send(
                                         *selection,
-                                        MessageDirection::ToWidget,
-                                        false,
-                                        TreeExpansionStrategy::Direct,
-                                    ));
+                                        TreeMessage::Expand {
+                                            expand: false,
+                                            expansion_strategy: TreeExpansionStrategy::Direct,
+                                        },
+                                    );
                                     message.set_handled(true);
                                 } else if let Some((parent_handle, _)) =
-                                    ui.find_component_up::<Tree>(item.parent())
+                                    ui.find_self_or_field_up::<Tree>(item.parent())
                                 {
-                                    ui.send_message(TreeRootMessage::select(
+                                    ui.send(
                                         self.handle,
-                                        MessageDirection::ToWidget,
-                                        vec![parent_handle],
-                                    ));
+                                        TreeRootMessage::Select(vec![parent_handle.to_variant()]),
+                                    );
                                     message.set_handled(true);
                                 }
                             }
@@ -1089,46 +956,55 @@ enum Direction {
 impl TreeRoot {
     fn expand_all(&self, ui: &UserInterface, expand: bool) {
         for &item in self.items.iter() {
-            ui.send_message(TreeMessage::expand(
+            ui.send(
                 item,
-                MessageDirection::ToWidget,
-                expand,
-                TreeExpansionStrategy::RecursiveDescendants,
-            ));
+                TreeMessage::Expand {
+                    expand,
+                    expansion_strategy: TreeExpansionStrategy::RecursiveDescendants,
+                },
+            );
         }
     }
 
-    fn select(&self, ui: &UserInterface, item: Handle<UiNode>) {
-        ui.send_message(TreeRootMessage::select(
-            self.handle,
-            MessageDirection::ToWidget,
-            vec![item],
-        ));
+    fn select(&self, ui: &UserInterface, item: Handle<Tree>) {
+        ui.send(self.handle, TreeRootMessage::Select(vec![item]));
     }
 
     fn move_selection(&self, ui: &UserInterface, direction: Direction, expand: bool) {
         if let Some(selected_item) = self.selected.first() {
-            let Some(item) = ui
-                .try_get(*selected_item)
-                .and_then(|n| n.component_ref::<Tree>())
-            else {
+            let Ok(item) = ui.try_get(*selected_item) else {
                 return;
             };
 
             if !item.is_expanded && expand {
-                ui.send_message(TreeMessage::expand(
+                ui.send(
                     *selected_item,
-                    MessageDirection::ToWidget,
-                    true,
-                    TreeExpansionStrategy::Direct,
-                ));
+                    TreeMessage::Expand {
+                        expand: true,
+                        expansion_strategy: TreeExpansionStrategy::Direct,
+                    },
+                );
                 return;
             }
 
             let (parent_handle, parent_items, parent_ancestor, is_parent_root) = ui
-                .find_component_up::<Tree>(item.parent())
-                .map(|(tree_handle, tree)| (tree_handle, &tree.items, tree.parent, false))
-                .unwrap_or_else(|| (self.handle, &self.items, self.parent, true));
+                .find_self_or_field_up::<Tree>(item.parent())
+                .map(|(tree_handle, tree)| {
+                    (
+                        tree_handle.to_variant::<Tree>(),
+                        &tree.items,
+                        tree.parent,
+                        false,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        self.handle.to_variant::<Tree>(),
+                        &self.items,
+                        self.parent,
+                        true,
+                    )
+                });
 
             let Some(selected_item_position) =
                 parent_items.iter().position(|c| *c == *selected_item)
@@ -1146,7 +1022,7 @@ impl TreeRoot {
                         let mut queue = VecDeque::new();
                         queue.push_back(*prev);
                         while let Some(item) = queue.pop_front() {
-                            if let Some(item_ref) = ui.node(item).component_ref::<Tree>() {
+                            if let Ok(item_ref) = ui.try_get(item) {
                                 if item_ref.is_expanded {
                                     queue.extend(item_ref.items.iter());
                                 }
@@ -1172,7 +1048,7 @@ impl TreeRoot {
                         let mut current_ancestor = parent_handle;
                         let mut current_ancestor_parent = parent_ancestor;
                         while let Some((ancestor_handle, ancestor)) =
-                            ui.find_component_up::<Tree>(current_ancestor_parent)
+                            ui.find_self_or_field_up::<Tree>(current_ancestor_parent)
                         {
                             if ancestor.is_expanded {
                                 if let Some(current_ancestor_position) =
@@ -1189,7 +1065,7 @@ impl TreeRoot {
                             }
 
                             current_ancestor_parent = ancestor.parent();
-                            current_ancestor = ancestor_handle;
+                            current_ancestor = ancestor_handle.to_variant();
                         }
                     }
                 }
@@ -1203,7 +1079,7 @@ impl TreeRoot {
 /// Tree root builder creates [`TreeRoot`] instances and adds them to the user interface.
 pub struct TreeRootBuilder {
     widget_builder: WidgetBuilder,
-    items: Vec<Handle<UiNode>>,
+    items: Vec<Handle<Tree>>,
 }
 
 impl TreeRootBuilder {
@@ -1216,16 +1092,17 @@ impl TreeRootBuilder {
     }
 
     /// Sets the desired items of the tree root.
-    pub fn with_items(mut self, items: Vec<Handle<UiNode>>) -> Self {
+    pub fn with_items(mut self, items: Vec<Handle<Tree>>) -> Self {
         self.items = items;
         self
     }
 
     /// Finishes widget building and adds the new instance to the user interface, returning its handle.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        let panel =
-            StackPanelBuilder::new(WidgetBuilder::new().with_children(self.items.iter().cloned()))
-                .build(ctx);
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<TreeRoot> {
+        let panel = StackPanelBuilder::new(
+            WidgetBuilder::new().with_children(self.items.clone().to_base()),
+        )
+        .build(ctx);
 
         let tree = TreeRoot {
             widget: self.widget_builder.with_child(panel).build(ctx),
@@ -1234,7 +1111,7 @@ impl TreeRootBuilder {
             selected: Default::default(),
         };
 
-        ctx.add_node(UiNode::new(tree))
+        ctx.add(tree)
     }
 }
 

@@ -18,46 +18,56 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::plugins::inspector::editors::resource::{ResourceFieldBuilder, ResourceFieldMessage};
+use crate::plugins::inspector::editors::resource::ResourceField;
+use crate::scene::EntityInfo;
 use crate::{
+    asset::preview::cache::IconRequest,
     audio::bus::{AudioBusView, AudioBusViewBuilder, AudioBusViewMessage},
-    command::CommandGroup,
+    command::{make_command, CommandGroup, SetPropertyCommand},
     fyrox::{
-        core::pool::Handle,
+        core::{pool::Handle, reflect::Reflect, some_or_return},
         engine::Engine,
-        graph::BaseSceneGraph,
+        graph::SceneGraph,
         gui::{
             button::{ButtonBuilder, ButtonMessage},
             dropdown_list::{DropdownListBuilder, DropdownListMessage},
             grid::{Column, Row},
+            inspector::PropertyChanged,
             list_view::{ListView, ListViewBuilder, ListViewMessage},
             message::UiMessage,
             stack_panel::StackPanelBuilder,
             text::TextBuilder,
-            utils::make_simple_tooltip,
+            utils::{make_dropdown_list_option, make_simple_tooltip},
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowTitle},
             Orientation, Thickness, UiNode, VerticalAlignment,
         },
-        scene::sound::{AudioBus, AudioBusGraph, DistanceModel, HrirSphereResourceData, Renderer},
+        scene::{
+            sound::{AudioBus, AudioBusGraph, DistanceModel, HrirSphereResourceData, Renderer},
+            SceneContainer,
+        },
     },
     message::MessageSender,
+    plugins::inspector::editors::resource::{ResourceFieldBuilder, ResourceFieldMessage},
     scene::{
         commands::{
             effect::{AddAudioBusCommand, LinkAudioBuses, RemoveAudioBusCommand},
             sound_context::{
                 SetDistanceModelCommand, SetHrtfRendererHrirSphereResource, SetRendererCommand,
             },
+            GameSceneContext,
         },
+        controller::SceneController,
         SelectionContainer,
     },
-    send_sync_message,
     utils::window_content,
     ChangeSelectionCommand, Command, GameScene, GridBuilder, MessageDirection, Mode, Selection,
     UserInterface,
 };
-use fyrox::gui::utils::make_dropdown_list_option;
-use std::cmp::Ordering;
+use fyrox::gui::button::Button;
+use fyrox::gui::dropdown_list::DropdownList;
+use fyrox::gui::window::Window;
+use std::{cmp::Ordering, sync::mpsc::Sender};
 use strum::VariantNames;
 
 mod bus;
@@ -72,20 +82,119 @@ impl SelectionContainer for AudioBusSelection {
     fn len(&self) -> usize {
         self.buses.len()
     }
+
+    fn first_selected_entity(
+        &self,
+        controller: &dyn SceneController,
+        scenes: &SceneContainer,
+        callback: &mut dyn FnMut(EntityInfo),
+    ) {
+        let game_scene = some_or_return!(controller.downcast_ref::<GameScene>());
+        let scene = &scenes[game_scene.scene];
+        let state = scene.graph.sound_context.state();
+        if let Some(effect) = self
+            .buses
+            .first()
+            .and_then(|handle| state.bus_graph_ref().try_get_bus_ref(*handle).ok())
+        {
+            (callback)(EntityInfo::with_no_parent(effect));
+        }
+    }
+
+    fn on_property_changed(
+        &mut self,
+        _controller: &mut dyn SceneController,
+        args: &PropertyChanged,
+        _engine: &mut Engine,
+        sender: &MessageSender,
+    ) {
+        let group = self
+            .buses
+            .iter()
+            .filter_map(|&handle| {
+                make_command(args, move |ctx| {
+                    let mut state = ctx
+                        .get_mut::<GameSceneContext>()
+                        .scene
+                        .graph
+                        .sound_context
+                        .state();
+                    let bus = state.bus_graph_mut().try_get_bus_mut(handle).ok()?;
+                    // FIXME: HACK!
+                    unsafe {
+                        Some(std::mem::transmute::<&'_ mut AudioBus, &'static mut AudioBus>(bus))
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        sender.do_command_group_with_inheritance(group, args);
+    }
+
+    fn paste_property(&mut self, path: &str, value: &dyn Reflect, sender: &MessageSender) {
+        let group =
+            self.buses
+                .iter()
+                .filter_map(|&handle| {
+                    value.try_clone_box().map(|value| {
+                        Command::new(SetPropertyCommand::new(
+                            path.to_string(),
+                            value,
+                            move |ctx| {
+                                let mut state = ctx
+                                    .get_mut::<GameSceneContext>()
+                                    .scene
+                                    .graph
+                                    .sound_context
+                                    .state();
+                                let bus = state.bus_graph_mut().try_get_bus_mut(handle).ok()?;
+                                // FIXME: HACK!
+                                unsafe {
+                                    Some(std::mem::transmute::<
+                                        &'_ mut AudioBus,
+                                        &'static mut AudioBus,
+                                    >(bus))
+                                }
+                            },
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>();
+
+        sender.do_command_group(group);
+    }
+
+    fn provide_docs(&self, controller: &dyn SceneController, engine: &Engine) -> Option<String> {
+        let game_scene = controller.downcast_ref::<GameScene>()?;
+        let scene = &engine.scenes[game_scene.scene];
+        self.buses.first().and_then(|h| {
+            scene
+                .graph
+                .sound_context
+                .state()
+                .bus_graph_ref()
+                .try_get_bus_ref(*h)
+                .ok()
+                .map(|bus| bus.type_info_ref().doc_comment.to_string())
+        })
+    }
 }
 
 pub struct AudioPanel {
-    pub window: Handle<UiNode>,
-    add_bus: Handle<UiNode>,
-    remove_bus: Handle<UiNode>,
-    audio_buses: Handle<UiNode>,
-    distance_model: Handle<UiNode>,
-    renderer: Handle<UiNode>,
-    hrir_resource: Handle<UiNode>,
+    pub window: Handle<Window>,
+    add_bus: Handle<Button>,
+    remove_bus: Handle<Button>,
+    audio_buses: Handle<ListView>,
+    distance_model: Handle<DropdownList>,
+    renderer: Handle<DropdownList>,
+    hrir_resource: Handle<ResourceField<HrirSphereResourceData>>,
 }
 
 fn item_bus(item: Handle<UiNode>, ui: &UserInterface) -> Handle<AudioBus> {
-    ui.node(item).query_component::<AudioBusView>().unwrap().bus
+    ui.node(item)
+        .self_or_field_ref::<AudioBusView>()
+        .unwrap()
+        .bus
 }
 
 fn fetch_possible_parent_buses(
@@ -112,7 +221,11 @@ fn audio_bus_effect_names(audio_bus: &AudioBus) -> Vec<String> {
 }
 
 impl AudioPanel {
-    pub fn new(engine: &mut Engine, sender: MessageSender) -> Self {
+    pub fn new(
+        engine: &mut Engine,
+        sender: MessageSender,
+        icon_request_sender: Sender<IconRequest>,
+    ) -> Self {
         let ctx = &mut engine.user_interfaces.first_mut().build_ctx();
 
         let add_bus;
@@ -192,7 +305,11 @@ impl AudioPanel {
                                                 WidgetBuilder::new().with_tab_index(Some(2)),
                                                 sender,
                                             )
-                                            .build(ctx, engine.resource_manager.clone());
+                                            .build(
+                                                ctx,
+                                                icon_request_sender,
+                                                engine.resource_manager.clone(),
+                                            );
                                         hrir_resource
                                     }),
                             )
@@ -289,37 +406,31 @@ impl AudioPanel {
                     sender.do_command(CommandGroup::from(commands));
                 }
             }
-        } else if let Some(ListViewMessage::SelectionChanged(selected_indices)) = message.data() {
-            if message.destination() == self.audio_buses
-                && message.direction() == MessageDirection::FromWidget
-            {
-                let ui = &engine.user_interfaces.first();
+        } else if let Some(ListViewMessage::Selection(selected_indices)) =
+            message.data_from(self.audio_buses)
+        {
+            let ui = &engine.user_interfaces.first();
 
-                let mut selection = Vec::new();
+            let mut selection = Vec::new();
 
-                for bus_index in selected_indices {
-                    let bus = item_bus(
-                        ui.node(self.audio_buses)
-                            .cast::<ListView>()
-                            .expect("Must be ListView")
-                            .items()[*bus_index],
-                        ui,
-                    );
+            for bus_index in selected_indices {
+                if let Some(bus_item) = ui[self.audio_buses].items().get(*bus_index) {
+                    let bus = item_bus(*bus_item, ui);
 
                     selection.push(bus);
                 }
-
-                sender.do_command(ChangeSelectionCommand::new(Selection::new(
-                    AudioBusSelection { buses: selection },
-                )))
             }
+
+            sender.do_command(ChangeSelectionCommand::new(Selection::new(
+                AudioBusSelection { buses: selection },
+            )))
         } else if let Some(AudioBusViewMessage::ChangeParent(new_parent)) = message.data() {
             if message.direction() == MessageDirection::FromWidget {
                 let audio_bus_view_ref = engine
                     .user_interfaces
                     .first()
                     .node(message.destination())
-                    .query_component::<AudioBusView>()
+                    .self_or_field_ref::<AudioBusView>()
                     .unwrap();
 
                 let child = audio_bus_view_ref.bus;
@@ -329,7 +440,7 @@ impl AudioPanel {
                     parent: *new_parent,
                 });
             }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+        } else if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
             if message.direction() == MessageDirection::FromWidget {
                 if message.destination() == self.renderer {
                     let renderer = match index {
@@ -352,13 +463,9 @@ impl AudioPanel {
                 }
             }
         } else if let Some(ResourceFieldMessage::Value(resource)) =
-            message.data::<ResourceFieldMessage<HrirSphereResourceData>>()
+            message.data_from::<ResourceFieldMessage<HrirSphereResourceData>>(self.hrir_resource)
         {
-            if message.destination() == self.hrir_resource
-                && message.direction() == MessageDirection::FromWidget
-            {
-                sender.do_command(SetHrtfRendererHrirSphereResource::new(resource.clone()));
-            }
+            sender.do_command(SetHrtfRendererHrirSphereResource::new(resource.clone()));
         }
     }
 
@@ -371,12 +478,7 @@ impl AudioPanel {
         let context_state = engine.scenes[game_scene.scene].graph.sound_context.state();
         let ui = &mut engine.user_interfaces.first_mut();
 
-        let items = ui
-            .node(self.audio_buses)
-            .cast::<ListView>()
-            .expect("Must be ListView!")
-            .items()
-            .to_vec();
+        let items = ui[self.audio_buses].items().to_vec();
 
         match (context_state.bus_graph_ref().len()).cmp(&items.len()) {
             Ordering::Less => {
@@ -387,14 +489,7 @@ impl AudioPanel {
                         .buses_pair_iter()
                         .all(|(other_bus_handle, _)| other_bus_handle != bus_handle)
                     {
-                        send_sync_message(
-                            ui,
-                            ListViewMessage::remove_item(
-                                self.audio_buses,
-                                MessageDirection::ToWidget,
-                                item,
-                            ),
-                        );
+                        ui.send_sync(self.audio_buses, ListViewMessage::RemoveItem(item));
                     }
                 }
             }
@@ -417,14 +512,7 @@ impl AudioPanel {
                         .with_audio_bus(audio_bus_handle)
                         .build(&mut ui.build_ctx());
 
-                        send_sync_message(
-                            ui,
-                            ListViewMessage::add_item(
-                                self.audio_buses,
-                                MessageDirection::ToWidget,
-                                item,
-                            ),
-                        );
+                        ui.send_sync(self.audio_buses, ListViewMessage::add_item(item));
                     }
                 }
             }
@@ -450,116 +538,69 @@ impl AudioPanel {
             }
         }
 
-        send_sync_message(
-            ui,
-            WidgetMessage::enabled(
-                self.remove_bus,
-                MessageDirection::ToWidget,
-                !selected_buses.is_empty() && !is_primary_bus_selected,
-            ),
+        ui.send_sync(
+            self.remove_bus,
+            WidgetMessage::Enabled(!selected_buses.is_empty() && !is_primary_bus_selected),
         );
 
-        send_sync_message(
-            ui,
-            ListViewMessage::selection(
-                self.audio_buses,
-                MessageDirection::ToWidget,
-                selected_buses,
-            ),
-        );
+        ui.send_sync(self.audio_buses, ListViewMessage::Selection(selected_buses));
 
-        for audio_bus_view in ui
-            .node(self.audio_buses)
-            .cast::<ListView>()
-            .expect("Must be ListView!")
-            .items()
-        {
+        for audio_bus_view in ui[self.audio_buses].items() {
             let audio_bus_view_ref = ui
                 .node(*audio_bus_view)
-                .query_component::<AudioBusView>()
+                .self_or_field_ref::<AudioBusView>()
                 .unwrap();
-            send_sync_message(
-                ui,
-                AudioBusViewMessage::possible_parent_buses(
-                    *audio_bus_view,
-                    MessageDirection::ToWidget,
-                    fetch_possible_parent_buses(
-                        audio_bus_view_ref.bus,
-                        context_state.bus_graph_ref(),
-                    ),
-                ),
+
+            ui.send_sync(
+                *audio_bus_view,
+                AudioBusViewMessage::PossibleParentBuses(fetch_possible_parent_buses(
+                    audio_bus_view_ref.bus,
+                    context_state.bus_graph_ref(),
+                )),
             );
-            if let Some(audio_bus_ref) = context_state
+            if let Ok(audio_bus_ref) = context_state
                 .bus_graph_ref()
                 .try_get_bus_ref(audio_bus_view_ref.bus)
             {
-                send_sync_message(
-                    ui,
-                    AudioBusViewMessage::effect_names(
-                        *audio_bus_view,
-                        MessageDirection::ToWidget,
-                        audio_bus_effect_names(audio_bus_ref),
-                    ),
+                ui.send_sync(
+                    *audio_bus_view,
+                    AudioBusViewMessage::EffectNames(audio_bus_effect_names(audio_bus_ref)),
                 );
-                send_sync_message(
-                    ui,
-                    AudioBusViewMessage::name(
-                        *audio_bus_view,
-                        MessageDirection::ToWidget,
-                        audio_bus_ref.name().to_owned(),
-                    ),
+
+                ui.send_sync(
+                    *audio_bus_view,
+                    AudioBusViewMessage::Name(audio_bus_ref.name().to_owned()),
                 );
             }
         }
 
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(
-                self.distance_model,
-                MessageDirection::ToWidget,
-                Some(context_state.distance_model() as usize),
-            ),
+        ui.send_sync(
+            self.distance_model,
+            DropdownListMessage::Selection(Some(context_state.distance_model() as usize)),
         );
-
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(
-                self.renderer,
-                MessageDirection::ToWidget,
-                Some(match context_state.renderer_ref() {
-                    Renderer::Default => 0,
-                    Renderer::HrtfRenderer(_) => 1,
-                }),
-            ),
+        ui.send_sync(
+            self.renderer,
+            DropdownListMessage::Selection(Some(match context_state.renderer_ref() {
+                Renderer::Default => 0,
+                Renderer::HrtfRenderer(_) => 1,
+            })),
         );
 
         if let Renderer::HrtfRenderer(hrtf) = context_state.renderer_ref() {
-            send_sync_message(
-                ui,
-                WidgetMessage::visibility(self.hrir_resource, MessageDirection::ToWidget, true),
-            );
-
-            send_sync_message(
-                ui,
-                ResourceFieldMessage::value(
-                    self.hrir_resource,
-                    MessageDirection::ToWidget,
-                    hrtf.hrir_sphere_resource(),
-                ),
+            ui.send_sync(self.hrir_resource, WidgetMessage::Visibility(true));
+            ui.send_sync(
+                self.hrir_resource,
+                ResourceFieldMessage::Value(hrtf.hrir_sphere_resource()),
             );
         } else {
-            send_sync_message(
-                ui,
-                WidgetMessage::visibility(self.hrir_resource, MessageDirection::ToWidget, false),
-            );
+            ui.send_sync(self.hrir_resource, WidgetMessage::Visibility(false));
         }
     }
 
     pub fn on_mode_changed(&mut self, ui: &UserInterface, mode: &Mode) {
-        ui.send_message(WidgetMessage::enabled(
+        ui.send(
             window_content(self.window, ui),
-            MessageDirection::ToWidget,
-            mode.is_edit(),
-        ));
+            WidgetMessage::Enabled(mode.is_edit()),
+        );
     }
 }

@@ -20,19 +20,17 @@
 
 use crate::fyrox::{
     core::{
-        algebra::Vector2, make_pretty_type_name, parking_lot::Mutex, pool::Handle,
-        reflect::prelude::*, sstorage::ImmutableString, type_traits::prelude::*, uuid_provider,
-        visitor::prelude::*,
+        make_pretty_type_name, parking_lot::Mutex, pool::Handle, reflect::prelude::*,
+        sstorage::ImmutableString, visitor::prelude::*,
     },
     fxhash::FxHashSet,
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     gui::{
         border::BorderBuilder,
         button::{ButtonBuilder, ButtonMessage},
-        define_constructor, define_widget_deref,
-        draw::DrawingContext,
+        define_widget_deref,
         grid::{Column, GridBuilder, Row},
-        message::{KeyCode, MessageDirection, OsEvent, UiMessage},
+        message::{KeyCode, MessageDirection, UiMessage},
         scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
         searchbar::{SearchBarBuilder, SearchBarMessage},
         stack_panel::StackPanelBuilder,
@@ -43,13 +41,19 @@ use crate::fyrox::{
         BuildContext, Control, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
     },
 };
-
+use fyrox::gui::button::Button;
+use fyrox::gui::control_trait_proxy_impls;
+use fyrox::gui::message::MessageData;
+use fyrox::gui::scroll_viewer::ScrollViewer;
+use fyrox::gui::searchbar::SearchBar;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
+use fyrox::gui::text_box::EmptyTextPlaceholder;
+use fyrox::gui::tree::TreeRoot;
 use std::{
     any::TypeId,
     ops::{Deref, DerefMut},
-    sync::{mpsc::Sender, Arc},
+    sync::Arc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,11 +61,7 @@ pub enum PropertySelectorMessage {
     Selection(Vec<PropertyDescriptorData>),
     ChooseFocus,
 }
-
-impl PropertySelectorMessage {
-    define_constructor!(PropertySelectorMessage:Selection => fn selection(Vec<PropertyDescriptorData>), layout: false);
-    define_constructor!(PropertySelectorMessage:ChooseFocus => fn choose_focus(), layout: false);
-}
+impl MessageData for PropertySelectorMessage {}
 
 pub struct PropertyDescriptor {
     path: String,
@@ -83,7 +83,7 @@ fn make_views_for_property_descriptor_collection(
     ctx: &mut BuildContext,
     collection: &[PropertyDescriptor],
     allowed_types: Option<&FxHashSet<TypeId>>,
-) -> Vec<Handle<UiNode>> {
+) -> Vec<Handle<Tree>> {
     collection
         .iter()
         .filter_map(|p| {
@@ -106,16 +106,12 @@ fn apply_filter_recursive(node: Handle<UiNode>, filter: &str, ui: &UserInterface
     }
 
     if let Some(data) = node_ref
-        .query_component::<Tree>()
+        .self_or_field_ref::<Tree>()
         .and_then(|n| n.user_data_cloned::<PropertyDescriptorData>())
     {
         is_any_match |= data.name.to_lowercase().contains(filter);
 
-        ui.send_message(WidgetMessage::visibility(
-            node,
-            MessageDirection::ToWidget,
-            is_any_match,
-        ));
+        ui.send(node, WidgetMessage::Visibility(is_any_match));
     }
 
     is_any_match
@@ -126,7 +122,7 @@ impl PropertyDescriptor {
         &self,
         ctx: &mut BuildContext,
         allowed_types: Option<&FxHashSet<TypeId>>,
-    ) -> Handle<UiNode> {
+    ) -> Handle<Tree> {
         if self.read_only {
             return Handle::NONE;
         }
@@ -180,7 +176,7 @@ where
                 continue;
             }
 
-            let field_ref = field_info.value.field_value_as_reflect();
+            let field_ref = field_info.value;
 
             let path = if parent_path.is_empty() {
                 field_info.name.to_owned()
@@ -190,28 +186,31 @@ where
 
             let mut processed = true;
 
-            field_ref.as_array(&mut |array| match array {
+            match field_ref.as_array() {
                 Some(array) => {
                     let mut descriptor = PropertyDescriptor {
                         path: path.clone(),
                         display_name: field_info.display_name.to_owned(),
-                        type_name: field_info.value.type_name().to_owned(),
+                        type_name: field_info.value.type_info_ref().type_name.to_owned(),
                         type_id: field_info.value.type_id(),
                         children_properties: Default::default(),
                         read_only: field_info.read_only,
                     };
 
                     for i in 0..array.reflect_len() {
-                        let item = array.reflect_index(i).unwrap();
-                        let item_path = format!("{path}[{i}]");
-                        descriptor.children_properties.push(PropertyDescriptor {
-                            path: item_path.clone(),
-                            display_name: format!("[{i}]"),
-                            type_name: item.type_name().to_owned(),
-                            type_id: item.type_id(),
-                            read_only: field_info.read_only,
-                            children_properties: object_to_property_tree(&item_path, item, filter),
-                        })
+                        if let Some(item) = array.reflect_index(i) {
+                            let item_path = format!("{path}[{i}]");
+                            descriptor.children_properties.push(PropertyDescriptor {
+                                path: item_path.clone(),
+                                display_name: format!("[{i}]"),
+                                type_name: item.type_info_ref().type_name.to_owned(),
+                                type_id: item.type_id(),
+                                read_only: field_info.read_only,
+                                children_properties: object_to_property_tree(
+                                    &item_path, item, filter,
+                                ),
+                            })
+                        }
                     }
 
                     descriptors.push(descriptor);
@@ -219,15 +218,15 @@ where
                 None => {
                     processed = false;
                 }
-            });
+            }
 
             if !processed {
-                field_ref.as_hash_map(&mut |result| match result {
+                match field_ref.as_hash_map() {
                     Some(hash_map) => {
                         let mut descriptor = PropertyDescriptor {
                             path: path.clone(),
                             display_name: field_info.display_name.to_owned(),
-                            type_name: field_info.value.type_name().to_owned(),
+                            type_name: field_info.value.type_info_ref().type_name.to_owned(),
                             type_id: field_info.value.type_id(),
                             children_properties: Default::default(),
                             read_only: field_info.read_only,
@@ -240,13 +239,8 @@ where
                             // fine for most cases in the engine.
                             let mut key_str = format!("{key:?}");
 
-                            let mut is_key_string = false;
-                            key.downcast_ref::<String>(&mut |string| {
-                                is_key_string |= string.is_some()
-                            });
-                            key.downcast_ref::<ImmutableString>(&mut |string| {
-                                is_key_string |= string.is_some()
-                            });
+                            let is_key_string = key.downcast_ref::<String>().is_some()
+                                || key.downcast_ref::<ImmutableString>().is_some();
 
                             if is_key_string {
                                 // Strip quotes at the beginning and the end, because Debug impl for String adds
@@ -261,7 +255,7 @@ where
                             descriptor.children_properties.push(PropertyDescriptor {
                                 path: item_path.clone(),
                                 display_name: format!("[{key_str}]"),
-                                type_name: value.type_name().to_owned(),
+                                type_name: value.type_info_ref().type_name.to_owned(),
                                 type_id: value.type_id(),
                                 read_only: field_info.read_only,
                                 children_properties: object_to_property_tree(
@@ -277,13 +271,13 @@ where
                     None => {
                         processed = false;
                     }
-                })
+                }
             }
 
             if !processed {
                 descriptors.push(PropertyDescriptor {
                     display_name: field_info.display_name.to_owned(),
-                    type_name: field_info.value.type_name().to_owned(),
+                    type_name: field_info.value.type_info_ref().type_name.to_owned(),
                     type_id: field_info.value.type_id(),
                     read_only: field_info.read_only,
                     children_properties: object_to_property_tree(&path, field_ref, filter),
@@ -296,31 +290,32 @@ where
     descriptors
 }
 
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "8e58e123-48a1-4e18-9e90-fd35a1669bdc"
+)]
 pub struct PropertySelector {
     widget: Widget,
     #[reflect(hidden)]
     #[visit(skip)]
     selected_property_paths: Vec<PropertyDescriptorData>,
-    tree_root: Handle<UiNode>,
-    search_bar: Handle<UiNode>,
-    scroll_viewer: Handle<UiNode>,
+    tree_root: Handle<TreeRoot>,
+    search_bar: Handle<SearchBar>,
+    scroll_viewer: Handle<ScrollViewer>,
 }
 
 define_widget_deref!(PropertySelector);
 
-uuid_provider!(PropertySelector = "8e58e123-48a1-4e18-9e90-fd35a1669bdc");
-
 impl PropertySelector {
-    fn find_selected_tree_items(&self, ui: &UserInterface) -> Vec<Handle<UiNode>> {
-        let mut stack = vec![self.tree_root];
+    fn find_selected_tree_items(&self, ui: &UserInterface) -> Vec<Handle<Tree>> {
+        let mut stack = vec![self.tree_root.to_base()];
         let mut selected_trees = Vec::new();
 
         while let Some(node_handle) = stack.pop() {
             let node = ui.node(node_handle);
 
-            if let Some(tree) = node.query_component::<Tree>() {
+            if let Some(tree) = node.self_or_field_ref::<Tree>() {
                 if self.selected_property_paths.iter().any(|path| {
                     path.path
                         == tree
@@ -328,7 +323,7 @@ impl PropertySelector {
                             .unwrap()
                             .path
                 }) {
-                    selected_trees.push(node_handle);
+                    selected_trees.push(node_handle.to_variant());
                 }
             }
 
@@ -342,18 +337,13 @@ impl PropertySelector {
         let selected_trees = self.find_selected_tree_items(ui);
 
         if let Some(first) = selected_trees.first() {
-            ui.send_message(ScrollViewerMessage::bring_into_view(
+            ui.send(
                 self.scroll_viewer,
-                MessageDirection::ToWidget,
-                *first,
-            ))
+                ScrollViewerMessage::BringIntoView(first.to_base()),
+            )
         }
 
-        ui.send_message(TreeRootMessage::select(
-            self.tree_root,
-            MessageDirection::ToWidget,
-            selected_trees,
-        ));
+        ui.send(self.tree_root, TreeRootMessage::Select(selected_trees));
     }
 }
 
@@ -361,50 +351,37 @@ impl Control for PropertySelector {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(TreeRootMessage::Selected(selection)) = message.data() {
-            if message.destination() == self.tree_root
-                && message.direction() == MessageDirection::FromWidget
-            {
-                ui.send_message(PropertySelectorMessage::selection(
-                    self.handle,
-                    MessageDirection::ToWidget,
+        if let Some(TreeRootMessage::Select(selection)) = message.data_from(self.tree_root) {
+            ui.send(
+                self.handle,
+                PropertySelectorMessage::Selection(
                     selection
                         .iter()
                         .map(|s| {
-                            ui.node(*s)
+                            ui[*s]
                                 .user_data_cloned::<PropertyDescriptorData>()
                                 .unwrap()
                                 .clone()
                         })
                         .collect(),
-                ));
-            }
-        } else if let Some(msg) = message.data::<PropertySelectorMessage>() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    PropertySelectorMessage::Selection(selection) => {
-                        if &self.selected_property_paths != selection {
-                            self.selected_property_paths.clone_from(selection);
-                            ui.send_message(message.reverse());
-                        }
-                    }
-                    PropertySelectorMessage::ChooseFocus => {
-                        ui.send_message(WidgetMessage::focus(
-                            self.search_bar,
-                            MessageDirection::ToWidget,
-                        ));
-                        self.sync_selection(ui);
+                ),
+            );
+        } else if let Some(msg) = message.data_for::<PropertySelectorMessage>(self.handle) {
+            match msg {
+                PropertySelectorMessage::Selection(selection) => {
+                    if &self.selected_property_paths != selection {
+                        self.selected_property_paths.clone_from(selection);
+                        ui.try_send_response(message);
                     }
                 }
+                PropertySelectorMessage::ChooseFocus => {
+                    ui.send(self.search_bar, WidgetMessage::Focus);
+                    self.sync_selection(ui);
+                }
             }
-        } else if let Some(SearchBarMessage::Text(filter_text)) = message.data() {
-            if message.destination() == self.search_bar
-                && message.direction() == MessageDirection::FromWidget
-            {
-                apply_filter_recursive(self.tree_root, &filter_text.to_lowercase(), ui);
-            }
+        } else if let Some(SearchBarMessage::Text(filter_text)) = message.data_from(self.search_bar)
+        {
+            apply_filter_recursive(self.tree_root.to_base(), &filter_text.to_lowercase(), ui);
         }
     }
 }
@@ -441,7 +418,7 @@ impl PropertySelectorBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<PropertySelector> {
         let tree_root;
         let search_bar;
 
@@ -469,6 +446,9 @@ impl PropertySelectorBuilder {
                             .with_margin(Thickness::uniform(1.0))
                             .with_tab_index(Some(0)),
                     )
+                    .with_empty_text_placeholder(EmptyTextPlaceholder::Text(
+                        "Search for a property",
+                    ))
                     .build(ctx);
                     search_bar
                 })
@@ -483,7 +463,7 @@ impl PropertySelectorBuilder {
                     .build(ctx),
                 ),
         )
-        .add_row(Row::strict(22.0))
+        .add_row(Row::strict(27.0))
         .add_row(Row::stretch())
         .add_column(Column::stretch())
         .build(ctx);
@@ -496,18 +476,20 @@ impl PropertySelectorBuilder {
             scroll_viewer,
         };
 
-        ctx.add_node(UiNode::new(selector))
+        ctx.add(selector)
     }
 }
 
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "725e4a10-eca6-4345-9833-d54dae2f20f2"
+)]
 pub struct PropertySelectorWindow {
-    #[component(include)]
     window: Window,
-    selector: Handle<UiNode>,
-    ok: Handle<UiNode>,
-    cancel: Handle<UiNode>,
+    selector: Handle<PropertySelector>,
+    ok: Handle<Button>,
+    cancel: Handle<Button>,
     #[reflect(hidden)]
     #[visit(skip)]
     allowed_types: Option<FxHashSet<TypeId>>,
@@ -529,44 +511,16 @@ impl DerefMut for PropertySelectorWindow {
 
 impl PropertySelectorWindow {
     pub fn confirm(&self, ui: &UserInterface) {
-        ui.send_message(PropertySelectorMessage::selection(
+        ui.post(
             self.handle,
-            MessageDirection::FromWidget,
-            ui.node(self.selector)
-                .query_component::<PropertySelector>()
-                .unwrap()
-                .selected_property_paths
-                .clone(),
-        ));
-        ui.send_message(WindowMessage::close(
-            self.handle,
-            MessageDirection::ToWidget,
-        ));
+            PropertySelectorMessage::Selection(ui[self.selector].selected_property_paths.clone()),
+        );
+        ui.send(self.handle, WindowMessage::Close);
     }
 }
 
-uuid_provider!(PropertySelectorWindow = "725e4a10-eca6-4345-9833-d54dae2f20f2");
-
 impl Control for PropertySelectorWindow {
-    fn on_remove(&self, sender: &Sender<UiMessage>) {
-        self.window.on_remove(sender)
-    }
-
-    fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
-        self.window.measure_override(ui, available_size)
-    }
-
-    fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
-        self.window.arrange_override(ui, final_size)
-    }
-
-    fn draw(&self, drawing_context: &mut DrawingContext) {
-        self.window.draw(drawing_context)
-    }
-
-    fn update(&mut self, dt: f32, ui: &mut UserInterface) {
-        self.window.update(dt, ui)
-    }
+    control_trait_proxy_impls!(window);
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.window.handle_routed_message(ui, message);
@@ -575,10 +529,7 @@ impl Control for PropertySelectorWindow {
             if message.destination() == self.ok {
                 self.confirm(ui);
             } else if message.destination() == self.cancel {
-                ui.send_message(WindowMessage::close(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(self.handle, WindowMessage::Close);
             }
         } else if let Some(PropertySelectorMessage::Selection(selection)) = message.data() {
             if message.destination() == self.selector
@@ -590,21 +541,10 @@ impl Control for PropertySelectorWindow {
                         .is_none_or(|types| types.contains(&d.type_id))
                 });
 
-                ui.send_message(WidgetMessage::enabled(
-                    self.ok,
-                    MessageDirection::ToWidget,
-                    enabled,
-                ));
+                ui.send(self.ok, WidgetMessage::Enabled(enabled));
             }
-        } else if let Some(WindowMessage::Open { .. })
-        | Some(WindowMessage::OpenAt { .. })
-        | Some(WindowMessage::OpenModal { .. })
-        | Some(WindowMessage::OpenAndAlign { .. }) = message.data()
-        {
-            ui.send_message(PropertySelectorMessage::choose_focus(
-                self.selector,
-                MessageDirection::ToWidget,
-            ));
+        } else if let Some(WindowMessage::Open { .. }) = message.data() {
+            ui.send(self.selector, PropertySelectorMessage::ChooseFocus);
         } else if let Some(WidgetMessage::KeyDown(KeyCode::Enter | KeyCode::NumpadEnter)) =
             message.data()
         {
@@ -613,19 +553,6 @@ impl Control for PropertySelectorWindow {
                 message.set_handled(true);
             }
         }
-    }
-
-    fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
-        self.window.preview_message(ui, message)
-    }
-
-    fn handle_os_event(
-        &mut self,
-        self_handle: Handle<UiNode>,
-        ui: &mut UserInterface,
-        event: &OsEvent,
-    ) {
-        self.window.handle_os_event(self_handle, ui, event)
     }
 }
 
@@ -661,7 +588,7 @@ impl PropertySelectorWindowBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<PropertySelectorWindow> {
         let selector;
         let ok;
         let cancel;
@@ -728,7 +655,7 @@ impl PropertySelectorWindowBuilder {
             allowed_types: self.allowed_types,
         };
 
-        ctx.add_node(UiNode::new(window))
+        ctx.add(window)
     }
 }
 

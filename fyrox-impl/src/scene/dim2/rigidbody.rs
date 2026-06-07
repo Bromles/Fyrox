@@ -37,7 +37,6 @@ use crate::{
         parking_lot::Mutex,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -52,8 +51,9 @@ use crate::{
     },
 };
 
+use crate::scene::dim2::collider::ColliderShape;
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::{BaseSceneGraph, SceneGraph};
+use fyrox_graph::SceneGraph;
 use rapier2d::prelude::RigidBodyHandle;
 use std::{
     cell::Cell,
@@ -89,8 +89,11 @@ pub(crate) enum ApplyAction {
 ///
 /// Rigid body that does not move for some time will go asleep. This means that the body will not
 /// move unless it is woken up by some other moving body. This feature allows to save CPU resources.
-#[derive(Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Visit, Reflect)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "0b242335-75a4-4c65-9685-3e82a8979047"
+)]
 pub struct RigidBody {
     base: Base,
 
@@ -217,17 +220,23 @@ impl Clone for RigidBody {
     }
 }
 
-impl TypeUuidProvider for RigidBody {
-    fn type_uuid() -> Uuid {
-        uuid!("0b242335-75a4-4c65-9685-3e82a8979047")
-    }
-}
-
 impl RigidBody {
     /// Sets new linear velocity of the rigid body. Changing this parameter will wake up the rigid
     /// body!
     pub fn set_lin_vel(&mut self, lin_vel: Vector2<f32>) -> Vector2<f32> {
         self.lin_vel.set_value_and_mark_modified(lin_vel)
+    }
+
+    /// Sets new linear velocity along the X axis of the rigid body. Changing this parameter will wake
+    /// up the rigid body!
+    pub fn set_lin_vel_x(&mut self, x_vel: f32) {
+        self.lin_vel.x = x_vel;
+    }
+
+    /// Sets new linear velocity along the Y axis of the rigid body. Changing this parameter will wake
+    /// up the rigid body!
+    pub fn set_lin_vel_y(&mut self, y_vel: f32) {
+        self.lin_vel.y = y_vel;
     }
 
     /// Returns current linear velocity of the rigid body.
@@ -475,7 +484,7 @@ impl NodeTrait for RigidBody {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn on_removed_from_graph(&mut self, graph: &mut Graph) {
@@ -511,6 +520,7 @@ impl NodeTrait for RigidBody {
             context
                 .nodes
                 .try_borrow(self.parent)
+                .ok()
                 .map(|p| p.global_transform())
                 .unwrap_or_else(Matrix4::identity),
         );
@@ -518,7 +528,20 @@ impl NodeTrait for RigidBody {
 
     fn validate(&self, scene: &Scene) -> Result<(), String> {
         for &child in self.children() {
-            if scene.graph.try_get_of_type::<Collider>(child).is_some() {
+            if let Ok(collider) = scene.graph.try_get_of_type::<Collider>(child) {
+                match collider.shape() {
+                    ColliderShape::Trimesh(_) | ColliderShape::Heightfield(_)
+                        if *self.body_type == RigidBodyType::Dynamic =>
+                    {
+                        return Err(
+                            "The 2D rigid body is marked as dynamic, but uses the collider \
+                        that cannot be dynamic. Consider making the rigid body static."
+                                .to_string(),
+                        )
+                    }
+                    _ => (),
+                }
+
                 return Ok(());
             }
         }
@@ -675,7 +698,7 @@ impl RigidBodyBuilder {
     }
 
     /// Creates RigidBody node and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<RigidBody> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

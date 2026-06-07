@@ -25,7 +25,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     numeric::NumericType,
@@ -60,31 +60,29 @@ impl<T: NumericType, const D: usize> PropertyEditorDefinition
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<SVector<T, D>>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: VecEditorBuilder::new(
-                WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
-            )
-            .with_min(SVector::repeat(
-                ctx.property_info
-                    .min_value
-                    .and_then(NumCast::from)
-                    .unwrap_or_else(T::min_value),
-            ))
-            .with_max(SVector::repeat(
-                ctx.property_info
-                    .max_value
-                    .and_then(NumCast::from)
-                    .unwrap_or_else(T::max_value),
-            ))
-            .with_step(SVector::repeat(
-                ctx.property_info
-                    .step
-                    .and_then(NumCast::from)
-                    .unwrap_or_else(T::one),
-            ))
-            .with_value(*value)
-            .build(ctx.build_context),
-        })
+        Ok(PropertyEditorInstance::simple(
+            VecEditorBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(1.0)))
+                .with_min(SVector::repeat(
+                    ctx.property_info
+                        .min_value
+                        .and_then(NumCast::from)
+                        .unwrap_or_else(T::min_value),
+                ))
+                .with_max(SVector::repeat(
+                    ctx.property_info
+                        .max_value
+                        .and_then(NumCast::from)
+                        .unwrap_or_else(T::max_value),
+                ))
+                .with_step(SVector::repeat(
+                    ctx.property_info
+                        .step
+                        .and_then(NumCast::from)
+                        .unwrap_or_else(T::one),
+                ))
+                .with_value(*value)
+                .build(ctx.build_context),
+        ))
     }
 
     fn create_message(
@@ -92,11 +90,9 @@ impl<T: NumericType, const D: usize> PropertyEditorDefinition
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<SVector<T, D>>()?;
-        Ok(Some(VecEditorMessage::value(
-            ctx.instance,
-            MessageDirection::ToWidget,
-            *value,
-        )))
+        Ok(Some(
+            UiMessage::with_data(VecEditorMessage::Value(*value)).with_destination(ctx.instance),
+        ))
     }
 
     fn translate_message(&self, ctx: PropertyEditorTranslationContext) -> Option<PropertyChanged> {
@@ -106,7 +102,7 @@ impl<T: NumericType, const D: usize> PropertyEditorDefinition
             {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(*value),
+                    action: FieldAction::object(*value),
                 });
             }
         }

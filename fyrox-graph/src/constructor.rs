@@ -20,14 +20,15 @@
 
 use fxhash::FxHashMap;
 use fyrox_core::pool::Handle;
+use fyrox_core::uuid::Uuid;
 use fyrox_core::{
     parking_lot::{Mutex, MutexGuard},
     reflect::prelude::*,
-    TypeUuidProvider, Uuid,
+    SafeLock,
 };
 use std::sync::Arc;
 
-pub trait ConstructorProvider<T, Ctx>: TypeUuidProvider + Default + Reflect {
+pub trait ConstructorProvider<T, Ctx>: Default + Reflect {
     fn constructor() -> GraphNodeConstructor<T, Ctx>;
 }
 
@@ -93,7 +94,7 @@ impl<Node, Ctx> GraphNodeConstructor<Node, Ctx> {
             default: Arc::new(|| Node::from(Inner::default())),
             variants: vec![],
             group: "",
-            assembly_name: Inner::type_assembly_name(),
+            assembly_name: Inner::type_info().assembly_name,
         }
     }
 
@@ -138,30 +139,33 @@ impl<Node, Ctx> GraphNodeConstructorContainer<Node, Ctx> {
     {
         let previous = self
             .map
-            .lock()
-            .insert(Inner::type_uuid(), Inner::constructor());
+            .safe_lock()
+            .insert(Inner::type_info().type_uuid, Inner::constructor());
         assert!(previous.is_none());
     }
 
     /// Adds custom type constructor.
     pub fn add_custom(&self, type_uuid: Uuid, constructor: GraphNodeConstructor<Node, Ctx>) {
-        self.map.lock().insert(type_uuid, constructor);
+        self.map.safe_lock().insert(type_uuid, constructor);
     }
 
     /// Unregisters type constructor.
     pub fn remove(&self, type_uuid: Uuid) {
-        self.map.lock().remove(&type_uuid);
+        self.map.safe_lock().remove(&type_uuid);
     }
 
     /// Makes an attempt to create a node using provided type UUID. It may fail if there is no
     /// node constructor for specified type UUID.
     pub fn try_create(&self, type_uuid: &Uuid) -> Option<Node> {
-        self.map.lock().get_mut(type_uuid).map(|c| (c.default)())
+        self.map
+            .safe_lock()
+            .get_mut(type_uuid)
+            .map(|c| (c.default)())
     }
 
     /// Returns total amount of constructors.
     pub fn len(&self) -> usize {
-        self.map.lock().len()
+        self.map.safe_lock().len()
     }
 
     /// Returns true if the container is empty.
@@ -171,6 +175,11 @@ impl<Node, Ctx> GraphNodeConstructorContainer<Node, Ctx> {
 
     /// Returns the inner map of the node constructors.
     pub fn map(&self) -> MutexGuard<'_, FxHashMap<Uuid, GraphNodeConstructor<Node, Ctx>>> {
-        self.map.lock()
+        self.map.safe_lock()
+    }
+
+    /// Removes all registered constructors.
+    pub fn clear(&self) {
+        self.map().clear();
     }
 }

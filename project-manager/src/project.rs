@@ -26,24 +26,25 @@ use crate::{
 use fyrox::{
     core::pool::Handle,
     gui::{
-        button::ButtonMessage,
-        dropdown_list::{DropdownListBuilder, DropdownListMessage},
+        button::{Button, ButtonMessage},
+        dropdown_list::{DropdownList, DropdownListBuilder, DropdownListMessage},
+        file_browser::PathFilter,
         formatted_text::WrapMode,
         grid::{Column, GridBuilder, Row},
         message::{MessageDirection, UiMessage},
-        path::{PathEditorBuilder, PathEditorMessage},
+        path::{PathEditor, PathEditorBuilder, PathEditorMessage},
         stack_panel::StackPanelBuilder,
         style::{self, resource::StyleResourceExt},
-        text::{TextBuilder, TextMessage},
-        text_box::{TextBoxBuilder, TextCommitMode},
+        text::{Text, TextBuilder, TextMessage},
+        text_box::{TextBox, TextBoxBuilder, TextCommitMode},
         utils::make_dropdown_list_option,
         widget::{WidgetBuilder, WidgetMessage},
-        window::{WindowBuilder, WindowMessage, WindowTitle},
-        BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+        window::{Window, WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
+        BuildContext, HorizontalAlignment, Orientation, Thickness, UserInterface,
         VerticalAlignment,
     },
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 enum Style {
     TwoD,
@@ -99,21 +100,22 @@ impl Vcs {
 }
 
 pub struct ProjectWizard {
-    pub window: Handle<UiNode>,
-    create: Handle<UiNode>,
-    cancel: Handle<UiNode>,
-    path_field: Handle<UiNode>,
-    name_field: Handle<UiNode>,
-    style_field: Handle<UiNode>,
-    vcs_field: Handle<UiNode>,
+    pub window: Handle<Window>,
+    create: Handle<Button>,
+    cancel: Handle<Button>,
+    path_field: Handle<PathEditor>,
+    name_field: Handle<TextBox>,
+    style_field: Handle<DropdownList>,
+    vcs_field: Handle<DropdownList>,
     name: String,
     style: Style,
     vcs: Vcs,
     path: PathBuf,
-    validation_text: Handle<UiNode>,
+    validation_text: Handle<Text>,
+    full_project_path: Handle<Text>,
 }
 
-fn make_text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<Text> {
     TextBuilder::new(
         WidgetBuilder::new()
             .with_vertical_alignment(VerticalAlignment::Center)
@@ -129,8 +131,15 @@ fn make_text(text: &str, row: usize, ctx: &mut BuildContext) -> Handle<UiNode> {
     .build(ctx)
 }
 
+fn full_project_path(folder: &Path, name: &str) -> String {
+    folder.join(name).to_string_lossy().to_string()
+}
+
 impl ProjectWizard {
     pub fn new(ctx: &mut BuildContext) -> Self {
+        let path = std::env::home_dir().unwrap_or_else(|| PathBuf::from("./"));
+        let name = String::from("MyProject");
+
         let path_field = PathEditorBuilder::new(
             WidgetBuilder::new()
                 .with_height(22.0)
@@ -138,12 +147,13 @@ impl ProjectWizard {
                 .on_row(0)
                 .on_column(1),
         )
-        .with_path("./")
+        .with_path(&path)
+        .with_file_types(PathFilter::folder())
         .build(ctx);
 
         let name_field = TextBoxBuilder::new(
             WidgetBuilder::new()
-                .with_margin(Thickness::uniform(1.0))
+                .with_margin(Thickness::uniform(2.0))
                 .on_row(1)
                 .on_column(1),
         )
@@ -195,6 +205,15 @@ impl ProjectWizard {
         .with_orientation(Orientation::Horizontal)
         .build(ctx);
 
+        let full_project_path = TextBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(1.0))
+                .on_row(4)
+                .on_column(1),
+        )
+        .with_text(full_project_path(&path, &name))
+        .build(ctx);
+
         let grid = GridBuilder::new(
             WidgetBuilder::new()
                 .on_row(0)
@@ -205,8 +224,11 @@ impl ProjectWizard {
                 .with_child(make_text("Style", 2, ctx))
                 .with_child(style_field)
                 .with_child(make_text("Version Control", 3, ctx))
-                .with_child(vcs_field),
+                .with_child(vcs_field)
+                .with_child(make_text("Project Path", 4, ctx))
+                .with_child(full_project_path),
         )
+        .add_row(Row::auto())
         .add_row(Row::auto())
         .add_row(Row::auto())
         .add_row(Row::auto())
@@ -237,22 +259,24 @@ impl ProjectWizard {
         .add_column(Column::stretch())
         .build(ctx);
 
-        let window = WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(180.0))
+        let window = WindowBuilder::new(WidgetBuilder::new().with_width(400.0).with_height(200.0))
             .with_content(outer_grid)
             .open(false)
             .with_title(WindowTitle::text("Project Wizard"))
             .build(ctx);
 
-        ctx.send_message(WindowMessage::open_modal(
+        ctx.inner().send(
             window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: false,
+                focus_content: true,
+            },
+        );
 
         Self {
             window,
-            name: "MyProject".to_string(),
+            name,
             style: Style::ThreeD,
             vcs: Vcs::Git,
             create,
@@ -261,46 +285,33 @@ impl ProjectWizard {
             name_field,
             style_field,
             vcs_field,
-            path: Default::default(),
+            path,
             validation_text,
+            full_project_path,
         }
     }
 
     fn close_and_remove(&self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::close(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
-        ui.send_message(WidgetMessage::remove(
-            self.window,
-            MessageDirection::ToWidget,
-        ));
+        ui.send(self.window, WindowMessage::Close);
+        ui.send(self.window, WidgetMessage::Remove);
     }
 
     fn validate(&self, ui: &UserInterface) {
         let is_valid = match fyrox_template_core::check_name(&self.name) {
             Ok(_) => true,
             Err(err) => {
-                ui.send_message(TextMessage::text(
-                    self.validation_text,
-                    MessageDirection::ToWidget,
-                    err.to_string(),
-                ));
+                ui.send(self.validation_text, TextMessage::Text(err.to_string()));
                 false
             }
         };
 
-        ui.send_message(WidgetMessage::visibility(
-            self.validation_text,
-            MessageDirection::ToWidget,
-            !is_valid,
-        ));
+        ui.send(self.validation_text, WidgetMessage::Visibility(!is_valid));
+        ui.send(self.create, WidgetMessage::Enabled(is_valid));
+    }
 
-        ui.send_message(WidgetMessage::enabled(
-            self.create,
-            MessageDirection::ToWidget,
-            is_valid,
-        ));
+    fn update_full_project_path(&self, ui: &UserInterface) {
+        let full_path = full_project_path(&self.path, &self.name);
+        ui.send(self.full_project_path, TextMessage::Text(full_path))
     }
 
     pub fn handle_ui_message(
@@ -328,14 +339,11 @@ impl ProjectWizard {
             } else if message.destination() == self.cancel {
                 self.close_and_remove(ui);
             }
-        } else if let Some(TextMessage::Text(text)) = message.data() {
-            if message.direction() == MessageDirection::FromWidget
-                && message.destination() == self.name_field
-            {
-                self.name.clone_from(text);
-                self.validate(ui);
-            }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+        } else if let Some(TextMessage::Text(text)) = message.data_from(self.name_field) {
+            self.name.clone_from(text);
+            self.validate(ui);
+            self.update_full_project_path(ui);
+        } else if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
             if message.direction() == MessageDirection::FromWidget {
                 if message.destination() == self.style_field {
                     self.style = Style::from_index(*index);
@@ -343,12 +351,9 @@ impl ProjectWizard {
                     self.vcs = Vcs::from_index(*index);
                 }
             }
-        } else if let Some(PathEditorMessage::Path(path)) = message.data() {
-            if message.destination() == self.path_field
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.path.clone_from(path);
-            }
+        } else if let Some(PathEditorMessage::Path(path)) = message.data_from(self.path_field) {
+            self.path.clone_from(path);
+            self.update_full_project_path(ui);
         }
         false
     }

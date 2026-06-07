@@ -31,10 +31,12 @@ use crate::{
     },
     value::TrackValue,
 };
+use fyrox_core::algebra::{Quaternion, UnitQuaternion};
 
 /// The kind of track output value, the animation system works only with numeric properties and the number
 /// of variants is small.
-#[derive(Clone, Copy, Debug, Visit, Reflect, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Visit, Reflect, PartialEq, Eq, Default)]
+#[reflect(type_uuid = "1b0d11b8-5276-4633-9179-355f8521bd40")]
 pub enum TrackValueKind {
     /// A real number. Requires only 1 parametric curve.
     Real,
@@ -43,6 +45,7 @@ pub enum TrackValueKind {
     Vector2,
 
     /// A 3-dimensional vector of real values. Requires 3 parametric curves, where `X = 0`, `Y = 1`, `Z = 2`.
+    #[default]
     Vector3,
 
     /// A 4-dimensional vector of real values. Requires 4 parametric curves, where `X = 0`, `Y = 1`, `Z = 2`, `W = 3`.
@@ -51,6 +54,10 @@ pub enum TrackValueKind {
     /// A quaternion that represents some rotation. Requires 3 parametric curves, where `XAngle = 0`, `YAngle = 1`,
     /// `ZAngle = 2`. The order of rotations is `XYZ`. This triple of curves forms Euler angles which are interpolated
     /// and then converted to a quaternion.
+    UnitQuaternionEuler,
+
+    /// A quaternion that represents some rotation. Requires 4 parametric curves for each component.
+    /// The order is XYZW.
     UnitQuaternion,
 }
 
@@ -63,22 +70,18 @@ impl TrackValueKind {
             TrackValueKind::Vector2 => 2,
             TrackValueKind::Vector3 => 3,
             TrackValueKind::Vector4 => 4,
-            TrackValueKind::UnitQuaternion => {
+            TrackValueKind::UnitQuaternionEuler => {
                 // Euler angles
                 3
             }
+            TrackValueKind::UnitQuaternion => 4,
         }
-    }
-}
-
-impl Default for TrackValueKind {
-    fn default() -> Self {
-        Self::Vector3
     }
 }
 
 /// Interpolation mode for track data.
 #[derive(Visit, Reflect, Debug, Clone, Default, PartialEq)]
+#[reflect(type_uuid = "592fa764-097f-4a71-a1a1-e53b63f49c1a")]
 pub enum InterpolationMode {
     /// Default interpolation mode.
     #[default]
@@ -95,12 +98,10 @@ pub enum InterpolationMode {
 /// Each component is bound to a specific curve. For example, in case of [`Vector3`] its components bound
 /// to the following curve indices: `X = 0`, `Y = 1`, `Z = 2`. This order cannot be changed.
 #[derive(Visit, Reflect, Debug, Clone, Default, PartialEq)]
+#[reflect(type_uuid = "23b7fc05-7530-409b-9698-cf079cc38933")]
 pub struct TrackDataContainer {
     curves: Vec<Curve>,
     kind: TrackValueKind,
-    /// Interpolation mode.
-    #[visit(optional)] // Backward compatibility.
-    pub mode: InterpolationMode,
 }
 
 impl TrackDataContainer {
@@ -117,7 +118,6 @@ impl TrackDataContainer {
             curves: (0..kind.components_count())
                 .map(|_| Curve::default())
                 .collect(),
-            mode: Default::default(),
         }
     }
 
@@ -206,7 +206,7 @@ impl TrackDataContainer {
     }
 
     #[inline(always)]
-    fn fetch_quaternion(&self, time: f32) -> Option<TrackValue> {
+    fn fetch_quaternion_euler(&self, time: f32) -> Option<TrackValue> {
         if self.curves.len() < 3 {
             return None;
         }
@@ -218,22 +218,42 @@ impl TrackDataContainer {
             let z_curve = self.curves.get_unchecked(2);
 
             // Convert Euler angles to quaternion
-            let (x, y, z) = match self.mode {
-                InterpolationMode::Default => (
-                    x_curve.value_at(time),
-                    y_curve.value_at(time),
-                    z_curve.value_at(time),
-                ),
-                InterpolationMode::ShortPath => (
-                    x_curve.angle_at(time),
-                    y_curve.angle_at(time),
-                    z_curve.angle_at(time),
-                ),
-            };
+            let (x, y, z) = (
+                x_curve.value_at(time),
+                y_curve.value_at(time),
+                z_curve.value_at(time),
+            );
 
             Some(TrackValue::UnitQuaternion(quat_from_euler(
                 Vector3::new(x, y, z),
                 RotationOrder::XYZ,
+            )))
+        }
+    }
+
+    #[inline(always)]
+    fn fetch_quaternion(&self, time: f32) -> Option<TrackValue> {
+        if self.curves.len() < 4 {
+            return None;
+        }
+
+        // SAFETY: The indices are guaranteed to be correct by the above check.
+        unsafe {
+            let x_curve = self.curves.get_unchecked(0);
+            let y_curve = self.curves.get_unchecked(1);
+            let z_curve = self.curves.get_unchecked(2);
+            let w_curve = self.curves.get_unchecked(3);
+
+            // Convert Euler angles to quaternion
+            let (x, y, z, w) = (
+                x_curve.value_at(time),
+                y_curve.value_at(time),
+                z_curve.value_at(time),
+                w_curve.value_at(time),
+            );
+
+            Some(TrackValue::UnitQuaternion(UnitQuaternion::from_quaternion(
+                Quaternion::new(w, x, y, z),
             )))
         }
     }
@@ -247,6 +267,7 @@ impl TrackDataContainer {
             TrackValueKind::Vector2 => self.fetch_vector2(time),
             TrackValueKind::Vector3 => self.fetch_vector3(time),
             TrackValueKind::Vector4 => self.fetch_vector4(time),
+            TrackValueKind::UnitQuaternionEuler => self.fetch_quaternion_euler(time),
             TrackValueKind::UnitQuaternion => self.fetch_quaternion(time),
         }
     }

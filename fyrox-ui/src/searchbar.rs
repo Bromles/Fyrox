@@ -19,7 +19,7 @@
 // SOFTWARE.
 
 //! Search bar widget is a text box with a "clear text" button. It is used as an input field for search functionality.
-//! Keep in mind, that it does **not** provide any built-in searching functionality by itself! See [`SearchBar`] docs
+//! Keep in mind that it does **not** provide any built-in searching functionality by itself! See [`SearchBar`] docs
 //! for more info and usage examples.
 
 #![warn(missing_docs)]
@@ -32,11 +32,11 @@ use crate::{
     brush::Brush,
     button::{ButtonBuilder, ButtonMessage},
     core::{
-        algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, variable::InheritableVariable, visitor::prelude::*,
+        algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*,
+        variable::InheritableVariable, visitor::prelude::*,
     },
     decorator::DecoratorBuilder,
-    define_constructor, define_widget_deref,
+    define_widget_deref,
     grid::{Column, GridBuilder, Row},
     message::{MessageDirection, UiMessage},
     text::TextMessage,
@@ -48,8 +48,10 @@ use crate::{
     VerticalAlignment,
 };
 
+use crate::button::Button;
+use crate::message::MessageData;
+use crate::text_box::{EmptyTextPlaceholder, TextBox};
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
 /// A set of messages that can be used to get the state of a search bar.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,16 +59,10 @@ pub enum SearchBarMessage {
     /// Emitted when a user types something in the search bar.
     Text(String),
 }
-
-impl SearchBarMessage {
-    define_constructor!(
-        /// Creates [`SearchBarMessage::Text`] message.
-        SearchBarMessage:Text => fn text(String), layout: false
-    );
-}
+impl MessageData for SearchBarMessage {}
 
 /// Search bar widget is a text box with a "clear text" button. It is used as an input field for search functionality.
-/// Keep in mind, that it does **not** provide any built-in searching functionality by itself, you need to implement
+/// Keep in mind that it does **not** provide any built-in searching functionality by itself, you need to implement
 /// it manually. This widget provides a "standard" looking search bar with very little functionality.
 ///
 /// ## Examples
@@ -79,8 +75,9 @@ impl SearchBarMessage {
 /// #     widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::searchbar::SearchBar;
 /// #
-/// fn create_search_bar(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_search_bar(ctx: &mut BuildContext) -> Handle<SearchBar> {
 ///     SearchBarBuilder::new(WidgetBuilder::new()).build(ctx)
 /// }
 ///
@@ -100,15 +97,18 @@ impl SearchBarMessage {
 ///     }
 /// }
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "23db1179-0e07-493d-98fd-2b3c0c795215"
+)]
 pub struct SearchBar {
     /// Base widget of the search bar.
     pub widget: Widget,
     /// A handle of a text box widget used for text input.
-    pub text_box: InheritableVariable<Handle<UiNode>>,
+    pub text_box: InheritableVariable<Handle<TextBox>>,
     /// A handle of a button, that is used to clear the text.
-    pub clear: InheritableVariable<Handle<UiNode>>,
+    pub clear: InheritableVariable<Handle<Button>>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for SearchBar {
@@ -117,6 +117,7 @@ impl ConstructorProvider<UiNode, UserInterface> for SearchBar {
             .with_variant("Search Bar", |ui| {
                 SearchBarBuilder::new(WidgetBuilder::new().with_name("Search Bar"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -125,35 +126,21 @@ impl ConstructorProvider<UiNode, UserInterface> for SearchBar {
 
 define_widget_deref!(SearchBar);
 
-uuid_provider!(SearchBar = "23db1179-0e07-493d-98fd-2b3c0c795215");
-
 impl Control for SearchBar {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if message.destination() == self.handle && message.direction() == MessageDirection::ToWidget
-        {
+        if message.is_for(self.handle) {
             if let Some(SearchBarMessage::Text(text)) = message.data() {
-                ui.send_message(TextMessage::text(
-                    *self.text_box,
-                    MessageDirection::ToWidget,
-                    text.clone(),
-                ));
+                ui.send(*self.text_box, TextMessage::Text(text.clone()));
             } else if let Some(WidgetMessage::Focus) = message.data() {
-                ui.send_message(WidgetMessage::focus(
-                    *self.text_box,
-                    MessageDirection::ToWidget,
-                ));
+                ui.send(*self.text_box, WidgetMessage::Focus);
             }
         }
 
         if message.destination() == *self.clear {
             if let Some(ButtonMessage::Click) = message.data() {
-                ui.send_message(SearchBarMessage::text(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    String::new(),
-                ));
+                ui.send(self.handle, SearchBarMessage::Text(String::new()));
             }
         }
 
@@ -161,29 +148,35 @@ impl Control for SearchBar {
             && message.direction() == MessageDirection::FromWidget
         {
             if let Some(TextMessage::Text(text)) = message.data() {
-                ui.send_message(SearchBarMessage::text(
-                    self.handle,
-                    MessageDirection::FromWidget,
-                    text.clone(),
-                ));
+                ui.post(self.handle, SearchBarMessage::Text(text.clone()));
             }
         }
     }
 }
 
 /// Search bar builder creates [`SearchBar`] widget instances and adds them to the user interface.
-pub struct SearchBarBuilder {
+pub struct SearchBarBuilder<'a> {
     widget_builder: WidgetBuilder,
+    placeholder: EmptyTextPlaceholder<'a>,
 }
 
-impl SearchBarBuilder {
+impl<'a> SearchBarBuilder<'a> {
     /// Creates a new builder instance.
     pub fn new(widget_builder: WidgetBuilder) -> Self {
-        Self { widget_builder }
+        Self {
+            widget_builder,
+            placeholder: EmptyTextPlaceholder::None,
+        }
+    }
+
+    /// Sets the desired placeholder when the search bar is empty.
+    pub fn with_empty_text_placeholder(mut self, placeholder: EmptyTextPlaceholder<'a>) -> Self {
+        self.placeholder = placeholder;
+        self
     }
 
     /// Finishes search bar building and adds the new instance to the user interface.
-    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(mut self, ctx: &mut BuildContext) -> Handle<SearchBar> {
         // Focusing the search bar itself is useless, so we're taking the tab index from the inner
         // widget builder and transfer it to the inner text box.
         let tab_index = self.widget_builder.tab_index.take();
@@ -234,6 +227,7 @@ impl SearchBarBuilder {
                                         .on_column(1)
                                         .with_margin(Thickness::uniform(1.0)),
                                 )
+                                .with_empty_text_placeholder(self.placeholder)
                                 .with_text_commit_mode(TextCommitMode::Immediate)
                                 .with_vertical_text_alignment(VerticalAlignment::Center)
                                 .build(ctx);
@@ -291,7 +285,7 @@ impl SearchBarBuilder {
             clear: clear.into(),
         };
 
-        ctx.add_node(UiNode::new(search_bar))
+        ctx.add(search_bar)
     }
 }
 

@@ -28,7 +28,6 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -41,7 +40,7 @@ use crate::{
     },
 };
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::ops::{Deref, DerefMut};
 
 pub mod absm;
@@ -109,7 +108,7 @@ impl AnimationPoseExt for AnimationPose {
         for (node, local_pose) in self.poses() {
             if node.is_none() {
                 Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
-            } else if let Some(node) = nodes.try_borrow_mut(*node) {
+            } else if let Ok(node) = nodes.try_borrow_mut(*node) {
                 local_pose.values.apply(node);
             }
         }
@@ -119,7 +118,7 @@ impl AnimationPoseExt for AnimationPose {
         for (node, local_pose) in self.poses() {
             if node.is_none() {
                 Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
-            } else if let Some(node) = graph.try_get_mut(*node) {
+            } else if let Ok(node) = graph.try_get_node_mut(*node) {
                 local_pose.values.apply(node);
             }
         }
@@ -132,7 +131,7 @@ impl AnimationPoseExt for AnimationPose {
         for (node, local_pose) in self.poses() {
             if node.is_none() {
                 Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
-            } else if let Some(node_ref) = graph.try_get_mut(*node) {
+            } else if let Ok(node_ref) = graph.try_get_node_mut(*node) {
                 callback(node_ref, *node, local_pose);
             }
         }
@@ -243,13 +242,14 @@ impl BoundValueCollectionExt for BoundValueCollection {
 /// The example creates a bounce animation first - it is a simple animation that animates position of a given node
 /// (`animated_node`). Only then it creates an animation player node with an animation container with a single animation.
 /// To understand why this is so complicated, see the docs of [`Animation`].
-#[derive(Visit, Reflect, Clone, Debug, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Visit, Reflect, Clone, Debug)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "44d1c94e-354f-4f9a-b918-9d31c28aa16a"
+)]
 pub struct AnimationPlayer {
     base: Base,
-    #[component(include)]
     animations: InheritableVariable<AnimationContainer>,
-    #[component(include)]
     auto_apply: bool,
 }
 
@@ -300,12 +300,6 @@ impl AnimationPlayer {
     }
 }
 
-impl TypeUuidProvider for AnimationPlayer {
-    fn type_uuid() -> Uuid {
-        uuid!("44d1c94e-354f-4f9a-b918-9d31c28aa16a")
-    }
-}
-
 impl Deref for AnimationPlayer {
     type Target = Base;
 
@@ -342,7 +336,7 @@ impl NodeTrait for AnimationPlayer {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn update(&mut self, context: &mut UpdateContext) {

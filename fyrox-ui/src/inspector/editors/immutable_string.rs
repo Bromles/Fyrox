@@ -29,7 +29,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     text::TextMessage,
@@ -53,8 +53,8 @@ impl PropertyEditorDefinition for ImmutableStringPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<ImmutableString>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: TextBoxBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            TextBoxBuilder::new(
                 WidgetBuilder::new()
                     .with_min_size(Vector2::new(0.0, 17.0))
                     .with_margin(Thickness::uniform(1.0)),
@@ -64,7 +64,7 @@ impl PropertyEditorDefinition for ImmutableStringPropertyEditorDefinition {
             .with_text(value)
             .with_vertical_text_alignment(VerticalAlignment::Center)
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -72,10 +72,9 @@ impl PropertyEditorDefinition for ImmutableStringPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<ImmutableString>()?;
-        Ok(Some(TextMessage::text(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.to_mutable(),
+            TextMessage::Text(value.to_mutable()),
         )))
     }
 
@@ -84,7 +83,7 @@ impl PropertyEditorDefinition for ImmutableStringPropertyEditorDefinition {
             if let Some(TextMessage::Text(value)) = ctx.message.data::<TextMessage>() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(ImmutableString::new(value)),
+                    action: FieldAction::object(ImmutableString::new(value)),
                 });
             }
         }

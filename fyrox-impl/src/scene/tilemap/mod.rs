@@ -51,7 +51,6 @@ pub use transform::*;
 pub use update::*;
 
 use super::{dim2::rectangle::RectangleVertex, node::constructor::NodeConstructor};
-use crate::lazy_static::*;
 use crate::{
     asset::{untyped::ResourceKind, ResourceDataRef},
     core::{
@@ -60,12 +59,11 @@ use crate::{
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext, TriangleDefinition},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         variable::InheritableVariable,
         visitor::prelude::*,
-        ImmutableString,
+        ImmutableString, SafeLock,
     },
-    graph::{constructor::ConstructorProvider, BaseSceneGraph},
+    graph::{constructor::ConstructorProvider, SceneGraph},
     material::{Material, MaterialResource, STANDARD_2D},
     renderer::{self, bundle::RenderContext},
     scene::{
@@ -89,19 +87,20 @@ use std::{
     fmt::Display,
     ops::{Deref, DerefMut},
     path::PathBuf,
+    sync::LazyLock,
 };
 
 /// Current implementation version marker.
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 0;
 
-lazy_static! {
-    /// The default material for tiles that have no material set.
-    pub static ref DEFAULT_TILE_MATERIAL: MaterialResource = MaterialResource::new_ok(
+/// The default material for tiles that have no material set.
+pub static DEFAULT_TILE_MATERIAL: LazyLock<MaterialResource> = LazyLock::new(|| {
+    MaterialResource::new_ok(
         uuid!("36bf5b66-b4fa-4bca-80eb-33a271d8f825"),
         ResourceKind::External,
-        Material::standard_tile()
-    );
-}
+        Material::standard_tile(),
+    )
+});
 
 /// Context for rendering tiles in a tile map. It is especially used by
 /// [`TileMapEffect`] objects.
@@ -365,6 +364,7 @@ impl VertexTrait for TileVertex {
 /// Giving a particular `TilePaletteStage` to a tile map palette will control which kind of
 /// tiles it will display.
 #[derive(Clone, Copy, Default, Debug, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "05cec1a9-faa9-45a2-a4a4-245849cb2fb4")]
 pub enum TilePaletteStage {
     /// The page tile stage. These tiles allow the user to select which page they want to use.
     #[default]
@@ -402,13 +402,20 @@ pub enum PageType {
 /// Both pages and tiles have a TileDefinitionHandle and are rendered using
 /// [`TileRenderData`]. For pages this is due to having an icon to allow the user to select the page.
 /// Both pages and tiles can be selected by the user, moved, and deleted.
-#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
+#[derive(Clone, Copy, Debug, PartialEq, Visit, Reflect)]
+#[reflect(type_uuid = "be84a122-3d0f-4a9f-8bba-d55cf8583aad")]
 pub enum ResourceTilePosition {
     /// This position refers to some page, and so it lacks tile coordinates.
     Page(Vector2<i32>),
     /// This position refers to some tile, and so it has page coordinates and
     /// the coordinates of the tile within the page.
     Tile(Vector2<i32>, Vector2<i32>),
+}
+
+impl Default for ResourceTilePosition {
+    fn default() -> Self {
+        Self::Page(Default::default())
+    }
 }
 
 impl Display for ResourceTilePosition {
@@ -481,8 +488,8 @@ impl ResourceTilePosition {
 
 /// Tile is a base block of a tile map. It has a position and a handle of tile definition, stored
 /// in the respective tile set.
-#[derive(Clone, Reflect, Default, Debug, PartialEq, Visit, ComponentProvider, TypeUuidProvider)]
-#[type_uuid(id = "e429ca1b-a311-46c3-b580-d5a2f49db7e2")]
+#[derive(Clone, Reflect, Default, Debug, PartialEq, Visit)]
+#[reflect(type_uuid = "e429ca1b-a311-46c3-b580-d5a2f49db7e2")]
 pub struct Tile {
     /// Position of the tile (in grid coordinates).
     pub position: Vector2<i32>,
@@ -512,10 +519,11 @@ impl<I: Iterator<Item = Vector2<i32>>> Iterator for TileIter<I> {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Visit, Reflect)]
 /// Abstract source of tiles, which can either be a tile set or a brush.
 /// It is called a "book" because each of these tile resources contains
 /// pages of tiles.
+#[derive(Debug, Default, Clone, PartialEq, Visit, Reflect)]
+#[reflect(type_uuid = "76563800-35fa-46aa-bb58-5f358d769654")]
 pub enum TileBook {
     /// A tile resource containing no tiles.
     #[default]
@@ -945,9 +953,9 @@ impl OrthoTransform for TileRenderData {
 /// which contains all the pages that may be referenced by the tile map's handles.
 ///
 /// Optional [`TileMapEffect`] objects may be included in the `TileMap` to change how it renders.
-#[derive(Reflect, Debug, ComponentProvider, TypeUuidProvider)]
+#[derive(Reflect, Debug)]
 #[reflect(derived_type = "Node")]
-#[type_uuid(id = "aa9a3385-a4af-4faf-a69a-8d3af1a3aa67")]
+#[reflect(type_uuid = "aa9a3385-a4af-4faf-a69a-8d3af1a3aa67")]
 pub struct TileMap {
     base: Base,
     /// The source of rendering data for tiles in this tile map.
@@ -979,27 +987,12 @@ impl Visit for TileMap {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         let mut region = visitor.enter_region(name)?;
         let mut version = if region.is_reading() { 0 } else { VERSION };
-        let _ = version.visit("Version", &mut region);
+        version.visit("Version", &mut region)?;
         self.base.visit("Base", &mut region)?;
         self.tile_set.visit("TileSet", &mut region)?;
         self.tile_scale.visit("TileScale", &mut region)?;
         self.active_brush.visit("ActiveBrush", &mut region)?;
         match version {
-            0 => {
-                let mut tiles = InheritableVariable::new_non_modified(Tiles::default());
-                let result = tiles.visit("Tiles", &mut region);
-                result?;
-                let mut data = TileMapData::default();
-                for (p, h) in tiles.iter() {
-                    data.set(*p, *h);
-                }
-                self.tiles = Some(Resource::new_ok(
-                    Uuid::new_v4(),
-                    ResourceKind::Embedded,
-                    data,
-                ))
-                .into();
-            }
             VERSION => {
                 self.tiles.visit("Tiles", &mut region)?;
             }
@@ -1402,7 +1395,7 @@ impl NodeTrait for TileMap {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn collect_render_data(&self, ctx: &mut RenderContext) -> RdcControlFlow {
@@ -1421,7 +1414,7 @@ impl NodeTrait for TileMap {
         let mut tile_set_lock = TileSetRef::new(tile_set_resource);
         let tile_set = tile_set_lock.as_loaded();
 
-        let mut hidden_tiles = self.hidden_tiles.lock();
+        let mut hidden_tiles = self.hidden_tiles.safe_lock();
         hidden_tiles.clear();
 
         let bounds = ctx
@@ -1440,7 +1433,9 @@ impl NodeTrait for TileMap {
         };
 
         for effect in self.before_effects.iter() {
-            effect.lock().render_special_tiles(&mut tile_render_context);
+            effect
+                .safe_lock()
+                .render_special_tiles(&mut tile_render_context);
         }
         let bounds = tile_render_context.visible_bounds();
         let Some(tiles) = self.tiles.as_ref().map(|r| r.data_ref()) else {
@@ -1465,7 +1460,9 @@ impl NodeTrait for TileMap {
             }
         }
         for effect in self.after_effects.iter() {
-            effect.lock().render_special_tiles(&mut tile_render_context);
+            effect
+                .safe_lock()
+                .render_special_tiles(&mut tile_render_context);
         }
         RdcControlFlow::Continue
     }
@@ -1557,7 +1554,7 @@ impl TileMapBuilder {
     }
 
     /// Finishes tile map building and adds it to the specified scene graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<TileMap> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

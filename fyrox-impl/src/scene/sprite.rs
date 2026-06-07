@@ -22,21 +22,20 @@
 //!
 //! For more info see [`Sprite`].
 
-use crate::scene::node::constructor::NodeConstructor;
-use crate::scene::node::RdcControlFlow;
+use crate::scene::animation::spritesheet::SpriteSheetAnimation;
 use crate::{
     core::{
-        algebra::{Vector2, Vector3},
+        algebra::{Vector2, Vector3, Vector4},
         color::Color,
         math::{aabb::AxisAlignedBoundingBox, Rect, TriangleDefinition},
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
+        value_as_u8_slice,
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
     },
-    material,
+    graph::{constructor::ConstructorProvider, SceneGraph},
     material::{Material, MaterialResource},
     renderer::{self, bundle::RenderContext},
     scene::{
@@ -49,13 +48,10 @@ use crate::{
             },
             RenderPath,
         },
-        node::{Node, NodeTrait},
+        node::{constructor::NodeConstructor, Node, NodeTrait, RdcControlFlow},
     },
 };
 use bytemuck::{Pod, Zeroable};
-use fyrox_core::value_as_u8_slice;
-use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// A vertex for sprites.
@@ -66,8 +62,8 @@ pub struct SpriteVertex {
     pub position: Vector3<f32>,
     /// Texture coordinates.
     pub tex_coord: Vector2<f32>,
-    /// Sprite parameters: x - size, y - rotation.
-    pub params: Vector2<f32>,
+    /// Sprite parameters: x - size, y - rotation, z - dx, w - dy.
+    pub params: Vector4<f32>,
     /// Diffuse color.
     pub color: Color,
 }
@@ -94,7 +90,7 @@ impl VertexTrait for SpriteVertex {
             VertexAttributeDescriptor {
                 usage: VertexAttributeUsage::Custom0,
                 data_type: VertexAttributeDataType::F32,
-                size: 2,
+                size: 4,
                 divisor: 0,
                 shader_location: 2,
                 normalized: false,
@@ -111,20 +107,20 @@ impl VertexTrait for SpriteVertex {
     }
 }
 
-/// Sprite is a billboard which always faces towards camera. It can be used as a "model" for bullets,
+/// Sprite is a billboard which always faces towards the camera. It can be used as a "model" for bullets,
 /// and so on.
-///
-/// # Depth sorting
-///
-/// Sprites are **not** depth-sorted so there could be some blending issues if multiple sprites are
-/// stacked one behind another.
 ///
 /// # Performance
 ///
-/// Sprites rendering uses batching to reduce amount of draw calls - it basically merges multiple
+/// Sprites rendering uses batching to reduce the number of draw calls - it basically merges multiple
 /// sprites with the same material into one mesh and renders it in a single draw call which is quite
-/// fast and can handle tens of thousands sprites with ease. You should not, however, use sprites to
+/// fast and can handle tens of thousands of sprites with ease. You should not, however, use sprites to
 /// make particle systems, use [ParticleSystem](super::particle_system::ParticleSystem) instead.
+///
+/// # Flipping
+///
+/// It is possible to flip the sprite on both axes, vertical and horizontal. Use [`Sprite::set_flip_x`]
+/// and [`Sprite::set_flip_y`] methods to flip the sprite on desired axes.
 ///
 /// # Example
 ///
@@ -139,8 +135,9 @@ impl VertexTrait for SpriteVertex {
 /// #     resource::texture::Texture,
 /// #     scene::{base::BaseBuilder, graph::Graph, node::Node, sprite::SpriteBuilder},
 /// # };
+/// # use fyrox_impl::scene::sprite::Sprite;
 /// #
-/// fn create_smoke(resource_manager: ResourceManager, graph: &mut Graph) -> Handle<Node> {
+/// fn create_smoke(resource_manager: ResourceManager, graph: &mut Graph) -> Handle<Sprite> {
 ///     let mut material = Material::standard_sprite();
 ///
 ///     material
@@ -154,10 +151,13 @@ impl VertexTrait for SpriteVertex {
 ///
 /// Keep in mind, that this example creates new material instance each call of the method and
 /// **does not** reuse it. Ideally, you should reuse the shared material across multiple instances
-/// to get best possible performance. Otherwise, each your sprite will be put in a separate batch
+/// to get the best possible performance. Otherwise, each your sprite will be put in a separate batch
 /// which will force your GPU to render a single sprite in dedicated draw call which is quite slow.
-#[derive(Debug, Reflect, Clone, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Debug, Reflect, Clone, Visit)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "60fd7e34-46c1-4ae9-8803-1f5f4c341518"
+)]
 pub struct Sprite {
     base: Base,
 
@@ -175,34 +175,12 @@ pub struct Sprite {
 
     #[reflect(setter = "set_rotation")]
     rotation: InheritableVariable<f32>,
-}
 
-impl Visit for Sprite {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        let mut region = visitor.enter_region(name)?;
+    #[reflect(setter = "set_flip_x")]
+    flip_x: InheritableVariable<bool>,
 
-        if region.is_reading() {
-            if let Some(material) =
-                material::visit_old_texture_as_material(&mut region, Material::standard_sprite)
-            {
-                self.material = material.into();
-            } else {
-                self.material.visit("Material", &mut region)?;
-            }
-        } else {
-            self.material.visit("Material", &mut region)?;
-        }
-
-        self.base.visit("Base", &mut region)?;
-        self.color.visit("Color", &mut region)?;
-        self.size.visit("Size", &mut region)?;
-        self.rotation.visit("Rotation", &mut region)?;
-
-        // Backward compatibility.
-        let _ = self.uv_rect.visit("UvRect", &mut region);
-
-        Ok(())
-    }
+    #[reflect(setter = "set_flip_y")]
+    flip_y: InheritableVariable<bool>,
 }
 
 impl Deref for Sprite {
@@ -222,12 +200,6 @@ impl DerefMut for Sprite {
 impl Default for Sprite {
     fn default() -> Self {
         SpriteBuilder::new(BaseBuilder::new()).build_sprite()
-    }
-}
-
-impl TypeUuidProvider for Sprite {
-    fn type_uuid() -> Uuid {
-        uuid!("60fd7e34-46c1-4ae9-8803-1f5f4c341518")
     }
 }
 
@@ -293,6 +265,35 @@ impl Sprite {
     pub fn set_uv_rect(&mut self, uv_rect: Rect<f32>) -> Rect<f32> {
         self.uv_rect.set_value_and_mark_modified(uv_rect)
     }
+
+    /// Enables (`true`) or disables (`false`) horizontal flipping of the sprite.
+    pub fn set_flip_x(&mut self, flip: bool) -> bool {
+        self.flip_x.set_value_and_mark_modified(flip)
+    }
+
+    /// Returns `true` if the sprite is flipped horizontally, `false` - otherwise.
+    pub fn is_flip_x(&self) -> bool {
+        *self.flip_x
+    }
+
+    /// Enables (`true`) or disables (`false`) vertical flipping of the sprite.
+    pub fn set_flip_y(&mut self, flip: bool) -> bool {
+        self.flip_y.set_value_and_mark_modified(flip)
+    }
+
+    /// Returns `true` if the sprite is flipped vertically, `false` - otherwise.
+    pub fn is_flip_y(&self) -> bool {
+        *self.flip_y
+    }
+
+    /// Applies the given sprite sheet animation. This method assumes that the rectangle's material
+    /// has the `diffuseTexture` resource.
+    pub fn apply_animation(&mut self, animation: &SpriteSheetAnimation) {
+        self.material()
+            .data_ref()
+            .bind("diffuseTexture", animation.texture());
+        self.set_uv_rect(animation.current_frame_uv_rect().unwrap_or_default());
+    }
 }
 
 impl ConstructorProvider<Node, Graph> for Sprite {
@@ -315,7 +316,7 @@ impl NodeTrait for Sprite {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn collect_render_data(&self, ctx: &mut RenderContext) -> RdcControlFlow {
@@ -328,38 +329,54 @@ impl NodeTrait for Sprite {
         }
 
         let position = self.global_position();
-        let params = Vector2::new(*self.size, *self.rotation);
 
         type Vertex = SpriteVertex;
+
+        let lx = self.uv_rect.position.x;
+        let rx = self.uv_rect.position.x + self.uv_rect.size.x;
+        let ty = self.uv_rect.position.y;
+        let by = self.uv_rect.position.y + self.uv_rect.size.y;
 
         let vertices = [
             Vertex {
                 position,
-                tex_coord: self.uv_rect.right_top_corner(),
-                params,
+                tex_coord: Vector2::new(
+                    if *self.flip_x { lx } else { rx },
+                    if *self.flip_y { by } else { ty },
+                ),
+                params: Vector4::new(*self.size, *self.rotation, 0.5, 0.5),
                 color: *self.color,
             },
             Vertex {
                 position,
-                tex_coord: self.uv_rect.left_top_corner(),
-                params,
+                tex_coord: Vector2::new(
+                    if *self.flip_x { rx } else { lx },
+                    if *self.flip_y { by } else { ty },
+                ),
+                params: Vector4::new(*self.size, *self.rotation, -0.5, 0.5),
                 color: *self.color,
             },
             Vertex {
                 position,
-                tex_coord: self.uv_rect.left_bottom_corner(),
-                params,
+                tex_coord: Vector2::new(
+                    if *self.flip_x { rx } else { lx },
+                    if *self.flip_y { ty } else { by },
+                ),
+                params: Vector4::new(*self.size, *self.rotation, -0.5, -0.5),
                 color: *self.color,
             },
             Vertex {
                 position,
-                tex_coord: self.uv_rect.right_bottom_corner(),
-                params,
+                tex_coord: Vector2::new(
+                    if *self.flip_x { lx } else { rx },
+                    if *self.flip_y { ty } else { by },
+                ),
+                params: Vector4::new(*self.size, *self.rotation, 0.5, -0.5),
                 color: *self.color,
             },
         ];
 
-        let triangles = [TriangleDefinition([0, 1, 2]), TriangleDefinition([2, 3, 0])];
+        let triangles = [TriangleDefinition([0, 1, 2]), TriangleDefinition([0, 2, 3])];
 
         let sort_index = ctx.calculate_sorting_index(self.global_position());
 
@@ -397,6 +414,8 @@ pub struct SpriteBuilder {
     color: Color,
     size: f32,
     rotation: f32,
+    flip_x: bool,
+    flip_y: bool,
 }
 
 impl SpriteBuilder {
@@ -413,6 +432,8 @@ impl SpriteBuilder {
             color: Color::WHITE,
             size: 0.2,
             rotation: 0.0,
+            flip_x: false,
+            flip_y: false,
         }
     }
 
@@ -447,6 +468,18 @@ impl SpriteBuilder {
         self
     }
 
+    /// Flips the sprite horizontally.
+    pub fn with_flip_x(mut self, flip_x: bool) -> Self {
+        self.flip_x = flip_x;
+        self
+    }
+
+    /// Flips the sprite vertically.
+    pub fn with_flip_y(mut self, flip_y: bool) -> Self {
+        self.flip_y = flip_y;
+        self
+    }
+
     fn build_sprite(self) -> Sprite {
         Sprite {
             base: self.base_builder.build_base(),
@@ -455,6 +488,8 @@ impl SpriteBuilder {
             color: self.color.into(),
             size: self.size.into(),
             rotation: self.rotation.into(),
+            flip_x: self.flip_x.into(),
+            flip_y: self.flip_y.into(),
         }
     }
 
@@ -464,7 +499,7 @@ impl SpriteBuilder {
     }
 
     /// Creates new sprite instance and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Sprite> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

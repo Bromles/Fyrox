@@ -20,23 +20,25 @@
 
 use crate::{
     core::{algebra::Vector2, pool::Handle, reflect::Reflect, uuid::Uuid, visitor::Visit},
-    core::{ComponentProvider, TypeUuidProvider},
     draw::DrawingContext,
     message::{OsEvent, UiMessage},
     widget::Widget,
     UiNode, UserInterface,
 };
-use fyrox_core::define_as_any_trait;
+use fyrox_core::{define_as_any_trait, pool::ObjectOrVariantHelper};
 
+use fyrox_core::algebra::Matrix3;
+use fyrox_graph::NodeWrapper;
 use std::{
     any::Any,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::mpsc::Sender,
 };
 
 define_as_any_trait!(ControlAsAny => BaseControl);
 
-/// Base trait for all UI widgets. It has auto-impl and you don't need to implement it manually. Your widget
+/// Base trait for all UI widgets. It has auto-impl, and you don't need to implement it manually. Your widget
 /// must implement [`Clone`] and [`Control`] traits for impl to be generated for you, also your widget must
 /// not contain any references (due to `'static` lifetime requirement).
 pub trait BaseControl: Send + ControlAsAny {
@@ -48,14 +50,14 @@ pub trait BaseControl: Send + ControlAsAny {
 
     fn id(&self) -> Uuid;
 
-    /// Returns total amount of memory used by this widget (in bytes), in other words it returns
+    /// Returns the total amount of memory used by this widget (in bytes), in other words, it returns
     /// `size_of::<WidgetType>()`.
     fn self_size(&self) -> usize;
 }
 
 impl<T> BaseControl for T
 where
-    T: Any + Clone + 'static + Control + TypeUuidProvider,
+    T: Any + Clone + 'static + Control,
 {
     fn clone_boxed(&self) -> Box<dyn Control> {
         Box::new(self.clone())
@@ -65,8 +67,9 @@ where
         std::any::type_name::<T>()
     }
 
+    // TODO: Remove this method, use `self.type_info_ref().type_uuid` instead.
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 
     fn self_size(&self) -> usize {
@@ -74,41 +77,131 @@ where
     }
 }
 
+/// Proxies all the [`Control`] trait methods (except [`Control::handle_routed_message`]) to the
+/// specified struct member. This macro can be used to reduce boilerplate code for derived widgets.
+#[macro_export]
+macro_rules! control_trait_proxy_impls {
+    ($target:ident) => {
+        fn summary(&self) -> String {
+            self.$target.summary()
+        }
+
+        fn on_remove(&self, sender: &std::sync::mpsc::Sender<$crate::message::UiMessage>) {
+            self.$target.on_remove(sender)
+        }
+
+        fn measure_override(
+            &self,
+            ui: &$crate::UserInterface,
+            available_size: $crate::core::algebra::Vector2<f32>,
+        ) -> $crate::core::algebra::Vector2<f32> {
+            self.$target.measure_override(ui, available_size)
+        }
+
+        fn arrange_override(
+            &self,
+            ui: &$crate::UserInterface,
+            final_size: $crate::core::algebra::Vector2<f32>,
+        ) -> $crate::core::algebra::Vector2<f32> {
+            self.$target.arrange_override(ui, final_size)
+        }
+
+        fn draw(&self, drawing_context: &mut $crate::draw::DrawingContext) {
+            self.$target.draw(drawing_context)
+        }
+
+        fn on_visual_transform_changed(
+            &self,
+            old_transform: &$crate::core::algebra::Matrix3<f32>,
+            new_transform: &$crate::core::algebra::Matrix3<f32>,
+        ) {
+            self.$target
+                .on_visual_transform_changed(old_transform, new_transform)
+        }
+
+        fn post_draw(&self, drawing_context: &mut $crate::draw::DrawingContext) {
+            self.$target.post_draw(drawing_context)
+        }
+
+        fn update(&mut self, dt: f32, ui: &mut $crate::UserInterface) {
+            self.$target.update(dt, ui)
+        }
+
+        fn preview_message(
+            &self,
+            ui: &$crate::UserInterface,
+            message: &mut $crate::message::UiMessage,
+        ) {
+            self.$target.preview_message(ui, message)
+        }
+
+        fn handle_os_event(
+            &mut self,
+            self_handle: $crate::core::pool::Handle<$crate::UiNode>,
+            ui: &mut $crate::UserInterface,
+            event: &$crate::message::OsEvent,
+        ) {
+            self.$target.handle_os_event(self_handle, ui, event)
+        }
+
+        fn accepts_drop(
+            &self,
+            widget: $crate::core::pool::Handle<$crate::UiNode>,
+            ui: &$crate::UserInterface,
+        ) -> bool {
+            self.$target.accepts_drop(widget, ui)
+        }
+    };
+}
+
 /// Trait for all UI controls in library.
-pub trait Control:
-    BaseControl + Deref<Target = Widget> + DerefMut + Reflect + Visit + ComponentProvider
-{
+pub trait Control: BaseControl + Deref<Target = Widget> + DerefMut + Reflect + Visit {
+    /// Brief debugging information about this node.
+    fn summary(&self) -> String {
+        use std::fmt::Write;
+        let mut result = String::new();
+        let type_name = BaseControl::type_name(self)
+            .strip_prefix("fyrox_ui::")
+            .unwrap_or(BaseControl::type_name(self));
+        write!(result, "{} {}<{}>", self.handle(), self.name(), type_name,).unwrap();
+        if self.children().len() == 1 {
+            result.push_str(" 1 child");
+        } else if self.children().len() > 1 {
+            write!(result, " {} children", self.children().len()).unwrap();
+        }
+        result
+    }
+
     /// This method will be called before the widget is destroyed (dropped). At the moment, when this
     /// method is called, the widget is still in the widget graph and can be accessed via handles. It
-    /// is guaranteed to be called once, and only if the widget is deleted via [`crate::widget::WidgetMessage::remove`].
+    /// is guaranteed to be called once, and only if the widget is deleted via [`crate::widget::WidgetMessage::Remove`].
     fn on_remove(&self, #[allow(unused_variables)] sender: &Sender<UiMessage>) {}
 
-    /// This method is used to override measurement step of the layout system. It should return desired size of
-    /// the widget (how many space it wants to occupy).
+    /// This method is used to override measurement step of the layout system. It should return the desired size of
+    /// the widget (how much space it wants to occupy).
     ///
     /// ## Example
     ///
     /// ```rust
     /// # use fyrox_ui::{
     /// #     core::algebra::Vector2, define_widget_deref, message::UiMessage, Control, UserInterface,
-    /// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
+    /// #     core::{visitor::prelude::*, reflect::prelude::*, },
     /// #     widget::Widget, UiNode
     /// # };
     /// # use std::{
     /// #     any::{Any, TypeId},
     /// #     ops::{Deref, DerefMut},
     /// # };
-    /// # use fyrox_core::uuid_provider;
-    /// # use fyrox_graph::BaseSceneGraph;
     /// #
-    /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-    /// #[reflect(derived_type = "UiNode")]
+    /// # use fyrox_graph::SceneGraph;
+    /// #
+    /// #[derive(Clone, Visit, Reflect, Debug)]
+    /// #[reflect(derived_type = "UiNode", type_uuid = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }
     /// #
     /// # define_widget_deref!(MyWidget);
-    /// # uuid_provider!(MyWidget = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd");
     /// impl Control for MyWidget {
     ///     fn measure_override(
     ///         &self,
@@ -137,12 +230,12 @@ pub trait Control:
     /// ```
     ///
     /// The goal of this method is to supply the UI system with the size requirements of all descendants
-    /// of the widget. In this example we measure all descendants recursively and finding the max desired
-    /// size of across all the children widgets. This effectively does the following: size of this widget
-    /// will be the max size of children widgets. Some widgets (like [`crate::canvas::Canvas`]), can provide infinite
+    /// of the widget. In this example, we measure all descendants recursively and find the max desired
+    /// size of across all the children's widgets. This effectively does the following: the size of this widget
+    /// will be the max size of children's widgets. Some widgets (like [`crate::canvas::Canvas`]), can provide infinite
     /// constraints to children nodes, to fetch unconstrained desired size.
     ///
-    /// It is recommended to check implementation of this method of built-in widgets (such as [`crate::canvas::Canvas`],
+    /// It is recommended to check the implementation of this method of built-in widgets (such as [`crate::canvas::Canvas`],
     /// [`crate::stack_panel::StackPanel`], [`crate::wrap_panel::WrapPanel`], [`crate::grid::Grid`]). It should help you to
     /// understand measurement step better.
     fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
@@ -151,9 +244,9 @@ pub trait Control:
 
     /// This method is used to override arrangement step of the layout system. Arrangement step is used to
     /// commit the final location and size of the widget in local coordinates. It is done after the measurement
-    /// step; when all desired sizes of every widget is known. This fact allows you to calculate final location
-    /// and size of every child widget, based in their desired size. Usually this method is used in some panel
-    /// widgets, that takes their children and arranges them in some specific way. For example, it may stack
+    /// step; when all desired sizes of every widget is known. This fact allows you to calculate the final location
+    /// and size of every child widget, based on their desired size. Usually, this method is used in some panel
+    /// widgets that take their children and arrange them in some specific way. For example, it may stack
     /// widgets on top of each other, or put them in a line with wrapping, etc.
     ///
     /// ## Example
@@ -161,7 +254,7 @@ pub trait Control:
     /// ```rust
     /// # use fyrox_ui::{
     /// #     core::{algebra::Vector2, math::Rect},
-    /// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
+    /// #     core::{visitor::prelude::*, reflect::prelude::*, },
     /// #     define_widget_deref,
     /// #     message::UiMessage,
     /// #     Control, UserInterface, widget::Widget, UiNode
@@ -170,16 +263,15 @@ pub trait Control:
     /// #     any::{Any, TypeId},
     /// #     ops::{Deref, DerefMut},
     /// # };
-    /// # use fyrox_core::uuid_provider;
     /// #
-    /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-    /// #[reflect(derived_type = "UiNode")]
+    /// #
+    /// #[derive(Clone, Visit, Reflect, Debug)]
+    /// #[reflect(derived_type = "UiNode", type_uuid = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }
     /// #
     /// # define_widget_deref!(MyWidget);
-    /// # uuid_provider!(MyWidget = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd");
     /// impl Control for MyWidget {
     ///     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
     ///         let final_rect = Rect::new(0.0, 0.0, final_size.x, final_size.y);
@@ -202,15 +294,15 @@ pub trait Control:
     /// parent widget, so all children will have exactly the same size as the parent and be located at (0;0)
     /// point in local coordinates.
     ///
-    /// It is recommended to check implementation of this method of built-in widgets (such as [`crate::canvas::Canvas`],
+    /// It is recommended to check the implementation of this method of built-in widgets (such as [`crate::canvas::Canvas`],
     /// [`crate::stack_panel::StackPanel`], [`crate::wrap_panel::WrapPanel`], [`crate::grid::Grid`]). It should help you to
-    /// understand arrangement step better.
+    ///  understand the arrangement step better.
     fn arrange_override(&self, ui: &UserInterface, final_size: Vector2<f32>) -> Vector2<f32> {
         self.deref().arrange_override(ui, final_size)
     }
 
     /// This method is used to emit drawing commands that will be used later to draw your widget on screen.
-    /// Keep in mind that any emitted geometry (quads, lines, text, etc), will be used to perform hit test.
+    /// Keep in mind that any emitted geometry (quads, lines, text, etc.), will be used to perform hit test.
     /// In other words, all the emitted geometry will make your widget "clickable". Widgets with no geometry
     /// emitted by this method are mouse input transparent.
     ///
@@ -220,7 +312,7 @@ pub trait Control:
     /// # use fyrox_ui::{
     /// #     define_widget_deref,
     /// #     draw::{CommandTexture, Draw, DrawingContext},
-    /// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
+    /// #     core::{visitor::prelude::*, reflect::prelude::*, },
     /// #     message::UiMessage,
     /// #     Control, UserInterface, widget::Widget, UiNode
     /// # };
@@ -228,16 +320,15 @@ pub trait Control:
     /// #     any::{Any, TypeId},
     /// #     ops::{Deref, DerefMut},
     /// # };
-    /// # use fyrox_core::uuid_provider;
     /// #
-    /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
-    /// #[reflect(derived_type = "UiNode")]
+    /// #
+    /// #[derive(Clone, Visit, Reflect, Debug)]
+    /// #[reflect(derived_type = "UiNode", type_uuid = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }
     /// #
     /// # define_widget_deref!(MyWidget);
-    /// # uuid_provider!(MyWidget = "a93ec1b5-e7c8-4919-ac19-687d8c99f6bd");
     /// impl Control for MyWidget {
     /// fn draw(&self, drawing_context: &mut DrawingContext) {
     ///     let bounds = self.widget.bounding_rect();
@@ -245,7 +336,7 @@ pub trait Control:
     ///     // Push a rect.
     ///     drawing_context.push_rect_filled(&bounds, None);
     ///
-    ///     // Commit the geometry, it is mandatory step, otherwise your widget's geometry
+    ///     // Commit the geometry, it is a mandatory step, otherwise your widget's geometry
     ///     // will be "attached" to some other widget that will call `commit`.
     ///     drawing_context.commit(
     ///         self.clip_bounds(),
@@ -255,10 +346,13 @@ pub trait Control:
     ///         None,
     ///     );
     /// }
-    ///     #
-    ///     # fn handle_routed_message(&mut self, _ui: &mut UserInterface, _message: &mut UiMessage) {
-    ///     #     todo!()
-    ///     # }
+    ///
+    /// fn handle_routed_message(&mut self, _ui: &mut UserInterface, _message: &mut UiMessage) {
+    ///     // You may need to call the following method if your widget uses custom properties
+    ///     // for rendering to force it to be re-drawn. See `Widget::invalidate_visual` docs
+    ///     // for more info.
+    ///     self.invalidate_visual();
+    /// }
     /// }
     /// ```
     ///
@@ -266,13 +360,18 @@ pub trait Control:
     /// for [`DrawingContext`] for more info.
     fn draw(&self, #[allow(unused_variables)] drawing_context: &mut DrawingContext) {}
 
-    fn on_visual_transform_changed(&self) {}
+    fn on_visual_transform_changed(
+        &self,
+        #[allow(unused_variables)] old_transform: &Matrix3<f32>,
+        #[allow(unused_variables)] new_transform: &Matrix3<f32>,
+    ) {
+    }
 
     /// The same as [`Self::draw`], but it runs after all descendant widgets are rendered.
     fn post_draw(&self, #[allow(unused_variables)] drawing_context: &mut DrawingContext) {}
 
     /// This method is called every frame and can be used to update internal variables of the widget, that
-    /// can be used to animated your widget. Its main difference from other methods, is that it does **not**
+    /// can be used to animated your widget. Its main difference from other methods is that it does **not**
     /// provide access to any other widget in the UI. Instead, you can only send messages to widgets to
     /// force them to change their state.
     ///
@@ -292,21 +391,21 @@ pub trait Control:
     /// # Notes
     ///
     /// Do *not* try to borrow node by `self_handle` in UI - at this moment node has been moved
-    /// out of pool and attempt of borrowing will cause panic! `self_handle` should be used only
+    /// out of the pool and attempt of borrowing will cause panic! `self_handle` should be used only
     /// to check if event came from/for this node or to capture input on node.
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage);
 
-    /// Used to react to a message (by producing another message) that was posted outside of current
-    /// hierarchy. In other words this method is used when you need to "peek" a message before it'll
-    /// be passed into bubbling router. Most common use case is to catch messages from popups: popup
-    /// in 99.9% cases is a child of root canvas and it **won't** receive a message from a its *logical*
-    /// parent during bubbling message routing. For example `preview_message` used in a dropdown list:
+    /// Used to react to a message (by producing another message) that was posted outside the current
+    /// hierarchy. In other words, this method is used when you need to "peek" a message before it'll
+    /// be passed into bubbling router. The Most common use case is to catch messages from popups: popup
+    /// in 99.9% cases is a child of root canvas and it **won't** receive a message from a *logical*
+    /// parent during bubbling message routing. For example, `preview_message` used in a dropdown list:
     /// dropdown list has two separate parts - a field with selected value and a popup for all possible
     /// options. Visual parent of the popup in this case is the root canvas, but logical parent is the
-    /// dropdown list. Because of this fact, the field won't receive any messages from popup, to solve
+    /// dropdown list. Because of this fact, the field won't receive any messages from the popup, to solve
     /// this we use `preview_message`. This method is much more restrictive - it does not allow you to
     /// modify a node and ui, you can either *request* changes by sending a message or use internal
-    /// mutability (`Cell`, `RefCell`, etc).
+    /// mutability (`Cell`, `RefCell`, etc.).
     ///
     /// ## Important notes
     ///
@@ -337,5 +436,28 @@ pub trait Control:
         #[allow(unused_variables)] ui: &mut UserInterface,
         #[allow(unused_variables)] event: &OsEvent,
     ) {
+    }
+
+    /// Checks whether a `widget` will be accepted by the current widget or not when dropped. This
+    /// method is used only to switch the cursor icon. The default implementation returns `allow_drop`
+    /// flag of the widget, which, if set to `true`, basically allows unconditional drop of any content.
+    fn accepts_drop(
+        &self,
+        #[allow(unused_variables)] widget: Handle<UiNode>,
+        #[allow(unused_variables)] ui: &UserInterface,
+    ) -> bool {
+        *self.allow_drop
+    }
+}
+
+// Essentially implements ObjectOrVariant for Control types.
+// See ObjectOrVariantHelper for the cause of the indirection.
+impl<T: Control> ObjectOrVariantHelper<UiNode, T> for PhantomData<T> {
+    fn convert_to_dest_type_helper(node: &UiNode) -> Option<&T> {
+        node.inner_ref().self_or_field_ref()
+    }
+
+    fn convert_to_dest_type_helper_mut(node: &mut UiNode) -> Option<&mut T> {
+        node.inner_mut().self_or_field_mut()
     }
 }

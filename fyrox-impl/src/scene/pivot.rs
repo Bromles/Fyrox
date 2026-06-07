@@ -25,7 +25,6 @@ use crate::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         uuid::{uuid, Uuid},
         visitor::prelude::*,
     },
@@ -36,12 +35,15 @@ use crate::{
     },
 };
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::BaseSceneGraph;
+use fyrox_graph::SceneGraph;
 use std::ops::{Deref, DerefMut};
 
 /// A simplest possible node which represents point in space.
-#[derive(Clone, Reflect, Default, Debug, ComponentProvider)]
-#[reflect(derived_type = "Node")]
+#[derive(Clone, Reflect, Default, Debug)]
+#[reflect(
+    derived_type = "Node",
+    type_uuid = "dd2ecb96-b1f4-4ee0-943b-2a4d1844e3bb"
+)]
 pub struct Pivot {
     base: Base,
 }
@@ -57,12 +59,6 @@ impl Deref for Pivot {
 
     fn deref(&self) -> &Self::Target {
         &self.base
-    }
-}
-
-impl TypeUuidProvider for Pivot {
-    fn type_uuid() -> Uuid {
-        uuid!("dd2ecb96-b1f4-4ee0-943b-2a4d1844e3bb")
     }
 }
 
@@ -92,7 +88,7 @@ impl NodeTrait for Pivot {
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
+        <Self as Reflect>::type_info().type_uuid
     }
 }
 
@@ -115,7 +111,7 @@ impl PivotBuilder {
     }
 
     /// Creates new Pivot node and adds it to the graph.
-    pub fn build(self, graph: &mut Graph) -> Handle<Node> {
-        graph.add_node(self.build_node())
+    pub fn build(self, graph: &mut Graph) -> Handle<Pivot> {
+        graph.add_node(self.build_node()).to_variant()
     }
 }

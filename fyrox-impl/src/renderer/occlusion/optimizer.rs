@@ -18,21 +18,21 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::renderer::resources::RendererResources;
 use crate::{
     core::{color::Color, math::Rect, ImmutableString},
+    graphics::{
+        error::FrameworkError,
+        framebuffer::{Attachment, GpuFrameBuffer},
+        gpu_texture::{GpuTexture, PixelKind},
+        read_buffer::GpuAsyncReadBuffer,
+        server::GraphicsServer,
+        stats::RenderPassStatistics,
+    },
+    renderer::resources::RendererResources,
     renderer::{
         cache::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
-        },
-        framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, GpuFrameBuffer},
-            gpu_texture::{GpuTexture, PixelKind},
-            read_buffer::GpuAsyncReadBuffer,
-            server::GraphicsServer,
-            stats::RenderPassStatistics,
         },
         make_viewport_matrix,
     },
@@ -82,11 +82,14 @@ impl VisibilityBufferOptimizer {
 
     pub fn optimize(
         &mut self,
+        server: &dyn GraphicsServer,
         visibility_buffer: &GpuTexture,
         tile_size: i32,
         uniform_buffer_cache: &mut UniformBufferCache,
         renderer_resources: &RendererResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
+        let _debug_scope = server.begin_scope("VisibilityOptimizer");
+
         let mut stats = RenderPassStatistics::default();
 
         let viewport = Rect::new(0, 0, self.w_tiles as i32, self.h_tiles as i32);

@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::camera::PickMethod;
 use crate::{
     camera::{CameraController, PickingOptions},
     command::{Command, CommandGroup},
@@ -26,22 +27,17 @@ use crate::{
             algebra::{Matrix4, Point3, Vector2, Vector3},
             math::plane::Plane,
             pool::Handle,
+            reflect::prelude::*,
             uuid::{uuid, Uuid},
-            TypeUuidProvider,
         },
         fxhash::FxHashSet,
         graph::SceneGraph,
-        gui::{BuildContext, UiNode},
-        scene::{
-            camera::{Camera, Projection},
-            graph::Graph,
-            node::Node,
-            Scene,
-        },
+        gui::BuildContext,
+        scene::{camera::Projection, graph::Graph, node::Node, Scene},
     },
     interaction::{
-        calculate_gizmo_distance_scaling, gizmo::move_gizmo::MoveGizmo,
-        make_interaction_mode_button, plane::PlaneKind, InteractionMode,
+        gizmo::move_gizmo::MoveGizmo, make_interaction_mode_button, plane::PlaneKind,
+        InteractionMode,
     },
     message::MessageSender,
     scene::{
@@ -53,7 +49,11 @@ use crate::{
     world::selection::GraphSelection,
     Engine, Message,
 };
+use fyrox::core::some_or_return;
+use fyrox::gui::button::Button;
 
+#[derive(Reflect, Debug, Clone)]
+#[reflect(type_uuid = "067c67e2-865b-4112-8d60-133ee1e1883a")]
 struct Entry {
     node: Handle<Node>,
     initial_offset_gizmo_space: Vector3<f32>,
@@ -62,7 +62,10 @@ struct Entry {
     new_local_position: Vector3<f32>,
 }
 
+#[derive(Reflect, Debug, Clone)]
+#[reflect(type_uuid = "f50af953-308e-40e8-85ae-48c905ba5f46")]
 struct MoveContext {
+    #[reflect(hidden)]
     plane: Option<Plane>,
     objects: Vec<Entry>,
     plane_kind: PlaneKind,
@@ -214,28 +217,25 @@ impl MoveContext {
                 ignore_back_faces: settings.selection.ignore_back_faces,
                 // We need info only about closest intersection.
                 use_picking_loop: false,
-                only_meshes: true,
+                method: PickMethod::PRECISE_HULL_RAY_TEST,
                 settings: &settings.selection,
             },
         ) {
             Some(result.position)
         } else {
             // In case of empty space, check intersection with oXZ plane (3D) or oXY (2D).
-            if let Some(camera) = graph[game_scene.camera_controller.camera].cast::<Camera>() {
-                let normal = match camera.projection() {
-                    Projection::Perspective(_) => Vector3::new(0.0, 1.0, 0.0),
-                    Projection::Orthographic(_) => Vector3::new(0.0, 0.0, 1.0),
-                };
+            let camera = &graph[game_scene.camera_controller.camera];
+            let normal = match camera.projection() {
+                Projection::Perspective(_) => Vector3::new(0.0, 1.0, 0.0),
+                Projection::Orthographic(_) => Vector3::new(0.0, 0.0, 1.0),
+            };
 
-                let plane =
-                    Plane::from_normal_and_point(&normal, &Default::default()).unwrap_or_default();
+            let plane =
+                Plane::from_normal_and_point(&normal, &Default::default()).unwrap_or_default();
 
-                let ray = camera.make_ray(mouse_position, frame_size);
+            let ray = camera.make_ray(mouse_position, frame_size);
 
-                ray.plane_intersection_point(&plane)
-            } else {
-                None
-            }
+            ray.plane_intersection_point(&plane)
         };
 
         if let Some(new_position) = new_position {
@@ -280,6 +280,8 @@ impl MoveContext {
     }
 }
 
+#[derive(Reflect, Debug, Clone)]
+#[reflect(type_uuid = "067c67e2-865b-4112-8d60-133ee1e1883a")]
 pub struct MoveInteractionMode {
     move_context: Option<MoveContext>,
     move_gizmo: MoveGizmo,
@@ -293,12 +295,6 @@ impl MoveInteractionMode {
             move_gizmo: MoveGizmo::new(game_scene, engine),
             message_sender,
         }
-    }
-}
-
-impl TypeUuidProvider for MoveInteractionMode {
-    fn type_uuid() -> Uuid {
-        uuid!("067c67e2-865b-4112-8d60-133ee1e1883a")
     }
 }
 
@@ -327,7 +323,7 @@ impl InteractionMode for MoveInteractionMode {
                 filter: Some(&mut |handle, _| handle != self.move_gizmo.origin),
                 ignore_back_faces: false,
                 use_picking_loop: true,
-                only_meshes: false,
+                method: Default::default(),
                 settings: &settings.selection,
             },
         ) {
@@ -406,7 +402,7 @@ impl InteractionMode for MoveInteractionMode {
                         filter: None,
                         ignore_back_faces: settings.selection.ignore_back_faces,
                         use_picking_loop: true,
-                        only_meshes: false,
+                        method: Default::default(),
                         settings: &settings.selection,
                     },
                 )
@@ -472,7 +468,7 @@ impl InteractionMode for MoveInteractionMode {
                         filter: None,
                         ignore_back_faces: false,
                         use_picking_loop: false,
-                        only_meshes: false,
+                        method: Default::default(),
                         settings: &settings.selection,
                     },
                 )
@@ -487,26 +483,15 @@ impl InteractionMode for MoveInteractionMode {
         editor_selection: &Selection,
         controller: &mut dyn SceneController,
         engine: &mut Engine,
-        _settings: &Settings,
+        settings: &Settings,
     ) {
-        let Some(game_scene) = controller.downcast_mut::<GameScene>() else {
-            return;
-        };
-
-        let scene = &mut engine.scenes[game_scene.scene];
-        let graph = &mut scene.graph;
-        if editor_selection.is_empty() {
-            self.move_gizmo.set_visible(graph, false);
-        } else {
-            let scale = calculate_gizmo_distance_scaling(
-                graph,
-                game_scene.camera_controller.camera,
-                self.move_gizmo.origin,
-            ) * _settings.graphics.gizmo_scale;
-            self.move_gizmo.set_visible(graph, true);
-            self.move_gizmo
-                .sync_transform(scene, editor_selection, scale);
-        }
+        let game_scene = some_or_return!(controller.downcast_mut::<GameScene>());
+        self.move_gizmo.sync_with_selection(
+            &mut engine.scenes[game_scene.scene].graph,
+            game_scene.camera_controller.camera,
+            settings,
+            editor_selection,
+        );
     }
 
     fn deactivate(&mut self, controller: &dyn SceneController, engine: &mut Engine) {
@@ -518,7 +503,7 @@ impl InteractionMode for MoveInteractionMode {
         self.move_gizmo.set_visible(graph, false);
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         let move_mode_tooltip =
             "Move Object(s) - Shortcut: [2]\n\nMovement interaction mode allows you to move selected \
         objects. Keep in mind that movement always works in local coordinates!\n\n\
@@ -533,6 +518,6 @@ impl InteractionMode for MoveInteractionMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        Self::type_info().type_uuid
     }
 }

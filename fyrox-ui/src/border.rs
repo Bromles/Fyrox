@@ -23,20 +23,19 @@
 //! The Border widget provides a stylized, static border around its child widget. See [`Border`] docs for more info and
 //! usage examples.
 
+use crate::message::MessageData;
 use crate::{
     core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
+        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*,
         variable::InheritableVariable, visitor::prelude::*,
     },
-    define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
     message::UiMessage,
     style::{resource::StyleResourceExt, Style, StyledProperty},
     widget::{Widget, WidgetBuilder},
-    BuildContext, Control, MessageDirection, Thickness, UiNode, UserInterface,
+    BuildContext, Control, Thickness, UiNode, UserInterface,
 };
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use std::ops::{Deref, DerefMut};
 
 /// The Border widget provides a stylized, static border around its child widget. Below is an example of creating a 1 pixel
 /// thick border around a button widget:
@@ -100,8 +99,8 @@ use std::ops::{Deref, DerefMut};
 /// .with_stroke_thickness(Thickness {left: 2.0, right: 2.0, top: 2.0, bottom: 2.0}.into())
 /// .build(&mut ui.build_ctx());
 /// ```
-#[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "6aba3dc5-831d-481a-bc83-ec10b2b2bf12")]
+#[derive(Default, Clone, Visit, Reflect, Debug)]
+#[reflect(type_uuid = "6aba3dc5-831d-481a-bc83-ec10b2b2bf12")]
 #[reflect(derived_type = "UiNode")]
 pub struct Border {
     /// Base widget of the border. See [`Widget`] docs for more info.
@@ -123,6 +122,7 @@ impl ConstructorProvider<UiNode, UserInterface> for Border {
             .with_variant("Border", |ui| {
                 BorderBuilder::new(WidgetBuilder::new().with_name("Border"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Visual")
@@ -134,29 +134,14 @@ crate::define_widget_deref!(Border);
 /// Supported border-specific messages.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BorderMessage {
-    /// Allows you to set stroke thickness at runtime. See [`Self::stroke_thickness`] docs for more.
+    /// Allows you to set stroke thickness at runtime.
     StrokeThickness(StyledProperty<Thickness>),
-    /// Allows you to set corner radius at runtime. See [`Self::corner_radius`] docs for more.
+    /// Allows you to set corner radius at runtime.
     CornerRadius(StyledProperty<f32>),
-    /// Allows you to enable or disable padding the children nodes by corner radius. See
-    /// [`Self::pad_by_corner_radius`] docs for more.
+    /// Allows you to enable or disable padding the children nodes by corner radius.
     PadByCornerRadius(bool),
 }
-
-impl BorderMessage {
-    define_constructor!(
-        /// Creates a new [Self::StrokeThickness] message.
-        BorderMessage:StrokeThickness => fn stroke_thickness(StyledProperty<Thickness>), layout: false
-    );
-    define_constructor!(
-        /// Creates a new [Self::CornerRadius] message.
-        BorderMessage:CornerRadius => fn corner_radius(StyledProperty<f32>), layout: false
-    );
-    define_constructor!(
-        /// Creates a new [Self::PadByCornerRadius] message.
-        BorderMessage:PadByCornerRadius => fn pad_by_corner_radius(bool), layout: false
-    );
-}
+impl MessageData for BorderMessage {}
 
 fn corner_offset(radius: f32) -> f32 {
     radius * 0.5 * (std::f32::consts::SQRT_2 - 1.0)
@@ -243,6 +228,9 @@ impl Control for Border {
                 None,
             );
         } else {
+            let corner_arc_length = std::f32::consts::TAU * **self.corner_radius * (90.0 / 360.0);
+            let corner_subdivisions = ((corner_arc_length as usize) / 2).min(4);
+
             let thickness = self.stroke_thickness.left;
             let half_thickness = thickness / 2.0;
 
@@ -250,7 +238,7 @@ impl Control for Border {
                 drawing_context,
                 &bounds.deflate(half_thickness, half_thickness),
                 **self.corner_radius,
-                16,
+                corner_subdivisions,
             );
             drawing_context.commit(
                 self.clip_bounds(),
@@ -260,7 +248,12 @@ impl Control for Border {
                 None,
             );
 
-            drawing_context.push_rounded_rect(&bounds, thickness, **self.corner_radius, 16);
+            drawing_context.push_rounded_rect(
+                &bounds,
+                thickness,
+                **self.corner_radius,
+                corner_subdivisions,
+            );
             drawing_context.commit(
                 self.clip_bounds(),
                 self.widget.foreground(),
@@ -274,33 +267,29 @@ impl Control for Border {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if message.destination() == self.handle()
-            && message.direction() == MessageDirection::ToWidget
-        {
-            if let Some(msg) = message.data::<BorderMessage>() {
-                match msg {
-                    BorderMessage::StrokeThickness(thickness) => {
-                        if *thickness != *self.stroke_thickness {
-                            self.stroke_thickness
-                                .set_value_and_mark_modified(thickness.clone());
-                            ui.send_message(message.reverse());
-                            self.invalidate_layout();
-                        }
+        if let Some(msg) = message.data_for::<BorderMessage>(self.handle()) {
+            match msg {
+                BorderMessage::StrokeThickness(thickness) => {
+                    if *thickness != *self.stroke_thickness {
+                        self.stroke_thickness
+                            .set_value_and_mark_modified(thickness.clone());
+                        ui.try_send_response(message);
+                        self.invalidate_layout();
                     }
-                    BorderMessage::CornerRadius(radius) => {
-                        if *radius != *self.corner_radius {
-                            self.corner_radius
-                                .set_value_and_mark_modified(radius.clone());
-                            ui.send_message(message.reverse());
-                            self.invalidate_layout();
-                        }
+                }
+                BorderMessage::CornerRadius(radius) => {
+                    if *radius != *self.corner_radius {
+                        self.corner_radius
+                            .set_value_and_mark_modified(radius.clone());
+                        ui.try_send_response(message);
+                        self.invalidate_layout();
                     }
-                    BorderMessage::PadByCornerRadius(pad) => {
-                        if *pad != *self.pad_by_corner_radius {
-                            self.pad_by_corner_radius.set_value_and_mark_modified(*pad);
-                            ui.send_message(message.reverse());
-                            self.invalidate_layout();
-                        }
+                }
+                BorderMessage::PadByCornerRadius(pad) => {
+                    if *pad != *self.pad_by_corner_radius {
+                        self.pad_by_corner_radius.set_value_and_mark_modified(*pad);
+                        ui.try_send_response(message);
+                        self.invalidate_layout();
                     }
                 }
             }
@@ -364,8 +353,8 @@ impl BorderBuilder {
     }
 
     /// Finishes border building and adds it to the user interface. See examples in [`Border`] docs.
-    pub fn build(self, ctx: &mut BuildContext<'_>) -> Handle<UiNode> {
-        ctx.add_node(UiNode::new(self.build_border(ctx)))
+    pub fn build(self, ctx: &mut BuildContext<'_>) -> Handle<Border> {
+        ctx.add(self.build_border(ctx))
     }
 }
 

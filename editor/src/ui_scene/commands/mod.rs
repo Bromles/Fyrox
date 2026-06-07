@@ -21,18 +21,21 @@
 pub mod graph;
 pub mod widget;
 
-use crate::fyrox::{core::type_traits::prelude::*, gui::UserInterface};
+use crate::fyrox::{core::reflect::prelude::*, gui::UserInterface};
 use crate::{
     command::CommandContext, message::MessageSender, scene::Selection,
     ui_scene::clipboard::Clipboard,
 };
+use fyrox::core::pool::Handle;
+use fyrox::graph::NodeWrapper;
+use fyrox::gui::UiNode;
 
-#[derive(ComponentProvider)]
+#[derive(Reflect, Debug)]
+#[reflect(non_cloneable)]
+#[reflect(type_uuid = "32b695b1-7c5d-4cfd-b53b-2e879b78b749")]
 pub struct UiSceneContext {
     pub ui: &'static mut UserInterface,
-    #[component(include)]
     pub selection: &'static mut Selection,
-    #[component(include)]
     pub message_sender: MessageSender,
     pub clipboard: &'static mut Clipboard,
 }
@@ -58,6 +61,13 @@ impl UiSceneContext {
                 clipboard: std::mem::transmute::<&'a mut _, &'static mut _>(clipboard),
             }
         });
+    }
+
+    pub fn widget_mut(&mut self, handle: Handle<UiNode>) -> Option<&mut dyn Reflect> {
+        self.ui
+            .try_get_node_mut(handle)
+            .ok()
+            .map(|widget| widget.inner_mut())
     }
 }
 

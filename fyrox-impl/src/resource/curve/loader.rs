@@ -25,9 +25,10 @@ use crate::{
         io::ResourceIo,
         loader::{BoxedLoaderFuture, LoaderPayload, ResourceLoader},
     },
-    core::{uuid::Uuid, TypeUuidProvider},
+    core::uuid::Uuid,
     resource::curve::CurveResourceState,
 };
+use fyrox_core::reflect::Reflect;
 use fyrox_resource::state::LoadError;
 use std::{path::PathBuf, sync::Arc};
 
@@ -39,8 +40,13 @@ impl ResourceLoader for CurveLoader {
         &["curve", "crv"]
     }
 
+    fn is_native_extension(&self, ext: &str) -> bool {
+        fyrox_core::cmp_strings_case_insensitive(ext, "curve")
+            || fyrox_core::cmp_strings_case_insensitive(ext, "crv")
+    }
+
     fn data_type_uuid(&self) -> Uuid {
-        CurveResourceState::type_uuid()
+        <CurveResourceState as Reflect>::type_info().type_uuid
     }
 
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {

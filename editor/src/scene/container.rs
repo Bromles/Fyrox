@@ -20,7 +20,7 @@
 
 use crate::command::CommandStack;
 use crate::fyrox::{
-    core::{algebra::Vector2, math::Rect, pool::Handle, uuid::Uuid, TypeUuidProvider},
+    core::{algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, uuid::Uuid},
     engine::Engine,
     gui::{
         message::{KeyCode, MouseButton},
@@ -28,6 +28,7 @@ use crate::fyrox::{
     },
     scene::Scene,
 };
+use crate::scene::nullscene::NullSceneController;
 use crate::{
     highlight::HighlightRenderPass,
     interaction::{
@@ -45,6 +46,7 @@ use crate::{
         UiScene,
     },
 };
+use fyrox::gui::file_browser::FileType;
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 pub struct EditorSceneEntry {
@@ -63,6 +65,29 @@ pub struct EditorSceneEntry {
 }
 
 impl EditorSceneEntry {
+    // Create an entry for when there is no scene using a [`NullSceneController`].
+    pub fn new_null_scene(
+        engine: &mut Engine,
+        settings: &mut Settings,
+        message_sender: MessageSender,
+    ) -> Self {
+        Self {
+            has_unsaved_changes: false,
+            path: None,
+            selection: Selection::default(),
+            command_stack: CommandStack::new(false, settings.general.max_history_entries),
+            controller: Box::new(NullSceneController {
+                sender: message_sender.clone(),
+                resource_manager: engine.resource_manager.clone(),
+            }),
+            interaction_modes: InteractionModeContainer::default(),
+            current_interaction_mode: None,
+            last_mouse_pos: None,
+            click_mouse_pos: None,
+            sender: message_sender,
+            id: Default::default(),
+        }
+    }
     pub fn new_game_scene(
         scene: Scene,
         path: Option<PathBuf>,
@@ -129,7 +154,7 @@ impl EditorSceneEntry {
             command_stack: CommandStack::new(false, settings.general.max_history_entries),
         };
 
-        entry.set_interaction_mode(engine, Some(MoveInteractionMode::type_uuid()));
+        entry.set_interaction_mode(engine, Some(MoveInteractionMode::type_info().type_uuid));
 
         entry
     }
@@ -165,7 +190,7 @@ impl EditorSceneEntry {
             command_stack: CommandStack::new(false, settings.general.max_history_entries),
         };
 
-        entry.set_interaction_mode(engine, Some(UiSelectInteractionMode::type_uuid()));
+        entry.set_interaction_mode(engine, Some(UiSelectInteractionMode::type_info().type_uuid));
 
         entry
     }
@@ -192,8 +217,9 @@ impl EditorSceneEntry {
         }
     }
 
-    pub fn default_file_name(&self) -> PathBuf {
-        format!("unnamed.{}", self.controller.extension()).into()
+    pub fn default_file_info(&self) -> (PathBuf, FileType) {
+        let file_type = self.controller.file_type();
+        (file_type.make_file_name("unnamed"), file_type)
     }
 
     pub fn need_save(&self) -> bool {
@@ -437,32 +463,44 @@ impl EditorSceneEntry {
     }
 }
 
-#[derive(Default)]
 pub struct SceneContainer {
+    /// The scene entry that will be current when the container is empty.
+    null_scene: EditorSceneEntry,
     pub entries: Vec<EditorSceneEntry>,
     current_scene: Option<usize>,
 }
 
 impl SceneContainer {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(engine: &mut Engine, settings: &mut Settings, sender: MessageSender) -> Self {
+        Self {
+            null_scene: EditorSceneEntry::new_null_scene(engine, settings, sender),
+            entries: vec![],
+            current_scene: None,
+        }
     }
 
-    pub fn current_scene_entry_ref(&self) -> Option<&EditorSceneEntry> {
-        self.current_scene.and_then(|i| self.entries.get(i))
+    pub fn has_active_scene(&self) -> bool {
+        self.current_scene.is_some()
     }
 
-    pub fn current_scene_entry_mut(&mut self) -> Option<&mut EditorSceneEntry> {
-        self.current_scene.and_then(|i| self.entries.get_mut(i))
+    pub fn current_scene_entry_ref(&self) -> &EditorSceneEntry {
+        self.current_scene
+            .and_then(|i| self.entries.get(i))
+            .unwrap_or(&self.null_scene)
     }
 
-    pub fn current_scene_controller_ref(&self) -> Option<&dyn SceneController> {
-        self.current_scene_entry_ref().map(|e| &*e.controller)
+    pub fn current_scene_entry_mut(&mut self) -> &mut EditorSceneEntry {
+        self.current_scene
+            .and_then(|i| self.entries.get_mut(i))
+            .unwrap_or(&mut self.null_scene)
     }
 
-    pub fn current_scene_controller_mut(&mut self) -> Option<&mut dyn SceneController> {
-        self.current_scene_entry_mut()
-            .map(move |e| &mut *e.controller)
+    pub fn current_scene_controller_ref(&self) -> &dyn SceneController {
+        &*self.current_scene_entry_ref().controller
+    }
+
+    pub fn current_scene_controller_mut(&mut self) -> &mut dyn SceneController {
+        &mut *self.current_scene_entry_mut().controller
     }
 
     pub fn first_unsaved_scene(&self) -> Option<&EditorSceneEntry> {
@@ -525,23 +563,21 @@ impl SceneContainer {
 
     pub fn take_scene(&mut self, id: Uuid) -> Option<EditorSceneEntry> {
         // Remember the UUID of the current scene, because the index is about to become invalid
-        let current_id = self.current_scene_entry_ref().map(|s| s.id);
+        let current_id = self.current_scene_entry_ref().id;
         let scene = self
             .entries
             .iter()
             .position(|e| e.id == id)
             .map(|i| self.entries.remove(i));
         // Update the current scene index based on the UUID of the current scene.
-        if let Some(current_id) = current_id {
-            if !self.set_current_scene(current_id) {
-                // If the scene could not be set by UUID, then the current scene was taken.
-                self.current_scene = if self.entries.is_empty() {
-                    None
-                } else {
-                    // TODO: Maybe set it to the previous one?
-                    Some(0)
-                };
-            }
+        if !self.set_current_scene(current_id) {
+            // If the scene could not be set by UUID, then the current scene was taken.
+            self.current_scene = if self.entries.is_empty() {
+                None
+            } else {
+                // TODO: Maybe set it to the previous one?
+                Some(0)
+            };
         }
         scene
     }

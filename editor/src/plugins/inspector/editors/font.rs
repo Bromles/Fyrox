@@ -22,13 +22,11 @@ use crate::{
     asset::item::AssetItem,
     fyrox::{
         core::{
-            algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*,
-            type_traits::prelude::*, uuid_provider, visitor::prelude::*,
+            algebra::Vector2, color::Color, pool::Handle, reflect::prelude::*, visitor::prelude::*,
         },
-        graph::BaseSceneGraph,
+        graph::SceneGraph,
         gui::{
             brush::Brush,
-            define_constructor,
             draw::{CommandTexture, Draw, DrawingContext},
             font::{Font, FontResource, BUILT_IN_FONT},
             formatted_text::WrapMode,
@@ -37,7 +35,7 @@ use crate::{
                     PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
                     PropertyEditorMessageContext, PropertyEditorTranslationContext,
                 },
-                FieldKind, InspectorError, PropertyChanged,
+                FieldAction, InspectorError, PropertyChanged,
             },
             message::{MessageDirection, UiMessage},
             text::{TextBuilder, TextMessage},
@@ -48,17 +46,22 @@ use crate::{
 };
 
 use fyrox::asset::manager::ResourceManager;
+use fyrox::gui::message::MessageData;
+use fyrox::gui::text::Text;
 use std::{
     any::TypeId,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
 };
 
-#[derive(Clone, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Clone, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "5db49479-ff89-49b8-a038-0766253d6493"
+)]
 pub struct FontField {
     widget: Widget,
-    text_preview: Handle<UiNode>,
+    text_preview: Handle<Text>,
     font: FontResource,
     #[reflect(hidden)]
     #[visit(skip)]
@@ -89,12 +92,7 @@ impl DerefMut for FontField {
 pub enum FontFieldMessage {
     Font(FontResource),
 }
-
-impl FontFieldMessage {
-    define_constructor!(FontFieldMessage:Font => fn font(FontResource), layout: false);
-}
-
-uuid_provider!(FontField = "5db49479-ff89-49b8-a038-0766253d6493");
+impl MessageData for FontFieldMessage {}
 
 impl Control for FontField {
     fn draw(&self, drawing_context: &mut DrawingContext) {
@@ -117,30 +115,21 @@ impl Control for FontField {
             if message.destination() == self.handle {
                 if let Some(item) = ui.node(*dropped).cast::<AssetItem>() {
                     if let Some(font) = item.resource::<Font>() {
-                        ui.send_message(FontFieldMessage::font(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                            font,
-                        ));
+                        ui.send(self.handle(), FontFieldMessage::Font(font));
                     }
                 }
             }
-        } else if let Some(FontFieldMessage::Font(font)) = message.data::<FontFieldMessage>() {
-            if &self.font != font && message.direction() == MessageDirection::ToWidget {
+        } else if let Some(FontFieldMessage::Font(font)) = message.data_for(self.handle) {
+            if &self.font != font {
                 self.font = font.clone();
 
-                ui.send_message(TextMessage::font(
+                ui.send(self.text_preview, TextMessage::Font(font.clone()));
+                ui.send(
                     self.text_preview,
-                    MessageDirection::ToWidget,
-                    font.clone(),
-                ));
-                ui.send_message(TextMessage::text(
-                    self.text_preview,
-                    MessageDirection::ToWidget,
-                    make_name(&self.resource_manager, &self.font),
-                ));
+                    TextMessage::Text(make_name(&self.resource_manager, &self.font)),
+                );
 
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
             }
         }
     }
@@ -181,7 +170,7 @@ impl FontFieldBuilder {
         self,
         resource_manager: ResourceManager,
         ctx: &mut BuildContext,
-    ) -> Handle<UiNode> {
+    ) -> Handle<FontField> {
         let text_preview;
         let widget = self
             .widget_builder
@@ -203,7 +192,7 @@ impl FontFieldBuilder {
             resource_manager,
         };
 
-        ctx.add_node(UiNode::new(editor))
+        ctx.add(editor)
     }
 }
 
@@ -223,13 +212,11 @@ impl PropertyEditorDefinition for FontPropertyEditorDefinition {
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<FontResource>()?;
 
-        Ok(PropertyEditorInstance::Simple {
-            editor: FontFieldBuilder::new(
-                WidgetBuilder::new().with_min_size(Vector2::new(0.0, 17.0)),
-            )
-            .with_font(value.clone())
-            .build(self.resource_manager.clone(), ctx.build_context),
-        })
+        Ok(PropertyEditorInstance::simple(
+            FontFieldBuilder::new(WidgetBuilder::new().with_min_size(Vector2::new(0.0, 17.0)))
+                .with_font(value.clone())
+                .build(self.resource_manager.clone(), ctx.build_context),
+        ))
     }
 
     fn create_message(
@@ -238,10 +225,9 @@ impl PropertyEditorDefinition for FontPropertyEditorDefinition {
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<FontResource>()?;
 
-        Ok(Some(FontFieldMessage::font(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.clone(),
+            FontFieldMessage::Font(value.clone()),
         )))
     }
 
@@ -250,7 +236,7 @@ impl PropertyEditorDefinition for FontPropertyEditorDefinition {
             if let Some(FontFieldMessage::Font(value)) = ctx.message.data() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(value.clone()),
+                    action: FieldAction::object(value.clone()),
                 });
             }
         }

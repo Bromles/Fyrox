@@ -26,7 +26,7 @@ use crate::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
             PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
-        FieldKind, InspectorError, PropertyChanged,
+        FieldAction, InspectorError, PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     text::TextMessage,
@@ -49,8 +49,8 @@ impl PropertyEditorDefinition for Utf32StringPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Vec<char>>()?;
-        Ok(PropertyEditorInstance::Simple {
-            editor: TextBoxBuilder::new(
+        Ok(PropertyEditorInstance::simple(
+            TextBoxBuilder::new(
                 WidgetBuilder::new()
                     .with_min_size(Vector2::new(0.0, 17.0))
                     .with_margin(Thickness::uniform(1.0)),
@@ -59,7 +59,7 @@ impl PropertyEditorDefinition for Utf32StringPropertyEditorDefinition {
             .with_text(value.iter().collect::<String>())
             .with_vertical_text_alignment(VerticalAlignment::Center)
             .build(ctx.build_context),
-        })
+        ))
     }
 
     fn create_message(
@@ -67,10 +67,9 @@ impl PropertyEditorDefinition for Utf32StringPropertyEditorDefinition {
         ctx: PropertyEditorMessageContext,
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Vec<char>>()?;
-        Ok(Some(TextMessage::text(
+        Ok(Some(UiMessage::for_widget(
             ctx.instance,
-            MessageDirection::ToWidget,
-            value.iter().collect::<String>(),
+            TextMessage::Text(value.iter().collect::<String>()),
         )))
     }
 
@@ -79,7 +78,7 @@ impl PropertyEditorDefinition for Utf32StringPropertyEditorDefinition {
             if let Some(TextMessage::Text(value)) = ctx.message.data::<TextMessage>() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    value: FieldKind::object(value.chars().collect::<Vec<_>>()),
+                    action: FieldAction::object(value.chars().collect::<Vec<_>>()),
                 });
             }
         }

@@ -20,9 +20,14 @@
 
 use std::hash::Hash;
 
+use super::*;
+use crate::command::{Command, CommandContext, CommandGroup, CommandTrait};
+use fyrox::gui::check_box::CheckBox;
+use fyrox::gui::numeric::NumericUpDown;
+use fyrox::gui::stack_panel::StackPanel;
 use fyrox::{
     asset::{untyped::UntypedResource, Resource, ResourceData},
-    core::swap_hash_map_entry,
+    core::{swap_hash_map_entry, SafeLock},
     fxhash::FxHashMap,
     gui::{
         button::ButtonMessage,
@@ -43,13 +48,6 @@ use fyrox::{
     },
 };
 
-use crate::{
-    command::{Command, CommandContext, CommandGroup, CommandTrait},
-    send_sync_message,
-};
-
-use super::*;
-
 const DEFAULT_MAX_ATTEMPTS: u32 = 300;
 const DEFAULT_CONSTRAIN_EDGES: bool = true;
 
@@ -64,17 +62,17 @@ const FREQUENCY_PROP_DESC: &str = concat!("Choose a float property from the tile
 pub struct WfcMacro {
     pattern_list: MacroPropertyField,
     frequency_list: MacroPropertyField,
-    edges_toggle: Handle<UiNode>,
-    attempts_field: Handle<UiNode>,
+    edges_toggle: Handle<CheckBox>,
+    attempts_field: Handle<NumericUpDown<u32>>,
     terrain_list: Vec<TerrainWidgets>,
     value_field: MacroPropertyValueField,
-    add_button: Handle<UiNode>,
-    terrain_stack: Handle<UiNode>,
+    add_button: Handle<Button>,
+    terrain_stack: Handle<StackPanel>,
     current_terrain: TileTerrainId,
 }
 
-#[derive(Debug, Clone, Visit, Reflect, TypeUuidProvider)]
-#[type_uuid(id = "24f9947e-f58b-4623-ad14-cb21cd09297e")]
+#[derive(Debug, Clone, Visit, Reflect)]
+#[reflect(type_uuid = "24f9947e-f58b-4623-ad14-cb21cd09297e")]
 pub(super) struct WfcInstance {
     frequency_property: Option<TileSetPropertyF32>,
     pattern_property: Option<TileSetPropertyNine>,
@@ -104,8 +102,8 @@ struct TerrainWidgets {
     terrain: TileTerrainId,
     color: Color,
     name: String,
-    frequency_field: Handle<UiNode>,
-    delete_button: Handle<UiNode>,
+    frequency_field: Handle<NumericUpDown<f32>>,
+    delete_button: Handle<Button>,
 }
 
 fn terrain_list_needs_rebuild(
@@ -139,10 +137,7 @@ fn sync_terrain_list(
     let freq_iter = terrain_freq.iter().map(|&(_, freq)| freq);
     let handle_iter = list.iter().map(|w| w.frequency_field);
     for (handle, freq) in handle_iter.zip(freq_iter) {
-        send_sync_message(
-            ui,
-            NumericUpDownMessage::value(handle, MessageDirection::ToWidget, freq),
-        );
+        ui.send_sync(handle, NumericUpDownMessage::Value(freq));
     }
 }
 
@@ -230,7 +225,7 @@ fn make_terrain_list_element(
         frequency_field,
         delete_button,
     };
-    (handle, widgets)
+    (handle.to_base(), widgets)
 }
 
 impl WfcInstance {
@@ -243,10 +238,6 @@ impl WfcInstance {
 }
 
 impl ResourceData for WfcInstance {
-    fn type_uuid(&self) -> Uuid {
-        <Self as TypeUuidProvider>::type_uuid()
-    }
-
     fn save(&mut self, _path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         Err("Saving is not supported!".to_string().into())
     }
@@ -626,7 +617,8 @@ impl BrushMacro for WfcMacro {
                 .with_child(add_row_field)
                 .with_child(self.terrain_stack),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Some(handle)
     }
 
@@ -656,21 +648,13 @@ impl BrushMacro for WfcMacro {
         let tile_set = tile_set.as_deref();
         self.pattern_list.sync(pattern_id, tile_set, ui);
         self.frequency_list.sync(frequency_id, tile_set, ui);
-        send_sync_message(
-            ui,
-            CheckBoxMessage::checked(
-                self.edges_toggle,
-                MessageDirection::ToWidget,
-                Some(instance.constrain_edges),
-            ),
+        ui.send_sync(
+            self.edges_toggle,
+            CheckBoxMessage::Check(Some(instance.constrain_edges)),
         );
-        send_sync_message(
-            ui,
-            NumericUpDownMessage::<u32>::value(
-                self.attempts_field,
-                MessageDirection::ToWidget,
-                instance.max_attempts,
-            ),
+        ui.send_sync(
+            self.attempts_field,
+            NumericUpDownMessage::<u32>::Value(instance.max_attempts),
         );
         let layer =
             tile_set.and_then(|tile_set| pattern_id.and_then(|id| tile_set.find_property(*id)));
@@ -687,11 +671,7 @@ impl BrushMacro for WfcMacro {
                 &mut self.terrain_list,
                 &mut ui.build_ctx(),
             );
-            ui.send_message(WidgetMessage::replace_children(
-                self.terrain_stack,
-                MessageDirection::ToWidget,
-                list,
-            ));
+            ui.send(self.terrain_stack, WidgetMessage::ReplaceChildren(list));
         } else {
             sync_terrain_list(&terrain_freq, &self.terrain_list, ui);
         }
@@ -1154,7 +1134,7 @@ impl CommandTrait for WaveFunctionTaskCommand {
     }
 
     fn execute(&mut self, _context: &mut dyn CommandContext) {
-        let mut data_guard = self.task_data.lock();
+        let mut data_guard = self.task_data.safe_lock();
         if data_guard.state == WfcTaskState::Finished {
             write_propagator_to_tile_data(
                 &data_guard.constraint,
@@ -1180,7 +1160,7 @@ impl CommandTrait for WaveFunctionTaskCommand {
     }
 
     fn revert(&mut self, _context: &mut dyn CommandContext) {
-        let mut data_guard = self.task_data.lock();
+        let mut data_guard = self.task_data.safe_lock();
         if data_guard.state != WfcTaskState::Finished {
             data_guard.state = WfcTaskState::Cancelled;
         }
@@ -1201,10 +1181,10 @@ fn run_wfc(
     max_attempts: u32,
     data: TileMapDataResource,
 ) {
-    let attempts = task_data.lock().attempts;
+    let attempts = task_data.safe_lock().attempts;
     let mut rng = thread_rng();
     for i in attempts..max_attempts {
-        let mut guard = task_data.lock();
+        let mut guard = task_data.safe_lock();
         let task_data = guard.deref_mut();
         if task_data.state == WfcTaskState::Cancelled {
             task_data.attempts = i;
@@ -1228,5 +1208,5 @@ fn run_wfc(
         write_propagator_to_tile_data(&task_data.constraint, &task_data.working_propagator, &data);
     }
     Log::err(format!("WFC failed after {max_attempts} attempts"));
-    task_data.lock().state = WfcTaskState::Finished;
+    task_data.safe_lock().state = WfcTaskState::Finished;
 }

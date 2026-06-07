@@ -29,7 +29,6 @@ use crate::fyrox::{
         math::Rect,
         pool::Handle,
         reflect::prelude::*,
-        type_traits::prelude::*,
         visitor::prelude::*,
     },
     gui::formatted_text::{FormattedText, FormattedTextBuilder},
@@ -46,13 +45,12 @@ use crate::fyrox::{
 };
 
 use fyrox::material::MaterialResource;
-use std::ops::{Deref, DerefMut};
 
 /// The preview widget of the tile map control panel. This allows the user to see the
 /// currently selected tile stamp, including whatever transformations have been applied
 /// to the stamp.
-#[derive(Clone, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
-#[type_uuid(id = "5356a864-c026-4bd7-a4b1-30bacf77d8fa")]
+#[derive(Clone, Debug, Visit, Reflect)]
+#[reflect(type_uuid = "5356a864-c026-4bd7-a4b1-30bacf77d8fa")]
 #[reflect(derived_type = "UiNode")]
 pub struct PanelPreview {
     widget: Widget,
@@ -164,7 +162,7 @@ impl PanelPreview {
     }
     fn sync_handle_text(&mut self) {
         let text = self.get_handle_text();
-        self.handle_text_size = self.handle_text.set_text(text).build();
+        self.handle_text_size = self.handle_text.set_text(text).measure_and_arrange();
     }
     fn get_handle_text(&self) -> String {
         let state = self.state.lock();
@@ -186,7 +184,7 @@ impl PanelPreview {
         if let Some(handle) = tile_set.get_transformed_version(transform, handle) {
             handle.to_string()
         } else {
-            format!("{}*", handle)
+            format!("{handle}*")
         }
     }
 }
@@ -230,9 +228,22 @@ impl Control for PanelPreview {
         }
 
         ctx.transform_stack.pop();
+        let position = bounds.right_bottom_corner() - self.handle_text_size;
+        let rect = Rect {
+            position,
+            size: self.handle_text_size,
+        };
+        ctx.push_rect_filled(&rect, None);
+        ctx.commit(
+            self.clip_bounds(),
+            Brush::Solid(Color::from_rgba(0, 0, 0, 200)),
+            CommandTexture::None,
+            &self.material,
+            None,
+        );
         ctx.draw_text(
             self.clip_bounds(),
-            bounds.right_bottom_corner() - self.handle_text_size,
+            position,
             &self.material,
             &self.handle_text,
         );
@@ -240,12 +251,9 @@ impl Control for PanelPreview {
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
-        if message.destination() == self.handle()
-            && message.direction() == MessageDirection::ToWidget
-        {
-            if let Some(PaletteMessage::SyncToState) = message.data::<PaletteMessage>() {
-                self.sync_to_state();
-            }
+        if let Some(PaletteMessage::SyncToState) = message.data_for(self.handle()) {
+            self.sync_to_state();
+            self.invalidate_visual();
         }
     }
 }
@@ -263,16 +271,17 @@ impl PanelPreviewBuilder {
         }
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
-        ctx.add_node(UiNode::new(PanelPreview {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<PanelPreview> {
+        ctx.add(PanelPreview {
             widget: self.widget_builder.with_clip_to_bounds(false).build(ctx),
             state: self.state,
             tile_size: Vector2::repeat(32.0),
             transform: Matrix3::identity(),
             handle_text: FormattedTextBuilder::new(ctx.inner().default_font.clone())
+                .with_constraint(Vector2::new(f32::INFINITY, f32::INFINITY))
                 .with_brush(Brush::Solid(Color::WHITE))
                 .build(),
             handle_text_size: Vector2::default(),
-        }))
+        })
     }
 }

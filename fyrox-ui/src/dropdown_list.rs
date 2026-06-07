@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Drop-down list. This is control which shows currently selected item and provides drop-down
+//! Drop-down list. This is control which shows the currently selected item and provides a drop-down
 //! list to select its current item. It is build using composition with standard list view.
 //! See [`DropdownList`] docs for more info and usage examples.
 
@@ -27,34 +27,29 @@
 use crate::{
     border::BorderBuilder,
     core::{
-        algebra::Vector2, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, variable::InheritableVariable, visitor::prelude::*,
+        algebra::Vector2, pool::Handle, reflect::prelude::*, variable::InheritableVariable,
+        visitor::prelude::*,
     },
-    define_constructor,
-    grid::{Column, GridBuilder, Row},
-    list_view::{ListViewBuilder, ListViewMessage},
-    message::{KeyCode, MessageDirection, UiMessage},
-    popup::{Placement, PopupBuilder, PopupMessage},
+    grid::{Column, Grid, GridBuilder, Row},
+    list_view::{ListView, ListViewBuilder, ListViewMessage},
+    message::{KeyCode, MessageData, MessageDirection, UiMessage},
+    popup::{Placement, Popup, PopupBuilder, PopupMessage},
     style::{resource::StyleResourceExt, Style},
     utils::{make_arrow_non_uniform_size, ArrowDirection},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
-
 use fyrox_graph::{
     constructor::{ConstructorProvider, GraphNodeConstructor},
-    BaseSceneGraph,
+    SceneGraph,
 };
-use std::{
-    ops::{Deref, DerefMut},
-    sync::mpsc::Sender,
-};
+use std::sync::mpsc::Sender;
 
 /// A set of possible messages for [`DropdownList`] widget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropdownListMessage {
     /// A message, that is used to set new selection and receive selection changes.
-    SelectionChanged(Option<usize>),
+    Selection(Option<usize>),
     /// A message, that is used to set new items of a dropdown list.
     Items(Vec<Handle<UiNode>>),
     /// A message, that is used to add an item to a dropdown list.
@@ -64,32 +59,10 @@ pub enum DropdownListMessage {
     /// A message, that is used to close a dropdown list.
     Close,
 }
+impl MessageData for DropdownListMessage {}
 
-impl DropdownListMessage {
-    define_constructor!(
-        /// Creates [`DropdownListMessage::SelectionChanged`] message.
-        DropdownListMessage:SelectionChanged => fn selection(Option<usize>), layout: false
-    );
-    define_constructor!(
-           /// Creates [`DropdownListMessage::Items`] message.
-        DropdownListMessage:Items => fn items(Vec<Handle<UiNode >>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`DropdownListMessage::AddItem`] message.
-        DropdownListMessage:AddItem => fn add_item(Handle<UiNode>), layout: false
-    );
-    define_constructor!(
-        /// Creates [`DropdownListMessage::Open`] message.
-        DropdownListMessage:Open => fn open(), layout: false
-    );
-    define_constructor!(
-        /// Creates [`DropdownListMessage::Close`] message.
-        DropdownListMessage:Close => fn close(), layout: false
-    );
-}
-
-/// Drop-down list is a control which shows currently selected item and provides drop-down
-/// list to select its current item. It is used to show a single selected item in compact way.
+/// Drop-down list is a control which shows the currently selected item and provides a drop-down
+/// list to select its current item. It is used to show a single selected item in a compact way.
 ///
 /// ## Example
 ///
@@ -100,16 +73,19 @@ impl DropdownListMessage {
 /// #     core::pool::Handle, dropdown_list::DropdownListBuilder, text::TextBuilder,
 /// #     widget::WidgetBuilder, BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::dropdown_list::DropdownList;
 /// #
-/// fn create_drop_down_list(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_drop_down_list(ctx: &mut BuildContext) -> Handle<DropdownList> {
 ///     DropdownListBuilder::new(WidgetBuilder::new())
 ///         .with_items(vec![
 ///             TextBuilder::new(WidgetBuilder::new())
 ///                 .with_text("Item 0")
-///                 .build(ctx),
+///                 .build(ctx)
+///                 .to_base(),
 ///             TextBuilder::new(WidgetBuilder::new())
 ///                 .with_text("Item 1")
-///                 .build(ctx),
+///                 .build(ctx)
+///                 .to_base(),
 ///         ])
 ///         .with_selected(1)
 ///         .build(ctx)
@@ -118,7 +94,7 @@ impl DropdownListMessage {
 ///
 /// Keep in mind, that items of a dropdown list could be any widget, but usually each item is wrapped
 /// in some other widget that shows current state of items (selected, hovered, clicked, etc.). One
-/// of the most convenient way of doing this is to use Decorator widget:
+/// of the most convenient ways of doing this is to use Decorator widget:
 ///
 /// ```rust
 /// # use fyrox_ui::{
@@ -126,6 +102,7 @@ impl DropdownListMessage {
 /// #     dropdown_list::DropdownListBuilder, text::TextBuilder, widget::WidgetBuilder, BuildContext,
 /// #     UiNode,
 /// # };
+/// # use fyrox_ui::dropdown_list::DropdownList;
 /// #
 /// fn make_item(text: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
 ///     DecoratorBuilder::new(BorderBuilder::new(
@@ -136,9 +113,10 @@ impl DropdownListMessage {
 ///         ),
 ///     ))
 ///     .build(ctx)
+///     .to_base()
 /// }
 ///
-/// fn create_drop_down_list_with_decorators(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_drop_down_list_with_decorators(ctx: &mut BuildContext) -> Handle<DropdownList> {
 ///     DropdownListBuilder::new(WidgetBuilder::new())
 ///         .with_items(vec![make_item("Item 0", ctx), make_item("Item 1", ctx)])
 ///         .with_selected(1)
@@ -165,7 +143,7 @@ impl DropdownListMessage {
 ///
 /// impl Foo {
 ///     fn on_ui_message(&mut self, message: &UiMessage) {
-///         if let Some(DropdownListMessage::SelectionChanged(new_selection)) = message.data() {
+///         if let Some(DropdownListMessage::Selection(new_selection)) = message.data() {
 ///             if message.destination() == self.dropdown_list
 ///                 && message.direction() == MessageDirection::FromWidget
 ///             {
@@ -177,7 +155,7 @@ impl DropdownListMessage {
 /// }
 /// ```
 ///
-/// To change selection of a dropdown list, send [`DropdownListMessage::SelectionChanged`] message
+/// To change selection of a dropdown list, send [`DropdownListMessage::Selection`] message
 /// to it.
 ///
 /// ## Items
@@ -189,17 +167,20 @@ impl DropdownListMessage {
 ///
 /// A dropdown list could be opened and closed manually using [`DropdownListMessage::Open`] and
 /// [`DropdownListMessage::Close`] messages.  
-#[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Clone, Debug, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "1da2f69a-c8b4-4ae2-a2ad-4afe61ee2a32"
+)]
 pub struct DropdownList {
     /// Base widget of the dropdown list.
     pub widget: Widget,
     /// A handle of the inner popup of the dropdown list. It holds the actual items of the list.
-    pub popup: InheritableVariable<Handle<UiNode>>,
+    pub popup: InheritableVariable<Handle<Popup>>,
     /// A list of handles of items of the dropdown list.
     pub items: InheritableVariable<Vec<Handle<UiNode>>>,
     /// A handle to the `ListView` widget, that holds the items of the dropdown list.
-    pub list_view: InheritableVariable<Handle<UiNode>>,
+    pub list_view: InheritableVariable<Handle<ListView>>,
     /// A handle to a currently selected item.
     pub current: InheritableVariable<Handle<UiNode>>,
     /// An index of currently selected item (or [`None`] if there's nothing selected).
@@ -207,7 +188,7 @@ pub struct DropdownList {
     /// A flag, that defines whether the dropdown list's popup should close after selection or not.
     pub close_on_selection: InheritableVariable<bool>,
     /// A handle to an inner Grid widget, that holds currently selected item and other decorators.
-    pub main_grid: InheritableVariable<Handle<UiNode>>,
+    pub main_grid: InheritableVariable<Handle<Grid>>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for DropdownList {
@@ -216,6 +197,7 @@ impl ConstructorProvider<UiNode, UserInterface> for DropdownList {
             .with_variant("Dropdown List", |ui| {
                 DropdownListBuilder::new(WidgetBuilder::new().with_name("Dropdown List"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("Input")
@@ -224,17 +206,12 @@ impl ConstructorProvider<UiNode, UserInterface> for DropdownList {
 
 crate::define_widget_deref!(DropdownList);
 
-uuid_provider!(DropdownList = "1da2f69a-c8b4-4ae2-a2ad-4afe61ee2a32");
-
 impl Control for DropdownList {
     fn on_remove(&self, sender: &Sender<UiMessage>) {
         // Popup won't be deleted with the dropdown list, because it is not the child of the list.
         // So we have to remove it manually.
         sender
-            .send(WidgetMessage::remove(
-                *self.popup,
-                MessageDirection::ToWidget,
-            ))
+            .send(UiMessage::for_widget(*self.popup, WidgetMessage::Remove))
             .unwrap();
     }
 
@@ -243,98 +220,64 @@ impl Control for DropdownList {
 
         if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
-                WidgetMessage::MouseDown { .. } => {
-                    if message.destination() == self.handle()
-                        || self.widget.has_descendant(message.destination(), ui)
-                    {
-                        ui.send_message(DropdownListMessage::open(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                        ));
-                    }
+                WidgetMessage::MouseDown { .. }
+                    if (message.destination() == self.handle()
+                        || self.widget.has_descendant(message.destination(), ui)) =>
+                {
+                    ui.send(self.handle, DropdownListMessage::Open);
                 }
-                WidgetMessage::KeyDown(key_code) => {
-                    if !message.handled() {
-                        if *key_code == KeyCode::ArrowDown {
-                            ui.send_message(DropdownListMessage::open(
-                                self.handle,
-                                MessageDirection::ToWidget,
-                            ));
-                        } else if *key_code == KeyCode::ArrowUp {
-                            ui.send_message(DropdownListMessage::close(
-                                self.handle,
-                                MessageDirection::ToWidget,
-                            ));
-                        }
-                        message.set_handled(true);
+                WidgetMessage::KeyDown(key_code) if !message.handled() => {
+                    if *key_code == KeyCode::ArrowDown {
+                        ui.send(self.handle, DropdownListMessage::Open);
+                    } else if *key_code == KeyCode::ArrowUp {
+                        ui.send(self.handle, DropdownListMessage::Close);
                     }
+                    message.set_handled(true);
                 }
                 _ => (),
             }
-        } else if let Some(msg) = message.data::<DropdownListMessage>() {
-            if message.destination() == self.handle()
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    DropdownListMessage::Open => {
-                        ui.send_message(WidgetMessage::width(
-                            *self.popup,
-                            MessageDirection::ToWidget,
-                            self.actual_local_size().x,
-                        ));
-                        ui.send_message(PopupMessage::placement(
-                            *self.popup,
-                            MessageDirection::ToWidget,
-                            Placement::LeftBottom(self.handle),
-                        ));
-                        ui.send_message(PopupMessage::open(
-                            *self.popup,
-                            MessageDirection::ToWidget,
-                        ));
-                    }
-                    DropdownListMessage::Close => {
-                        ui.send_message(PopupMessage::close(
-                            *self.popup,
-                            MessageDirection::ToWidget,
-                        ));
-                    }
-                    DropdownListMessage::Items(items) => {
-                        ui.send_message(ListViewMessage::items(
+        } else if let Some(msg) = message.data_for::<DropdownListMessage>(self.handle()) {
+            match msg {
+                DropdownListMessage::Open => {
+                    ui.send(
+                        *self.popup,
+                        WidgetMessage::MinSize(Vector2::new(self.actual_local_size().x, 0.0)),
+                    );
+                    ui.send(
+                        *self.popup,
+                        PopupMessage::Placement(Placement::LeftBottom(self.handle)),
+                    );
+                    ui.send(*self.popup, PopupMessage::Open);
+                }
+                DropdownListMessage::Close => {
+                    ui.send(*self.popup, PopupMessage::Close);
+                }
+                DropdownListMessage::Items(items) => {
+                    ui.send(*self.list_view, ListViewMessage::Items(items.clone()));
+                    self.items.set_value_and_mark_modified(items.clone());
+                    self.sync_selected_item_preview(ui);
+                }
+                &DropdownListMessage::AddItem(item) => {
+                    ui.send(*self.list_view, ListViewMessage::AddItem(item));
+                    self.items.push(item);
+                }
+                &DropdownListMessage::Selection(selection) => {
+                    if selection != *self.selection {
+                        self.selection.set_value_and_mark_modified(selection);
+                        ui.send(
                             *self.list_view,
-                            MessageDirection::ToWidget,
-                            items.clone(),
-                        ));
-                        self.items.set_value_and_mark_modified(items.clone());
-                        self.sync_selected_item_preview(ui);
-                    }
-                    &DropdownListMessage::AddItem(item) => {
-                        ui.send_message(ListViewMessage::add_item(
-                            *self.list_view,
-                            MessageDirection::ToWidget,
-                            item,
-                        ));
-                        self.items.push(item);
-                    }
-                    &DropdownListMessage::SelectionChanged(selection) => {
-                        if selection != *self.selection {
-                            self.selection.set_value_and_mark_modified(selection);
-                            ui.send_message(ListViewMessage::selection(
-                                *self.list_view,
-                                MessageDirection::ToWidget,
+                            ListViewMessage::Selection(
                                 selection.map(|index| vec![index]).unwrap_or_default(),
-                            ));
+                            ),
+                        );
 
-                            self.sync_selected_item_preview(ui);
+                        self.sync_selected_item_preview(ui);
 
-                            if *self.close_on_selection {
-                                ui.send_message(PopupMessage::close(
-                                    *self.popup,
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-
-                            ui.send_message(message.reverse());
+                        if *self.close_on_selection && *ui[*self.popup].is_open {
+                            ui.send(*self.popup, PopupMessage::Close);
                         }
+
+                        ui.try_send_response(message);
                     }
                 }
             }
@@ -342,46 +285,26 @@ impl Control for DropdownList {
     }
 
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
-        if let Some(ListViewMessage::SelectionChanged(selection)) =
-            message.data::<ListViewMessage>()
-        {
+        if let Some(ListViewMessage::Selection(selection)) = message.data::<ListViewMessage>() {
             let selection = selection.first().cloned();
             if message.direction() == MessageDirection::FromWidget
                 && message.destination() == *self.list_view
                 && *self.selection != selection
             {
-                // Post message again but from name of this drop-down list so user can catch
+                // Post message again but from the name of this drop-down list so user can catch
                 // message and respond properly.
-                ui.send_message(DropdownListMessage::selection(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                    selection,
-                ));
+                ui.send(self.handle, DropdownListMessage::Selection(selection));
             }
-        } else if let Some(msg) = message.data::<PopupMessage>() {
-            if message.destination() == *self.popup
-                && message.direction() == MessageDirection::ToWidget
-            {
-                match msg {
-                    PopupMessage::Open => {
-                        ui.send_message(DropdownListMessage::open(
-                            self.handle,
-                            MessageDirection::FromWidget,
-                        ));
-                    }
-                    PopupMessage::Close => {
-                        ui.send_message(DropdownListMessage::close(
-                            self.handle,
-                            MessageDirection::FromWidget,
-                        ));
-
-                        ui.send_message(WidgetMessage::focus(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                        ));
-                    }
-                    _ => (),
+        } else if let Some(msg) = message.data_for::<PopupMessage>(*self.popup) {
+            match msg {
+                PopupMessage::Open => {
+                    ui.post(self.handle, DropdownListMessage::Open);
                 }
+                PopupMessage::Close => {
+                    ui.post(self.handle, DropdownListMessage::Close);
+                    ui.send(self.handle, WidgetMessage::Focus);
+                }
+                _ => (),
             }
         }
     }
@@ -398,30 +321,23 @@ impl DropdownList {
 
     fn sync_selected_item_preview(&mut self, ui: &mut UserInterface) {
         // Copy node from current selection in list view. This is not
-        // always suitable because if an item has some visual behaviour
-        // (change color on mouse hover, change something on click, etc)
+        // always suitable because if an item has some visual behavior
+        // (change color on mouse hover, change something on click, etc.),
         // it will be also reflected in selected item.
         if self.current.is_some() {
-            ui.send_message(WidgetMessage::remove(
-                *self.current,
-                MessageDirection::ToWidget,
-            ));
+            ui.send(*self.current, WidgetMessage::Remove);
         }
         if let Some(index) = *self.selection {
             if let Some(item) = self.items.get(index) {
                 self.current
                     .set_value_and_mark_modified(ui.copy_node(*item));
-                ui.send_message(WidgetMessage::link(
-                    *self.current,
-                    MessageDirection::ToWidget,
-                    *self.main_grid,
-                ));
+                ui.send(*self.current, WidgetMessage::link_with(*self.main_grid));
                 ui.node(*self.current).request_update_visibility();
-                ui.send_message(WidgetMessage::margin(
+                ui.send(
                     *self.current,
-                    MessageDirection::ToWidget,
-                    Thickness::uniform(0.0),
-                ));
+                    WidgetMessage::Margin(Thickness::uniform(0.0)),
+                );
+                ui.send(*self.current, WidgetMessage::ResetVisual);
             } else {
                 self.current.set_value_and_mark_modified(Handle::NONE);
             }
@@ -437,6 +353,7 @@ pub struct DropdownListBuilder {
     items: Vec<Handle<UiNode>>,
     selected: Option<usize>,
     close_on_selection: bool,
+    items_constraint: Vector2<f32>,
 }
 
 impl DropdownListBuilder {
@@ -447,6 +364,7 @@ impl DropdownListBuilder {
             items: Default::default(),
             selected: None,
             close_on_selection: false,
+            items_constraint: Vector2::repeat(f32::INFINITY),
         }
     }
 
@@ -474,16 +392,21 @@ impl DropdownListBuilder {
         self
     }
 
+    /// Sets the desired constraint for the inner items. By default, it is unconstrained (+infinity).
+    pub fn with_items_constraint(mut self, constraint: Vector2<f32>) -> Self {
+        self.items_constraint = constraint;
+        self
+    }
+
     /// Finishes list building and adds it to the given user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode>
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<DropdownList>
     where
         Self: Sized,
     {
-        let items_control = ListViewBuilder::new(
-            WidgetBuilder::new().with_max_size(Vector2::new(f32::INFINITY, 200.0)),
-        )
-        .with_items(self.items.clone())
-        .build(ctx);
+        let items_control =
+            ListViewBuilder::new(WidgetBuilder::new().with_max_size(self.items_constraint))
+                .with_items(self.items.clone())
+                .build(ctx);
 
         let popup = PopupBuilder::new(WidgetBuilder::new())
             .with_content(items_control)
@@ -518,7 +441,7 @@ impl DropdownListBuilder {
         .with_corner_radius(ctx.style.property(DropdownList::CORNER_RADIUS))
         .build(ctx);
 
-        let dropdown_list = UiNode::new(DropdownList {
+        let dropdown_list = DropdownList {
             widget: self
                 .widget_builder
                 .with_accepts_input(true)
@@ -532,9 +455,9 @@ impl DropdownListBuilder {
             selection: self.selected.into(),
             close_on_selection: self.close_on_selection.into(),
             main_grid: main_grid.into(),
-        });
+        };
 
-        ctx.add_node(dropdown_list)
+        ctx.add(dropdown_list)
     }
 }
 

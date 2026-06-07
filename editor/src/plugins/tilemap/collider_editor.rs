@@ -23,10 +23,16 @@
 //! a text box for editing custom colliders when appropriate.
 //! See [`TileColliderEditor`] for more information.
 
+use super::*;
 use commands::SetTileSetTilesCommand;
+use fyrox::core::pool::ObjectOrVariant;
+use fyrox::gui::border::Border;
+use fyrox::gui::dropdown_list::DropdownList;
+use fyrox::gui::text::Text;
+use fyrox::gui::text_box::TextBox;
 use fyrox::{
     asset::Resource,
-    core::{algebra::Vector2, color::Color, pool::Handle, type_traits::prelude::*},
+    core::{algebra::Vector2, color::Color, pool::Handle},
     gui::{
         border::BorderBuilder,
         brush::Brush,
@@ -48,10 +54,6 @@ use fyrox::{
 };
 use std::str::FromStr;
 
-use crate::{send_sync_message, MSG_SYNC_FLAG};
-
-use super::*;
-
 const COLLIDER_NAMES: &[&str] = &["None", "Full", "Custom"];
 
 fn collider_to_index(tile_collider: &TileCollider) -> Option<usize> {
@@ -63,21 +65,17 @@ fn collider_to_index(tile_collider: &TileCollider) -> Option<usize> {
     }
 }
 
-fn send_visibility(ui: &UserInterface, destination: Handle<UiNode>, visible: bool) {
-    ui.send_message(WidgetMessage::visibility(
-        destination,
-        MessageDirection::ToWidget,
-        visible,
-    ));
+fn send_visibility(
+    ui: &UserInterface,
+    destination: Handle<impl ObjectOrVariant<UiNode>>,
+    visible: bool,
+) {
+    ui.send(destination, WidgetMessage::Visibility(visible));
 }
 
-fn highlight_tool_button(button: Handle<UiNode>, highlight: bool, ui: &UserInterface) {
-    let decorator = *ui.try_get_of_type::<Button>(button).unwrap().decorator;
-    ui.send_message(DecoratorMessage::select(
-        decorator,
-        MessageDirection::ToWidget,
-        highlight,
-    ));
+fn highlight_tool_button(button: Handle<Button>, highlight: bool, ui: &UserInterface) {
+    let decorator = *ui[button].decorator;
+    ui.send(decorator, DecoratorMessage::Select(highlight));
 }
 
 pub struct TileColliderEditor {
@@ -89,19 +87,19 @@ pub struct TileColliderEditor {
     value: TileCollider,
     /// The button which actives this editor as a draw tool
     /// and allows the user to apply this value to other tiles.
-    draw_button: Handle<UiNode>,
+    draw_button: Handle<Button>,
     /// The button which toggles the visibility of the collider layer.
-    show_button: Handle<UiNode>,
+    show_button: Handle<Button>,
     /// The widget that shows the color of the collider layer.
-    color_icon: Handle<UiNode>,
+    color_icon: Handle<Border>,
     /// The widget for the name of the collider layer.
-    name_field: Handle<UiNode>,
+    name_field: Handle<Text>,
     /// The dropdown list of collider types.
-    list: Handle<UiNode>,
+    list: Handle<DropdownList>,
     /// The textbox for editing a custom collider.
-    custom_field: Handle<UiNode>,
+    custom_field: Handle<TextBox>,
     /// A text widget for showing an error in the custom collider text.
-    error_field: Handle<UiNode>,
+    error_field: Handle<Text>,
     /// True if the custom collider text actually has an error.
     has_error: bool,
 }
@@ -118,6 +116,7 @@ pub fn make_list_option(ctx: &mut BuildContext, name: &str) -> Handle<UiNode> {
             .with_pad_by_corner_radius(false),
     )
     .build(ctx)
+    .to_base()
 }
 
 fn build_list(ctx: &mut BuildContext) -> Vec<Handle<UiNode>> {
@@ -144,15 +143,12 @@ impl TileColliderEditor {
         let name_field = TextBuilder::new(WidgetBuilder::new().on_column(3))
             .with_text(collider_layer.name.clone())
             .build(ctx);
-        let custom_field = TextBoxBuilder::new(
-            WidgetBuilder::new()
-                .with_visibility(value.is_custom())
-                .with_min_size(Vector2::new(0.0, 100.0)),
-        )
-        .with_multiline(true)
-        .with_wrap(WrapMode::Word)
-        .with_text_commit_mode(TextCommitMode::Changed)
-        .build(ctx);
+        let custom_field =
+            TextBoxBuilder::new(WidgetBuilder::new().with_visibility(value.is_custom()))
+                .with_multiline(true)
+                .with_wrap(WrapMode::Word)
+                .with_text_commit_mode(TextCommitMode::Changed)
+                .build(ctx);
         let error_field = TextBuilder::new(WidgetBuilder::new().with_visibility(false))
             .with_wrap(WrapMode::Word)
             .with_horizontal_text_alignment(HorizontalAlignment::Center)
@@ -183,7 +179,8 @@ impl TileColliderEditor {
                 .with_child(custom_field)
                 .with_child(error_field),
         )
-        .build(ctx);
+        .build(ctx)
+        .to_base();
         Self {
             handle,
             collider_id: collider_layer.uuid,
@@ -200,16 +197,11 @@ impl TileColliderEditor {
     }
     fn apply_collider_update(&mut self, state: &TileEditorState, ui: &mut UserInterface) {
         let layer = state.find_collider(self.collider_id).unwrap();
-        ui.send_message(TextMessage::text(
-            self.name_field,
-            MessageDirection::ToWidget,
-            layer.name.to_string(),
-        ));
-        ui.send_message(WidgetMessage::background(
+        ui.send(self.name_field, TextMessage::Text(layer.name.to_string()));
+        ui.send(
             self.color_icon,
-            MessageDirection::ToWidget,
-            Brush::Solid(layer.color.to_opaque()).into(),
-        ));
+            WidgetMessage::Background(Brush::Solid(layer.color.to_opaque()).into()),
+        );
     }
     fn find_value(&self, state: &TileEditorState) -> Option<TileCollider> {
         let mut iter = state.tile_data().map(|(_, d)| {
@@ -227,10 +219,7 @@ impl TileColliderEditor {
     }
     fn sync_value_to_list(&self, ui: &mut UserInterface) {
         let index = collider_to_index(&self.value);
-        send_sync_message(
-            ui,
-            DropdownListMessage::selection(self.list, MessageDirection::ToWidget, index),
-        );
+        ui.send_sync(self.list, DropdownListMessage::Selection(index));
         send_visibility(ui, self.custom_field, self.value.is_custom());
         send_visibility(
             ui,
@@ -252,21 +241,14 @@ impl TileColliderEditor {
             Err(e) => {
                 self.has_error = true;
                 send_visibility(ui, self.error_field, true);
-                ui.send_message(TextMessage::text(
-                    self.error_field,
-                    MessageDirection::ToWidget,
-                    e.to_string(),
-                ));
+                ui.send(self.error_field, TextMessage::Text(e.to_string()));
                 None
             }
         }
     }
     fn build_empty_collider(&mut self, ui: &mut UserInterface) -> CustomTileColliderResource {
         send_visibility(ui, self.error_field, false);
-        send_sync_message(
-            ui,
-            TextMessage::text(self.custom_field, MessageDirection::ToWidget, "".into()),
-        );
+        ui.send_sync(self.custom_field, TextMessage::Text("".into()));
         Resource::new_embedded(CustomTileCollider::default())
     }
     fn send_value(&self, state: &TileEditorState, sender: &MessageSender, tile_book: &TileBook) {
@@ -297,7 +279,7 @@ impl TileEditor for TileColliderEditor {
         self.handle
     }
 
-    fn draw_button(&self) -> Handle<UiNode> {
+    fn draw_button(&self) -> Handle<Button> {
         self.draw_button
     }
 
@@ -312,11 +294,12 @@ impl TileEditor for TileColliderEditor {
         send_visibility(ui, self.custom_field, self.value.is_custom());
         send_visibility(ui, self.error_field, false);
         if let TileCollider::Custom(custom) = &self.value {
-            let text = custom.data_ref().to_string();
-            send_sync_message(
-                ui,
-                TextMessage::text(self.custom_field, MessageDirection::ToWidget, text),
-            );
+            if custom.is_ok() {
+                let text = custom.data_ref().to_string();
+                ui.send_sync(self.custom_field, TextMessage::Text(text));
+            } else {
+                ui.send_sync(self.custom_field, TextMessage::Text(String::new()));
+            }
         }
         highlight_tool_button(
             self.show_button,
@@ -349,7 +332,7 @@ impl TileEditor for TileColliderEditor {
         tile_book: &TileBook,
         sender: &MessageSender,
     ) {
-        if message.flags == MSG_SYNC_FLAG || message.direction() == MessageDirection::ToWidget {
+        if message.direction() == MessageDirection::ToWidget {
             return;
         }
         if let Some(ButtonMessage::Click) = message.data() {
@@ -357,7 +340,7 @@ impl TileEditor for TileColliderEditor {
                 let visible = state.is_visible_collider(self.collider_id);
                 state.set_visible_collider(self.collider_id, !visible);
             }
-        } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
+        } else if let Some(DropdownListMessage::Selection(Some(index))) = message.data() {
             if message.destination() == self.list {
                 self.value = match *index {
                     1 => TileCollider::Rectangle,
@@ -387,7 +370,7 @@ fn make_button(
     tooltip: &str,
     icon: Option<TextureResource>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .with_tab_index(tab_index)
@@ -424,7 +407,7 @@ fn make_button(
     .build(ctx)
 }
 
-fn make_draw_button(tab_index: Option<usize>, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_draw_button(tab_index: Option<usize>, ctx: &mut BuildContext) -> Handle<Button> {
     make_button(
         tab_index,
         0,
@@ -434,7 +417,7 @@ fn make_draw_button(tab_index: Option<usize>, ctx: &mut BuildContext) -> Handle<
     )
 }
 
-fn make_show_button(tab_index: Option<usize>, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_show_button(tab_index: Option<usize>, ctx: &mut BuildContext) -> Handle<Button> {
     make_button(
         tab_index,
         1,

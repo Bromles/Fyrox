@@ -19,12 +19,9 @@
 // SOFTWARE.
 
 use crate::fyrox::{
-    core::{
-        algebra::Point2, algebra::Vector2, pool::Handle, uuid::Uuid, uuid_provider,
-        TypeUuidProvider,
-    },
+    core::{algebra::Point2, algebra::Vector2, pool::Handle, reflect::prelude::*, uuid::Uuid},
     engine::Engine,
-    graph::BaseSceneGraph,
+    graph::SceneGraph,
     gui::{BuildContext, UiNode},
 };
 use crate::{
@@ -35,7 +32,10 @@ use crate::{
     settings::Settings,
     ui_scene::{commands::widget::MoveWidgetCommand, UiScene},
 };
+use fyrox::gui::button::Button;
 
+#[derive(Reflect, Debug, Clone)]
+#[reflect(type_uuid = "05a1b439-d354-45b1-9014-10393c5ba35d")]
 struct Entry {
     widget: Handle<UiNode>,
     initial_local_position: Vector2<f32>,
@@ -43,10 +43,14 @@ struct Entry {
     delta: Vector2<f32>,
 }
 
+#[derive(Reflect, Debug, Clone)]
+#[reflect(type_uuid = "c9b6b3d6-ade9-4da2-a5e7-48893f24d97f")]
 struct MoveContext {
     entries: Vec<Entry>,
 }
 
+#[derive(Reflect, Debug, Clone)]
+#[reflect(type_uuid = "e5c09b04-5c31-4044-ac48-5227ab4a4b83")]
 pub struct MoveWidgetsInteractionMode {
     move_context: Option<MoveContext>,
     sender: MessageSender,
@@ -60,8 +64,6 @@ impl MoveWidgetsInteractionMode {
         }
     }
 }
-
-uuid_provider!(MoveWidgetsInteractionMode = "e5c09b04-5c31-4044-ac48-5227ab4a4b83");
 
 impl InteractionMode for MoveWidgetsInteractionMode {
     fn on_left_mouse_button_down(
@@ -83,7 +85,7 @@ impl InteractionMode for MoveWidgetsInteractionMode {
                 .widgets
                 .iter()
                 .filter_map(|w| {
-                    if let Some(widget_ref) = ui_scene.ui.try_get(*w) {
+                    if let Ok(widget_ref) = ui_scene.ui.try_get_node(*w) {
                         if !in_bounds && widget_ref.screen_bounds().contains(mouse_position) {
                             in_bounds = true;
                         }
@@ -179,7 +181,8 @@ impl InteractionMode for MoveWidgetsInteractionMode {
                 let new_screen_space_position = mouse_position - entry.delta;
                 let parent_inv_transform = ui_scene
                     .ui
-                    .try_get(ui_scene.ui.node(entry.widget).parent)
+                    .try_get_node(ui_scene.ui.node(entry.widget).parent)
+                    .ok()
                     .and_then(|w| w.visual_transform().try_inverse())
                     .unwrap_or_default();
                 let new_local_position = parent_inv_transform.transform_point(&Point2::new(
@@ -196,7 +199,7 @@ impl InteractionMode for MoveWidgetsInteractionMode {
         }
     }
 
-    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
+    fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<Button> {
         let move_mode_tooltip =
             "Move Object(s) - Shortcut: [2]\n\nMovement interaction mode allows you to move selected \
         objects. Keep in mind that movement always works in local coordinates!\n\n\
@@ -211,6 +214,6 @@ impl InteractionMode for MoveWidgetsInteractionMode {
     }
 
     fn uuid(&self) -> Uuid {
-        Self::type_uuid()
+        Self::type_info().type_uuid
     }
 }

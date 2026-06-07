@@ -18,8 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use fyrox::gui::widget::WidgetMessage;
-
 use crate::{
     command::{Command, CommandGroup},
     fyrox::{
@@ -27,14 +25,22 @@ use crate::{
         engine::Engine,
         graph::SceneGraph,
         gui::{
+            button::Button,
             button::{ButtonBuilder, ButtonMessage},
-            message::{MessageDirection, UiMessage},
+            grid::{Column, GridBuilder, Row},
+            message::UiMessage,
+            scroll_viewer::ScrollViewerBuilder,
+            stack_panel::StackPanel,
             stack_panel::StackPanelBuilder,
+            text::{Text, TextBuilder, TextMessage},
             utils::make_simple_tooltip,
             widget::WidgetBuilder,
+            widget::WidgetMessage,
+            window::{Window, WindowAlignment},
             window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, Thickness, UiNode,
+            BuildContext, Thickness,
         },
+        scene::mesh::surface::SurfaceData,
         scene::{
             base::BaseBuilder,
             collider::{ColliderBuilder, ColliderShape, ConvexPolyhedronShape, GeometrySource},
@@ -56,17 +62,19 @@ use crate::{
     world::selection::GraphSelection,
     Message,
 };
+use fyrox::core::math::TriangleDefinition;
+use fyrox::gui::VerticalAlignment;
 
 pub struct MeshControlPanel {
-    pub root_widget: Handle<UiNode>,
-    create_trimesh_collider: Handle<UiNode>,
-    create_convex_collider: Handle<UiNode>,
-    create_trimesh_rigid_body: Handle<UiNode>,
-    add_convex_collider: Handle<UiNode>,
-    add_trimesh_collider: Handle<UiNode>,
+    pub root_widget: Handle<StackPanel>,
+    create_trimesh_collider: Handle<Button>,
+    create_convex_collider: Handle<Button>,
+    create_trimesh_rigid_body: Handle<Button>,
+    add_convex_collider: Handle<Button>,
+    add_trimesh_collider: Handle<Button>,
 }
 
-fn make_button(text: &str, tooltip: &str, ctx: &mut BuildContext) -> Handle<UiNode> {
+fn make_button(text: &str, tooltip: &str, ctx: &mut BuildContext) -> Handle<Button> {
     ButtonBuilder::new(
         WidgetBuilder::new()
             .with_margin(Thickness::uniform(1.0))
@@ -84,12 +92,13 @@ fn meshes_iter<'a>(
         scene
             .graph
             .try_get_of_type::<Mesh>(*handle)
+            .ok()
             .map(|mesh| (*handle, mesh))
     })
 }
 
 impl MeshControlPanel {
-    pub fn new(inspector_head: Handle<UiNode>, ctx: &mut BuildContext) -> Self {
+    pub fn new(inspector_head: Handle<StackPanel>, ctx: &mut BuildContext) -> Self {
         let create_trimesh_collider = make_button(
             "Create Trimesh Collider",
             "Creates a new trimesh collider and attaches it to the selected mesh(es)",
@@ -131,11 +140,8 @@ impl MeshControlPanel {
         )
         .build(ctx);
 
-        ctx.send_message(WidgetMessage::link(
-            root_widget,
-            MessageDirection::ToWidget,
-            inspector_head,
-        ));
+        ctx.inner()
+            .send(root_widget, WidgetMessage::link_with(inspector_head));
 
         Self {
             root_widget,
@@ -220,7 +226,7 @@ impl MeshControlPanel {
             } else if message.destination() == self.add_convex_collider {
                 for (mesh_handle, _) in meshes_iter(selection, scene) {
                     if let Some((ancestor_rigid_body, _)) =
-                        scene.graph.find_component_up::<RigidBody>(mesh_handle)
+                        scene.graph.find_self_or_field_up::<RigidBody>(mesh_handle)
                     {
                         let collider =
                             ColliderBuilder::new(BaseBuilder::new().with_name("ConvexCollider"))
@@ -238,7 +244,7 @@ impl MeshControlPanel {
             } else if message.destination() == self.add_trimesh_collider {
                 for (mesh_handle, _) in meshes_iter(selection, scene) {
                     if let Some((ancestor_rigid_body, _)) =
-                        scene.graph.find_component_up::<RigidBody>(mesh_handle)
+                        scene.graph.find_self_or_field_up::<RigidBody>(mesh_handle)
                     {
                         let collider =
                             ColliderBuilder::new(BaseBuilder::new().with_name("TrimeshCollider"))
@@ -265,36 +271,58 @@ impl MeshControlPanel {
         &mut self,
         message: &Message,
         editor_selection: &Selection,
-        game_scene: &mut GameScene,
+        game_scene: Option<&mut GameScene>,
         engine: &mut Engine,
     ) {
         let Message::SelectionChanged { .. } = message else {
             return;
         };
 
-        let scene = &engine.scenes[game_scene.scene];
-        let Some(selection) = editor_selection.as_graph() else {
-            return;
+        let any_mesh = if let Some(game_scene) = game_scene {
+            let scene = &engine.scenes[game_scene.scene];
+            editor_selection.as_graph().is_some_and(|s| {
+                s.nodes()
+                    .iter()
+                    .any(|n| scene.graph.try_get_of_type::<Mesh>(*n).is_ok())
+            })
+        } else {
+            false
         };
-
-        let any_mesh = selection
-            .nodes
-            .iter()
-            .any(|n| scene.graph.try_get_of_type::<Mesh>(*n).is_some());
         engine
             .user_interfaces
-            .first_mut()
-            .send_message(WidgetMessage::visibility(
-                self.root_widget,
-                MessageDirection::ToWidget,
-                any_mesh,
-            ));
+            .first()
+            .send(self.root_widget, WidgetMessage::Visibility(any_mesh));
     }
 }
 
 pub struct SurfaceDataViewer {
-    pub window: Handle<UiNode>,
+    pub window: Handle<Window>,
+    info: Handle<Text>,
     preview_panel: PreviewPanel,
+}
+
+fn surface_data_statistics(surface_data: &SurfaceData) -> Result<String, std::fmt::Error> {
+    use std::fmt::Write;
+    let mut stats = String::new();
+    writeln!(
+        &mut stats,
+        "Vertices: {}\nVertex Size: {} bytes\nVertex Buffer Size: {} bytes",
+        surface_data.vertex_buffer.vertex_count(),
+        surface_data.vertex_buffer.vertex_size(),
+        surface_data.vertex_buffer.raw_data().len()
+    )?;
+    for (i, attribute) in surface_data.vertex_buffer.layout().iter().enumerate() {
+        writeln!(&mut stats, "[{i}]{attribute}")?;
+    }
+    let triangle_size = size_of::<TriangleDefinition>();
+    writeln!(
+        &mut stats,
+        "Triangles: {}\nTriangle Size: {} bytes\nTriangle Buffer Size: {} bytes",
+        surface_data.geometry_buffer.len(),
+        triangle_size,
+        surface_data.geometry_buffer.len() * triangle_size
+    )?;
+    Ok(stats)
 }
 
 impl SurfaceDataViewer {
@@ -303,37 +331,52 @@ impl SurfaceDataViewer {
 
         let ctx = &mut engine.user_interfaces.first_mut().build_ctx();
 
-        let window = WindowBuilder::new(WidgetBuilder::new().with_width(400.0).with_height(400.0))
+        let info =
+            TextBuilder::new(WidgetBuilder::new().with_vertical_alignment(VerticalAlignment::Top))
+                .build(ctx);
+
+        let content = GridBuilder::new(
+            WidgetBuilder::new()
+                .with_child(preview_panel.root)
+                .with_child(
+                    ScrollViewerBuilder::new(WidgetBuilder::new().on_row(0).on_column(1))
+                        .with_content(info)
+                        .build(ctx),
+                ),
+        )
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::strict(220.0))
+        .build(ctx);
+
+        let window = WindowBuilder::new(WidgetBuilder::new().with_width(650.0).with_height(400.0))
             .open(false)
-            .with_content(preview_panel.root)
+            .with_title(WindowTitle::text("Surface Data"))
+            .with_content(content)
             .build(ctx);
 
         Self {
             window,
+            info,
             preview_panel,
         }
     }
 
     pub fn open(&mut self, surface_data: SurfaceResource, engine: &mut Engine) {
-        let ui = engine.user_interfaces.first();
-        ui.send_message(WindowMessage::open_modal(
-            self.window,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
-
         let guard = surface_data.data_ref();
-        let title = WindowTitle::text(format!(
-            "Surface Data - Vertices: {} Triangles: {}",
-            guard.vertex_buffer.vertex_count(),
-            guard.geometry_buffer.len(),
-        ));
-        ui.send_message(WindowMessage::title(
+        let ui = engine.user_interfaces.first();
+        ui.send(
+            self.info,
+            TextMessage::Text(surface_data_statistics(&guard).unwrap_or_default()),
+        );
+        ui.send(
             self.window,
-            MessageDirection::ToWidget,
-            title,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
         drop(guard);
 
         let graph = &mut engine.scenes[self.preview_panel.scene()].graph;

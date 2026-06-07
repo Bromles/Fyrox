@@ -20,62 +20,67 @@
 
 //! File browser is a tree view over file system. It allows to select file or folder.
 //!
-//! File selector is dialog window with file browser, it somewhat similar to standard
+//! File selector is dialog window with file browser, it is somewhat similar to standard
 //! OS file selector.
 
 use crate::{
+    button::{ButtonBuilder, ButtonMessage},
     core::{
-        parking_lot::Mutex, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        uuid_provider, visitor::prelude::*,
+        err, log::Log, ok_or_continue, ok_or_return, parking_lot::Mutex, pool::Handle,
+        reflect::prelude::*, some_or_return, visitor::prelude::*, SafeLock,
     },
-    define_constructor,
-    file_browser::menu::ItemContextMenu,
+    file_browser::{
+        fs_tree::{sanitize_path, TreeItemPath},
+        menu::ItemContextMenu,
+    },
+    formatted_text::WrapMode,
     grid::{Column, GridBuilder, Row},
-    message::{MessageDirection, UiMessage},
+    message::{MessageData, UiMessage},
     scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
+    style::{resource::StyleResourceExt, Style},
     text::{TextBuilder, TextMessage},
     text_box::{TextBoxBuilder, TextCommitMode},
-    tree::{Tree, TreeBuilder, TreeMessage, TreeRoot, TreeRootBuilder, TreeRootMessage},
+    tree::{Tree, TreeMessage, TreeRoot, TreeRootBuilder, TreeRootMessage},
+    utils::make_simple_tooltip,
     widget::{Widget, WidgetBuilder, WidgetMessage},
-    BuildContext, Control, RcUiNodeHandle, Thickness, UiNode, UserInterface, VerticalAlignment,
+    BuildContext, Control, HorizontalAlignment, RcUiNodeHandle, Thickness, UiNode, UserInterface,
+    VerticalAlignment,
 };
 use core::time;
-
 use fyrox_graph::{
     constructor::{ConstructorProvider, GraphNodeConstructor},
-    BaseSceneGraph,
+    SceneGraph,
 };
-use notify::Watcher;
+use notify::{Event, Watcher};
 use std::{
-    borrow::BorrowMut,
-    cmp::Ordering,
+    collections::VecDeque,
     fmt::{Debug, Formatter},
-    fs::DirEntry,
-    ops::{Deref, DerefMut},
-    path::{Component, Path, PathBuf, Prefix},
-    sync::{
-        mpsc::{self, Receiver},
-        Arc,
-    },
-    thread,
+    path::{Path, PathBuf},
+    sync::{mpsc::Sender, Arc},
 };
-#[cfg(not(target_arch = "wasm32"))]
-use sysinfo::{DiskExt, RefreshKind, SystemExt};
 
+mod dialog;
+mod field;
+mod filter;
+mod fs_tree;
 mod menu;
 mod selector;
+#[cfg(test)]
+mod test;
 
-use crate::button::{ButtonBuilder, ButtonMessage};
-use crate::utils::make_simple_tooltip;
+use crate::button::Button;
+use crate::scroll_viewer::ScrollViewer;
+use crate::text::Text;
+use crate::text_box::TextBox;
+pub use field::*;
+pub use filter::*;
 pub use selector::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileBrowserMessage {
     Root(Option<PathBuf>),
     Path(PathBuf),
-    Filter(Option<Filter>),
-    Add(PathBuf),
-    Remove(PathBuf),
+    Filter(PathFilter),
     FocusCurrentPath,
     Rescan,
     Drop {
@@ -86,82 +91,39 @@ pub enum FileBrowserMessage {
         dropped_path: PathBuf,
     },
 }
+impl MessageData for FileBrowserMessage {}
 
-impl FileBrowserMessage {
-    define_constructor!(FileBrowserMessage:Root => fn root(Option<PathBuf>), layout: false);
-    define_constructor!(FileBrowserMessage:Path => fn path(PathBuf), layout: false);
-    define_constructor!(FileBrowserMessage:Filter => fn filter(Option<Filter>), layout: false);
-    define_constructor!(FileBrowserMessage:Add => fn add(PathBuf), layout: false);
-    define_constructor!(FileBrowserMessage:Remove => fn remove(PathBuf), layout: false);
-    define_constructor!(FileBrowserMessage:Rescan => fn rescan(), layout: false);
-    define_constructor!(FileBrowserMessage:FocusCurrentPath => fn focus_current_path(), layout: false);
-    define_constructor!(FileBrowserMessage:Drop => fn drop(
-        dropped: Handle<UiNode>,
-        path_item: Handle<UiNode>,
-        path: PathBuf,
-        dropped_path: PathBuf),
-        layout: false
-    );
+#[derive(Debug, Clone, PartialEq)]
+enum FsEventMessage {
+    Add(PathBuf),
+    Remove(PathBuf),
 }
+impl MessageData for FsEventMessage {}
 
-#[derive(Clone)]
-#[allow(clippy::type_complexity)]
-pub struct Filter(pub Arc<Mutex<dyn FnMut(&Path) -> bool + Send>>);
-
-impl Filter {
-    pub fn new<F: FnMut(&Path) -> bool + 'static + Send>(filter: F) -> Self {
-        Self(Arc::new(Mutex::new(filter)))
-    }
-}
-
-impl PartialEq for Filter {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(&*self.0, &*other.0)
-    }
-}
-
-impl Debug for Filter {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Filter")
-    }
-}
-
-#[derive(Default, Clone, PartialEq, Eq, Hash, Debug, Visit, Reflect)]
-pub enum FileBrowserMode {
-    #[default]
-    Open,
-    Save {
-        default_file_name: PathBuf,
-    },
-}
-
-#[derive(Default, Visit, Reflect, ComponentProvider)]
+#[derive(Default, Visit, Reflect)]
+#[reflect(type_uuid = "b7f4610e-4b0c-4671-9b4a-60bb45268928")]
 #[reflect(derived_type = "UiNode")]
 pub struct FileBrowser {
     pub widget: Widget,
-    pub tree_root: Handle<UiNode>,
-    pub home_dir: Handle<UiNode>,
-    pub desktop_dir: Handle<UiNode>,
-    pub path_text: Handle<UiNode>,
-    pub scroll_viewer: Handle<UiNode>,
+    pub tree_root: Handle<TreeRoot>,
+    pub home_dir: Handle<Button>,
+    pub desktop_dir: Handle<Button>,
+    pub path_text: Handle<TextBox>,
+    pub scroll_viewer: Handle<ScrollViewer>,
+    pub no_items_message: Handle<Text>,
     pub path: PathBuf,
     pub root: Option<PathBuf>,
+    pub filter: PathFilter,
     #[visit(skip)]
     #[reflect(hidden)]
-    pub filter: Option<Filter>,
-    pub mode: FileBrowserMode,
-    pub file_name: Handle<UiNode>,
-    pub file_name_value: PathBuf,
-    #[visit(skip)]
-    #[reflect(hidden)]
-    pub fs_receiver: Option<Receiver<notify::Event>>,
+    fs_events: VecDeque<FsEventMessage>,
     #[visit(skip)]
     #[reflect(hidden)]
     pub item_context_menu: RcUiNodeHandle,
     #[allow(clippy::type_complexity)]
     #[visit(skip)]
     #[reflect(hidden)]
-    pub watcher: Option<(notify::RecommendedWatcher, thread::JoinHandle<()>)>,
+    pub watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for FileBrowser {
@@ -170,6 +132,7 @@ impl ConstructorProvider<UiNode, UserInterface> for FileBrowser {
             .with_variant("File Browser", |ui| {
                 FileBrowserBuilder::new(WidgetBuilder::new().with_name("File Browser"))
                     .build(&mut ui.build_ctx())
+                    .to_base()
                     .into()
             })
             .with_group("File System")
@@ -185,13 +148,11 @@ impl Clone for FileBrowser {
             desktop_dir: self.desktop_dir,
             path_text: self.path_text,
             scroll_viewer: self.scroll_viewer,
+            no_items_message: self.no_items_message,
             path: self.path.clone(),
             root: self.root.clone(),
             filter: self.filter.clone(),
-            mode: self.mode.clone(),
-            file_name: self.file_name,
-            file_name_value: self.file_name_value.clone(),
-            fs_receiver: None,
+            fs_events: self.fs_events.clone(),
             item_context_menu: self.item_context_menu.clone(),
             watcher: None,
         }
@@ -206,713 +167,409 @@ impl Debug for FileBrowser {
 
 crate::define_widget_deref!(FileBrowser);
 
-impl FileBrowser {
-    fn rebuild_from_root(&mut self, ui: &mut UserInterface) {
-        // Generate new tree contents.
-        let result = build_all(
-            self.root.as_ref(),
-            &self.path,
-            self.filter.clone(),
-            self.item_context_menu.clone(),
-            &mut ui.build_ctx(),
-        );
-
-        // Replace tree contents.
-        ui.send_message(TreeRootMessage::items(
-            self.tree_root,
-            MessageDirection::ToWidget,
-            result.root_items,
-        ));
-
-        if result.path_item.is_some() {
-            // Select item of new path.
-            ui.send_message(TreeRootMessage::select(
-                self.tree_root,
-                MessageDirection::ToWidget,
-                vec![result.path_item],
-            ));
-            // Bring item of new path into view.
-            ui.send_message(ScrollViewerMessage::bring_into_view(
-                self.scroll_viewer,
-                MessageDirection::ToWidget,
-                result.path_item,
-            ));
-        } else {
-            // Clear text field if path is invalid.
-            ui.send_message(TextMessage::text(
-                self.path_text,
-                MessageDirection::ToWidget,
-                String::new(),
-            ));
-        }
-    }
-}
-
-uuid_provider!(FileBrowser = "b7f4610e-4b0c-4671-9b4a-60bb45268928");
-
-impl Control for FileBrowser {
-    fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
-        self.widget.handle_routed_message(ui, message);
-
-        if let Some(msg) = message.data::<FileBrowserMessage>() {
-            if message.destination() == self.handle() {
-                match msg {
-                    FileBrowserMessage::Path(path) => {
-                        if message.direction() == MessageDirection::ToWidget && &self.path != path {
-                            let existing_path = ignore_nonexistent_sub_dirs(path);
-
-                            let mut item = find_tree(self.tree_root, &existing_path, ui);
-
-                            if item.is_none() {
-                                // Generate new tree contents.
-                                let result = build_all(
-                                    self.root.as_ref(),
-                                    &existing_path,
-                                    self.filter.clone(),
-                                    self.item_context_menu.clone(),
-                                    &mut ui.build_ctx(),
-                                );
-
-                                // Replace tree contents.
-                                ui.send_message(TreeRootMessage::items(
-                                    self.tree_root,
-                                    MessageDirection::ToWidget,
-                                    result.root_items,
-                                ));
-
-                                item = result.path_item;
-                            }
-
-                            self.path.clone_from(path);
-
-                            // Set value of text field.
-                            ui.send_message(TextMessage::text(
-                                self.path_text,
-                                MessageDirection::ToWidget,
-                                path.to_string_lossy().to_string(),
-                            ));
-
-                            // Path can be invalid, so we shouldn't do anything in such case.
-                            if item.is_some() {
-                                // Select item of new path.
-                                ui.send_message(TreeRootMessage::select(
-                                    self.tree_root,
-                                    MessageDirection::ToWidget,
-                                    vec![item],
-                                ));
-
-                                // Bring item of new path into view.
-                                ui.send_message(ScrollViewerMessage::bring_into_view(
-                                    self.scroll_viewer,
-                                    MessageDirection::ToWidget,
-                                    item,
-                                ));
-                            }
-
-                            ui.send_message(message.reverse());
-                        }
-                    }
-                    FileBrowserMessage::Root(root) => {
-                        if &self.root != root {
-                            let watcher_replacement = match self.watcher.take() {
-                                Some((mut watcher, converter)) => {
-                                    let current_root = match &self.root {
-                                        Some(path) => path.clone(),
-                                        None => self.path.clone(),
-                                    };
-                                    if current_root.exists() {
-                                        let _ = watcher.unwatch(&current_root);
-                                    }
-                                    let new_root = match &root {
-                                        Some(path) => path.clone(),
-                                        None => self.path.clone(),
-                                    };
-                                    let _ =
-                                        watcher.watch(&new_root, notify::RecursiveMode::Recursive);
-                                    Some((watcher, converter))
-                                }
-                                None => None,
-                            };
-                            self.root.clone_from(root);
-                            self.path = root.clone().unwrap_or_default();
-                            self.rebuild_from_root(ui);
-                            self.watcher = watcher_replacement;
-                        }
-                    }
-                    FileBrowserMessage::Filter(filter) => {
-                        let equal = match (&self.filter, filter) {
-                            (Some(current), Some(new)) => std::ptr::eq(new, current),
-                            _ => false,
-                        };
-                        if !equal {
-                            self.filter.clone_from(filter);
-                            self.rebuild_from_root(ui);
-                        }
-                    }
-                    FileBrowserMessage::Add(path) => {
-                        let path =
-                            make_fs_watcher_event_path_relative_to_tree_root(&self.root, path);
-                        if filtered_out(&mut self.filter, &path) {
-                            return;
-                        }
-                        let parent_path = parent_path(&path);
-                        let existing_parent_node = find_tree(self.tree_root, &parent_path, ui);
-                        if existing_parent_node.is_some() {
-                            if let Some(tree) = ui.node(existing_parent_node).cast::<Tree>() {
-                                if tree.is_expanded {
-                                    build_tree(
-                                        existing_parent_node,
-                                        existing_parent_node == self.tree_root,
-                                        path,
-                                        parent_path,
-                                        self.item_context_menu.clone(),
-                                        ui,
-                                    );
-                                } else if !tree.always_show_expander {
-                                    ui.send_message(TreeMessage::set_expander_shown(
-                                        tree.handle(),
-                                        MessageDirection::ToWidget,
-                                        true,
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                    FileBrowserMessage::Remove(path) => {
-                        let path =
-                            make_fs_watcher_event_path_relative_to_tree_root(&self.root, path);
-                        let node = find_tree(self.tree_root, &path, ui);
-                        if node.is_some() {
-                            let parent_path = parent_path(&path);
-                            let parent_node = find_tree(self.tree_root, &parent_path, ui);
-                            ui.send_message(TreeMessage::remove_item(
-                                parent_node,
-                                MessageDirection::ToWidget,
-                                node,
-                            ))
-                        }
-                    }
-                    FileBrowserMessage::Rescan | FileBrowserMessage::Drop { .. } => (),
-                    FileBrowserMessage::FocusCurrentPath => {
-                        if let Ok(canonical_path) = self.path.canonicalize() {
-                            let item = find_tree(self.tree_root, &canonical_path, ui);
-                            if item.is_some() {
-                                // Select item of new path.
-                                ui.send_message(TreeRootMessage::select(
-                                    self.tree_root,
-                                    MessageDirection::ToWidget,
-                                    vec![item],
-                                ));
-                                ui.send_message(ScrollViewerMessage::bring_into_view(
-                                    self.scroll_viewer,
-                                    MessageDirection::ToWidget,
-                                    item,
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        } else if let Some(TextMessage::Text(txt)) = message.data::<TextMessage>() {
-            if message.direction() == MessageDirection::FromWidget {
-                if message.destination() == self.path_text {
-                    self.path = txt.into();
-                } else if message.destination() == self.file_name {
-                    self.file_name_value = txt.into();
-                    ui.send_message(FileBrowserMessage::path(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                        {
-                            let mut combined = self.path.clone();
-                            combined.set_file_name(PathBuf::from(txt));
-                            combined
-                        },
-                    ));
-                }
-            }
-        } else if let Some(TreeMessage::Expand { expand, .. }) = message.data::<TreeMessage>() {
-            if *expand {
-                // Look into internals of directory and build tree items.
-                let parent_path = ui
-                    .node(message.destination())
-                    .user_data_cloned::<PathBuf>()
-                    .unwrap()
-                    .clone();
-                if let Ok(dir_iter) = std::fs::read_dir(&parent_path) {
-                    let mut entries: Vec<_> = dir_iter.flatten().collect();
-                    entries.sort_unstable_by(sort_dir_entries);
-                    for entry in entries {
-                        let path = entry.path();
-                        let build = if let Some(filter) = self.filter.as_mut() {
-                            filter.0.borrow_mut().deref_mut().lock()(&path)
-                        } else {
-                            true
-                        };
-                        if build {
-                            build_tree(
-                                message.destination(),
-                                false,
-                                &path,
-                                &parent_path,
-                                self.item_context_menu.clone(),
-                                ui,
-                            );
-                        }
-                    }
-                }
-            } else {
-                // Nuke everything in collapsed item. This also will free some resources
-                // and will speed up layout pass.
-                ui.send_message(TreeMessage::set_items(
-                    message.destination(),
-                    MessageDirection::ToWidget,
-                    vec![],
-                    true,
-                ));
-            }
-        } else if let Some(WidgetMessage::Drop(dropped)) = message.data() {
-            if !message.handled() {
-                if let Some(path) = ui.node(message.destination()).user_data_cloned::<PathBuf>() {
-                    ui.send_message(FileBrowserMessage::drop(
-                        self.handle,
-                        MessageDirection::FromWidget,
-                        *dropped,
-                        message.destination(),
-                        path.clone(),
-                        ui.node(*dropped)
-                            .user_data_cloned::<PathBuf>()
-                            .unwrap_or_default(),
-                    ));
-
-                    message.set_handled(true);
-                }
-            }
-        } else if let Some(TreeRootMessage::Selected(selection)) = message.data::<TreeRootMessage>()
-        {
-            if message.destination() == self.tree_root
-                && message.direction() == MessageDirection::FromWidget
-            {
-                if let Some(&first_selected) = selection.first() {
-                    if let Some(first_selected_ref) = ui.try_get(first_selected) {
-                        let mut path = first_selected_ref
-                            .user_data_cloned::<PathBuf>()
-                            .unwrap()
-                            .clone();
-
-                        if let FileBrowserMode::Save { .. } = self.mode {
-                            if path.is_file() {
-                                ui.send_message(TextMessage::text(
-                                    self.file_name,
-                                    MessageDirection::ToWidget,
-                                    path.file_name()
-                                        .map(|f| f.to_string_lossy().to_string())
-                                        .unwrap_or_default(),
-                                ));
-                            } else {
-                                path = path.join(&self.file_name_value);
-                            }
-                        }
-
-                        if self.path != path {
-                            self.path.clone_from(&path);
-
-                            ui.send_message(TextMessage::text(
-                                self.path_text,
-                                MessageDirection::ToWidget,
-                                path.to_string_lossy().to_string(),
-                            ));
-
-                            // Do response.
-                            ui.send_message(FileBrowserMessage::path(
-                                self.handle,
-                                MessageDirection::FromWidget,
-                                path,
-                            ));
-                        }
-                    }
-                }
-            }
-        } else if let Some(ButtonMessage::Click) = message.data() {
-            if message.direction() == MessageDirection::FromWidget {
-                #[cfg(not(target_arch = "wasm32"))]
-                if message.destination() == self.desktop_dir {
-                    let user_dirs = directories::UserDirs::new();
-                    if let Some(desktop_dir) =
-                        user_dirs.as_ref().and_then(|dirs| dirs.desktop_dir())
-                    {
-                        ui.send_message(FileBrowserMessage::path(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            desktop_dir.to_path_buf(),
-                        ));
-                    }
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if message.destination() == self.home_dir {
-                    let user_dirs = directories::UserDirs::new();
-                    if let Some(home_dir) = user_dirs.as_ref().map(|dirs| dirs.home_dir()) {
-                        ui.send_message(FileBrowserMessage::path(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            home_dir.to_path_buf(),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    fn update(&mut self, _dt: f32, ui: &mut UserInterface) {
-        if let Ok(event) = self.fs_receiver.as_ref().unwrap().try_recv() {
-            if event.need_rescan() {
-                ui.send_message(FileBrowserMessage::rescan(
-                    self.handle,
-                    MessageDirection::ToWidget,
-                ));
-            } else {
-                for path in event.paths.iter() {
-                    match event.kind {
-                        notify::EventKind::Remove(_) => {
-                            ui.send_message(FileBrowserMessage::remove(
-                                self.handle,
-                                MessageDirection::ToWidget,
-                                path.clone(),
-                            ));
-                        }
-                        notify::EventKind::Create(_) => {
-                            ui.send_message(FileBrowserMessage::add(
-                                self.handle,
-                                MessageDirection::ToWidget,
-                                path.clone(),
-                            ));
-                        }
-                        _ => (),
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn parent_path(path: &Path) -> PathBuf {
     let mut parent_path = path.to_owned();
     parent_path.pop();
     parent_path
 }
 
-fn filtered_out(filter: &mut Option<Filter>, path: &Path) -> bool {
-    match filter.as_mut() {
-        Some(filter) => !filter.0.borrow_mut().deref_mut().lock()(path),
-        None => false,
+impl FileBrowser {
+    fn select_and_bring_into_view(&self, item: Handle<Tree>, ui: &UserInterface) {
+        ui.send(self.tree_root, TreeRootMessage::Select(vec![item]));
+        ui.send(
+            self.scroll_viewer,
+            ScrollViewerMessage::BringIntoView(item.to_base()),
+        );
     }
-}
 
-fn ignore_nonexistent_sub_dirs(path: &Path) -> PathBuf {
-    let mut existing_path = path.to_owned();
-    while !existing_path.exists() {
-        if !existing_path.pop() {
-            break;
+    fn rebuild_fs_tree(&mut self, ui: &mut UserInterface) {
+        let fs_tree = fs_tree::FsTree::new_or_empty(
+            self.root.as_ref(),
+            &self.path,
+            &self.filter,
+            self.item_context_menu.clone(),
+            &mut ui.build_ctx(),
+        );
+
+        ui.send(self.tree_root, TreeRootMessage::Items(fs_tree.root_items));
+        if fs_tree.path_item.is_some() {
+            self.select_and_bring_into_view(fs_tree.path_item, ui);
         }
     }
-    existing_path
-}
 
-fn sort_dir_entries(a: &DirEntry, b: &DirEntry) -> Ordering {
-    let a_is_dir = a.path().is_dir();
-    let b_is_dir = b.path().is_dir();
-
-    if a_is_dir && !b_is_dir {
-        Ordering::Less
-    } else if !a_is_dir && b_is_dir {
-        Ordering::Greater
-    } else {
-        a.file_name()
-            .to_ascii_lowercase()
-            .cmp(&b.file_name().to_ascii_lowercase())
+    fn set_path_internal(&mut self, path: PathBuf) {
+        assert!(path.is_absolute());
+        self.path = path.clone();
     }
-}
 
-fn make_fs_watcher_event_path_relative_to_tree_root(
-    root: &Option<PathBuf>,
-    path: &Path,
-) -> PathBuf {
-    match root {
-        Some(ref root) => {
-            let remove_prefix = if *root == PathBuf::from(".") {
-                std::env::current_dir().unwrap()
-            } else {
-                root.clone()
-            };
-            PathBuf::from("./").join(path.strip_prefix(remove_prefix).unwrap_or(path))
-        }
-        None => path.to_owned(),
-    }
-}
-
-fn find_tree<P: AsRef<Path>>(node: Handle<UiNode>, path: &P, ui: &UserInterface) -> Handle<UiNode> {
-    let mut tree_handle = Handle::NONE;
-    let node_ref = ui.node(node);
-
-    if let Some(tree) = node_ref.cast::<Tree>() {
-        let tree_path = tree.user_data_cloned::<PathBuf>().unwrap();
-        if tree_path == path.as_ref() {
-            tree_handle = node;
-        } else {
-            for &item in &tree.items {
-                let tree = find_tree(item, path, ui);
-                if tree.is_some() {
-                    tree_handle = tree;
+    /// Tries to set a new path. This method keeps only the valid part of the supplied path. For
+    /// example, if the path `foo/bar/baz` is supplied and only `foo/bar` exists, then the `foo/bar`
+    /// will be set. This method also does path normalization, which requires FS access, and the actual
+    /// path will be absolute even if the input path was relative.
+    fn set_path(&mut self, path: &Path, ui: &UserInterface) -> bool {
+        fn discard_nonexistent_sub_dirs(path: &Path) -> PathBuf {
+            let mut potentially_existing_path = path.to_owned();
+            while !potentially_existing_path.exists() {
+                if !potentially_existing_path.pop() {
                     break;
                 }
             }
+            potentially_existing_path
         }
-    } else if let Some(root) = node_ref.cast::<TreeRoot>() {
-        for &item in &root.items {
-            let tree = find_tree(item, path, ui);
-            if tree.is_some() {
-                tree_handle = tree;
-                break;
+
+        let existing_part = discard_nonexistent_sub_dirs(path);
+
+        match fs_tree::sanitize_path(&existing_part) {
+            Ok(existing_sanitized_path) => {
+                if self.path != existing_sanitized_path {
+                    self.set_path_internal(existing_sanitized_path);
+                    ui.send(
+                        self.path_text,
+                        TextMessage::Text(self.path.to_string_lossy().to_string()),
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(err) => {
+                err!(
+                    "Unable to set existing part {} of the path {}. Reason {:?}",
+                    existing_part.display(),
+                    path.display(),
+                    err
+                );
+                false
             }
         }
-    } else {
-        unreachable!()
     }
-    tree_handle
-}
 
-fn build_tree_item<P: AsRef<Path>>(
-    path: P,
-    parent_path: P,
-    menu: RcUiNodeHandle,
-    expanded: bool,
-    ctx: &mut BuildContext,
-) -> Handle<UiNode> {
-    let is_dir_empty = path
-        .as_ref()
-        .read_dir()
-        .map_or(true, |mut f| f.next().is_none());
-    TreeBuilder::new(
-        WidgetBuilder::new()
-            .with_user_data(Arc::new(Mutex::new(path.as_ref().to_owned())))
-            .with_context_menu(menu),
-    )
-    .with_expanded(expanded)
-    .with_always_show_expander(!is_dir_empty)
-    .with_content(
-        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::left(4.0)))
-            .with_text(
-                path.as_ref()
-                    .to_string_lossy()
-                    .replace(&parent_path.as_ref().to_string_lossy().to_string(), "")
-                    .replace('\\', ""),
-            )
-            .with_vertical_text_alignment(VerticalAlignment::Center)
-            .build(ctx),
-    )
-    .build(ctx)
-}
-
-fn build_tree<P: AsRef<Path>>(
-    parent: Handle<UiNode>,
-    is_parent_root: bool,
-    path: P,
-    parent_path: P,
-    menu: RcUiNodeHandle,
-    ui: &mut UserInterface,
-) -> Handle<UiNode> {
-    let subtree = build_tree_item(path, parent_path, menu, false, &mut ui.build_ctx());
-    insert_subtree_in_parent(ui, parent, is_parent_root, subtree);
-    subtree
-}
-
-fn insert_subtree_in_parent(
-    ui: &mut UserInterface,
-    parent: Handle<UiNode>,
-    is_parent_root: bool,
-    tree: Handle<UiNode>,
-) {
-    if is_parent_root {
-        ui.send_message(TreeRootMessage::add_item(
-            parent,
-            MessageDirection::ToWidget,
-            tree,
-        ));
-    } else {
-        ui.send_message(TreeMessage::add_item(
-            parent,
-            MessageDirection::ToWidget,
-            tree,
-        ));
-    }
-}
-
-struct BuildResult {
-    root_items: Vec<Handle<UiNode>>,
-    path_item: Handle<UiNode>,
-}
-
-/// Builds entire file system tree to given final_path.
-fn build_all(
-    root: Option<&PathBuf>,
-    final_path: &Path,
-    mut filter: Option<Filter>,
-    menu: RcUiNodeHandle,
-    ctx: &mut BuildContext,
-) -> BuildResult {
-    let mut dest_path = PathBuf::new();
-    if let Ok(canonical_final_path) = final_path.canonicalize() {
-        if let Some(canonical_root) = root.and_then(|r| r.canonicalize().ok()) {
-            if let Ok(stripped) = canonical_final_path.strip_prefix(canonical_root) {
-                stripped.clone_into(&mut dest_path);
-            }
-        } else {
-            dest_path = canonical_final_path;
+    /// Same as [`Self::set_path`], but also rebuilds the file system tree to the given path.
+    /// This method keeps only the valid part of the supplied path. For example, if the path
+    /// `foo/bar/baz` is supplied and only `foo/bar` exists, then the tree will be built only to
+    /// that path.
+    fn set_path_and_rebuild_tree(&mut self, path: &Path, ui: &mut UserInterface) -> bool {
+        if !self.set_path(path, ui) {
+            return false;
         }
-    }
-
-    // There should be at least one component in the path. If the path is empty, this means that
-    // it "points" to the current directory.
-    if dest_path.as_os_str().is_empty() {
-        dest_path.push(".");
-    }
-
-    // Relative paths must always start from CurDir component (./), otherwise the root dir will be ignored
-    // and the tree will be incorrect.
-    if !dest_path.is_absolute() {
-        dest_path = Path::new(".").join(dest_path);
-    }
-
-    let dest_path_components = dest_path.components().collect::<Vec<Component>>();
-    #[allow(unused_variables)]
-    let dest_disk = dest_path_components.first().and_then(|c| {
-        if let Component::Prefix(prefix) = c {
-            if let Prefix::Disk(disk_letter) | Prefix::VerbatimDisk(disk_letter) = prefix.kind() {
-                Some(disk_letter)
-            } else {
-                None
-            }
+        let existing_item = fs_tree::find_tree_item(self.tree_root, &self.path, ui);
+        if existing_item.is_some() {
+            self.select_and_bring_into_view(existing_item.to_variant(), ui)
         } else {
-            None
+            self.rebuild_fs_tree(ui)
         }
-    });
+        true
+    }
 
-    let mut root_items = Vec::new();
-    let mut parent = if let Some(root) = root {
-        let path = if std::env::current_dir().is_ok_and(|dir| &dir == root) {
-            Path::new(".")
-        } else {
-            root.as_path()
+    fn set_root(&mut self, root: Option<&Path>, ui: &mut UserInterface) {
+        self.root = root.as_ref().and_then(|root| sanitize_path(root).ok());
+        let watcher_replacement = match self.watcher.take() {
+            Some(mut watcher) => {
+                let current_root = match &self.root {
+                    Some(path) => path.clone(),
+                    None => self.path.clone(),
+                };
+                if current_root.exists() {
+                    Log::verify(watcher.unwatch(&current_root));
+                }
+                let new_root = match &self.root {
+                    Some(path) => path.clone(),
+                    None => self.path.clone(),
+                };
+                Log::verify(watcher.watch(&new_root, notify::RecursiveMode::Recursive));
+                Some(watcher)
+            }
+            None => None,
         };
-        let item = build_tree_item(path, Path::new(""), menu.clone(), true, ctx);
-        root_items.push(item);
-        item
-    } else {
+        if let Some(root) = self.root.clone() {
+            self.set_path(&root, ui);
+            let tree_item_path = Arc::new(Mutex::new(TreeItemPath::root(root.clone())));
+            ui[self.tree_root].user_data = Some(tree_item_path.clone());
+            self.user_data = Some(tree_item_path);
+        }
+        self.rebuild_fs_tree(ui);
+        for button in [self.home_dir, self.desktop_dir] {
+            ui.send(button, WidgetMessage::Visibility(self.root.is_none()));
+        }
+        self.watcher = watcher_replacement;
+    }
+
+    fn on_file_added(&mut self, path: &Path, ui: &mut UserInterface) {
+        if !self.filter.supports_all(path) {
+            return;
+        }
+
+        if fs_tree::find_tree_item(self.tree_root, path, ui).is_some() {
+            return;
+        }
+
+        let parent_path = parent_path(path);
+        let parent_node = fs_tree::find_tree_item(self.tree_root, &parent_path, ui);
+        if parent_node.is_none() {
+            return;
+        }
+
+        let mut need_build_tree = false;
+        if let Some(tree) = ui.node(parent_node).cast::<Tree>() {
+            if tree.is_expanded {
+                need_build_tree = true;
+            } else if !tree.always_show_expander {
+                ui.send(tree.handle(), TreeMessage::ExpanderVisible(true))
+            }
+        } else if ui.node(parent_node).cast::<TreeRoot>().is_some() {
+            need_build_tree = true;
+        }
+        if need_build_tree {
+            fs_tree::build_tree(
+                parent_node,
+                path,
+                &parent_path,
+                self.item_context_menu.clone(),
+                &self.filter,
+                ui,
+            );
+        }
+    }
+
+    fn on_items_changed(&self, ui: &UserInterface) {
+        let show_no_items_message = ui[self.tree_root].items.is_empty();
+        ui.send(
+            self.no_items_message,
+            WidgetMessage::Visibility(show_no_items_message),
+        );
+    }
+
+    fn on_file_removed(&mut self, path: &Path, ui: &mut UserInterface) {
+        let tree_item = fs_tree::find_tree_item(self.tree_root, path, ui);
+        if tree_item.is_some() {
+            let parent_path = parent_path(path);
+            let parent_tree = fs_tree::find_tree_item(self.tree_root, &parent_path, ui);
+            if let Ok(parent_tree_node) = ui.try_get(parent_tree) {
+                if parent_tree_node.is_or_has_field::<TreeRoot>() {
+                    ui.send(
+                        parent_tree,
+                        TreeRootMessage::RemoveItem(tree_item.to_variant()),
+                    )
+                } else {
+                    ui.send(parent_tree, TreeMessage::RemoveItem(tree_item.to_variant()))
+                }
+            }
+        }
+    }
+
+    fn handle_fs_event_message(&mut self, msg: &FsEventMessage, ui: &mut UserInterface) {
+        match msg {
+            FsEventMessage::Add(path) => self.on_file_added(path, ui),
+            FsEventMessage::Remove(path) => self.on_file_removed(path, ui),
+        }
+    }
+
+    fn on_file_browser_message(
+        &mut self,
+        message: &UiMessage,
+        message_data: &FileBrowserMessage,
+        ui: &mut UserInterface,
+    ) {
+        match message_data {
+            FileBrowserMessage::Path(path) => {
+                if self.set_path_and_rebuild_tree(path, ui) {
+                    ui.send_message(UiMessage::from_widget(
+                        message.destination(),
+                        FileBrowserMessage::Path(self.path.clone()),
+                    ));
+                }
+            }
+            FileBrowserMessage::Root(root) => {
+                if &self.root != root {
+                    self.set_root(root.as_deref(), ui)
+                }
+            }
+            FileBrowserMessage::Filter(filter) => {
+                if &self.filter != filter {
+                    self.filter.clone_from(filter);
+                    self.rebuild_fs_tree(ui);
+                }
+            }
+            FileBrowserMessage::Rescan => {
+                self.rebuild_fs_tree(ui);
+            }
+            FileBrowserMessage::Drop { .. } => (),
+            FileBrowserMessage::FocusCurrentPath => {
+                let item = fs_tree::find_tree_item(self.tree_root, &self.path, ui);
+                if item.is_some() {
+                    // Select item of new path.
+                    ui.send(
+                        self.tree_root,
+                        TreeRootMessage::Select(vec![item.to_variant()]),
+                    );
+                    ui.send(self.scroll_viewer, ScrollViewerMessage::BringIntoView(item));
+                }
+            }
+        }
+    }
+
+    fn on_sub_tree_expanded(
+        &mut self,
+        sub_tree: Handle<Tree>,
+        expand: bool,
+        ui: &mut UserInterface,
+    ) {
+        if expand {
+            // Look into internals of directory and build tree items.
+            if let Some(parent_tree_item) = fs_tree::tree_path(sub_tree, ui) {
+                fs_tree::build_single_folder(
+                    parent_tree_item.path(),
+                    sub_tree,
+                    self.item_context_menu.clone(),
+                    &self.filter,
+                    ui,
+                )
+            }
+        } else {
+            // Nuke everything in collapsed item. This also will free some resources
+            // and will speed up layout pass.
+            ui.send(
+                sub_tree,
+                TreeMessage::SetItems {
+                    items: vec![],
+                    remove_previous: true,
+                },
+            );
+        }
+    }
+
+    fn on_sub_tree_selected(&mut self, sub_tree: Handle<Tree>, ui: &UserInterface) {
+        let path = some_or_return!(fs_tree::tree_path(sub_tree, ui)).into_path();
+        if self.path != path {
+            // Here we trust the content of the tree items.
+            self.set_path_internal(path.clone());
+
+            ui.send(
+                self.path_text,
+                TextMessage::Text(path.to_string_lossy().to_string()),
+            );
+
+            // Do response.
+            ui.post(self.handle, FileBrowserMessage::Path(path));
+        }
+    }
+
+    fn on_selection_cleared(&mut self, ui: &UserInterface) {
+        let root = some_or_return!(self.root.clone());
+        if self.set_path(&root, ui) {
+            ui.post(self.handle, FileBrowserMessage::Path(self.path.clone()));
+        }
+    }
+
+    fn on_drop(
+        &self,
+        what_dropped: Handle<UiNode>,
+        where_dropped: Handle<UiNode>,
+        ui: &UserInterface,
+    ) {
+        let path = some_or_return!(fs_tree::tree_path(where_dropped.to_variant(), ui)).into_path();
+        let dropped_path =
+            some_or_return!(fs_tree::tree_path(what_dropped.to_variant(), ui)).into_path();
+        ui.post(
+            self.handle,
+            FileBrowserMessage::Drop {
+                dropped: what_dropped,
+                path_item: where_dropped,
+                path,
+                dropped_path,
+            },
+        );
+    }
+
+    fn on_desktop_dir_clicked(&self, #[allow(unused_variables)] ui: &UserInterface) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut parent = Handle::NONE;
-
-            // Create items for disks.
-            for disk in sysinfo::System::new_with_specifics(RefreshKind::new().with_disks_list())
-                .disks()
-                .iter()
-                .map(|i| i.mount_point().to_string_lossy())
-            {
-                let disk_letter = disk.chars().next().unwrap() as u8;
-                let is_disk_part_of_path = dest_disk == Some(disk_letter);
-
-                let item =
-                    build_tree_item(disk.as_ref(), "", menu.clone(), is_disk_part_of_path, ctx);
-
-                if is_disk_part_of_path {
-                    parent = item;
-                }
-
-                root_items.push(item);
-            }
-
-            parent
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            Handle::NONE
-        }
-    };
-
-    let mut path_item = Handle::NONE;
-
-    // Try to build tree only for given path.
-    let mut full_path = PathBuf::new();
-    for (i, component) in dest_path_components.iter().enumerate() {
-        // Concat parts of path one by one.
-        full_path = full_path.join(component.as_os_str());
-
-        let next_component = dest_path_components.get(i + 1);
-
-        if let Some(next_component) = next_component {
-            if matches!(component, Component::Prefix(_))
-                && matches!(next_component, Component::RootDir)
-            {
-                continue;
+            let user_dirs = directories::UserDirs::new();
+            if let Some(desktop_dir) = user_dirs.as_ref().and_then(|dirs| dirs.desktop_dir()) {
+                ui.send(
+                    self.handle,
+                    FileBrowserMessage::Path(desktop_dir.to_path_buf()),
+                );
             }
         }
-
-        let next = next_component.map(|p| full_path.join(p));
-
-        let mut new_parent = parent;
-        if let Ok(dir_iter) = std::fs::read_dir(&full_path) {
-            let mut entries: Vec<_> = dir_iter.flatten().collect();
-            entries.sort_unstable_by(sort_dir_entries);
-            for entry in entries {
-                let path = entry.path();
-                #[allow(clippy::blocks_in_conditions)]
-                if filter
-                    .as_mut()
-                    .is_none_or(|f| f.0.borrow_mut().deref_mut().lock()(&path))
-                {
-                    let is_part_of_final_path = next.as_ref().is_some_and(|next| *next == path);
-
-                    let item = build_tree_item(
-                        &path,
-                        &full_path,
-                        menu.clone(),
-                        is_part_of_final_path,
-                        ctx,
-                    );
-
-                    if parent.is_some() {
-                        Tree::add_item(parent, item, ctx);
-                    } else {
-                        root_items.push(item);
-                    }
-
-                    if is_part_of_final_path {
-                        new_parent = item;
-                    }
-
-                    if path == dest_path {
-                        path_item = item;
-                    }
-                }
-            }
-        }
-        parent = new_parent;
     }
 
-    BuildResult {
-        root_items,
-        path_item,
+    fn on_home_dir_clicked(&self, #[allow(unused_variables)] ui: &UserInterface) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let user_dirs = directories::UserDirs::new();
+            if let Some(home_dir) = user_dirs.as_ref().map(|dirs| dirs.home_dir()) {
+                ui.send(
+                    self.handle,
+                    FileBrowserMessage::Path(home_dir.to_path_buf()),
+                );
+            }
+        }
+    }
+
+    fn register_fs_event(&mut self, fs_event: FsEventMessage) {
+        // Accumulate events in the queue with deduplication.
+        if !self.fs_events.contains(&fs_event) {
+            self.fs_events.push_back(fs_event);
+        }
+    }
+}
+
+impl Control for FileBrowser {
+    fn update(&mut self, _dt: f32, ui: &mut UserInterface) {
+        while let Some(event) = self.fs_events.pop_front() {
+            self.handle_fs_event_message(&event, ui);
+        }
+    }
+
+    fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
+        self.widget.handle_routed_message(ui, message);
+        if let Some(msg) = message.data_for::<FsEventMessage>(self.handle) {
+            self.register_fs_event(msg.clone());
+        } else if let Some(message_data) = message.data_for::<FileBrowserMessage>(self.handle) {
+            self.on_file_browser_message(message, message_data, ui)
+        } else if let Some(TreeMessage::Expand { expand, .. }) = message.data() {
+            self.on_sub_tree_expanded(message.destination().to_variant(), *expand, ui)
+        } else if let Some(WidgetMessage::Drop(dropped)) = message.data() {
+            if !message.handled() {
+                self.on_drop(*dropped, message.destination(), ui);
+                message.set_handled(true);
+            }
+        } else if let Some(TreeRootMessage::Select(selection)) = message.data_from(self.tree_root) {
+            if let Some(&first_selected) = selection.first() {
+                self.on_sub_tree_selected(first_selected, ui)
+            } else {
+                self.on_selection_cleared(ui)
+            }
+        } else if let Some(ButtonMessage::Click) = message.data_from(self.desktop_dir) {
+            self.on_desktop_dir_clicked(ui)
+        } else if let Some(ButtonMessage::Click) = message.data_from(self.home_dir) {
+            self.on_home_dir_clicked(ui)
+        } else if let Some(TreeRootMessage::ItemsChanged) = message.data_from(self.tree_root) {
+            self.on_items_changed(ui)
+        } else if let Some(WidgetMessage::MouseDown { .. }) = message.data() {
+            if self.root.is_some() && !message.handled() {
+                ui.send(self.tree_root, TreeRootMessage::Select(vec![]));
+                message.set_handled(true);
+            }
+        }
+    }
+
+    fn accepts_drop(&self, widget: Handle<UiNode>, ui: &UserInterface) -> bool {
+        ui.node(widget)
+            .user_data
+            .as_ref()
+            .is_some_and(|data| data.safe_lock().downcast_ref::<TreeItemPath>().is_some())
     }
 }
 
 pub struct FileBrowserBuilder {
     widget_builder: WidgetBuilder,
     path: PathBuf,
-    filter: Option<Filter>,
+    filter: PathFilter,
     root: Option<PathBuf>,
-    mode: FileBrowserMode,
     show_path: bool,
+    no_items_text: String,
 }
 
 impl FileBrowserBuilder {
@@ -920,30 +577,25 @@ impl FileBrowserBuilder {
         Self {
             widget_builder,
             path: "./".into(),
-            filter: None,
+            filter: Default::default(),
             root: None,
-            mode: FileBrowserMode::Open,
             show_path: true,
+            no_items_text: "This folder is empty".to_string(),
         }
     }
 
-    pub fn with_filter(mut self, filter: Filter) -> Self {
-        self.filter = Some(filter);
-        self
-    }
-
-    pub fn with_opt_filter(mut self, filter: Option<Filter>) -> Self {
+    pub fn with_filter(mut self, filter: PathFilter) -> Self {
         self.filter = filter;
-        self
-    }
-
-    pub fn with_mode(mut self, mode: FileBrowserMode) -> Self {
-        self.mode = mode;
         self
     }
 
     pub fn with_show_path(mut self, show_path: bool) -> Self {
         self.show_path = show_path;
+        self
+    }
+
+    pub fn with_no_items_text(mut self, no_items_text: impl AsRef<str>) -> Self {
+        self.no_items_text = no_items_text.as_ref().to_string();
         self
     }
 
@@ -953,7 +605,7 @@ impl FileBrowserBuilder {
     ///
     /// It does **not** bring tree item with given path into view because it is impossible
     /// during construction stage - there is not enough layout information to do so. You
-    /// can send FileBrowserMessage::Path right after creation and it will bring tree item
+    /// can send FileBrowserMessage::Path right after creation, and it will bring tree item
     /// into view without any problems. It is possible because all widgets were created at
     /// that moment and layout system can give correct offsets to bring item into view.
     pub fn with_path<P: AsRef<Path>>(mut self, path: P) -> Self {
@@ -971,36 +623,36 @@ impl FileBrowserBuilder {
         self
     }
 
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<FileBrowser> {
         let item_context_menu = RcUiNodeHandle::new(ItemContextMenu::build(ctx), ctx.sender());
 
-        let BuildResult {
-            root_items: items, ..
-        } = build_all(
+        let fs_tree::FsTree {
+            root_items: items,
+            items_count,
+            sanitized_root,
+            ..
+        } = fs_tree::FsTree::new_or_empty(
             self.root.as_ref(),
             self.path.as_path(),
-            self.filter.clone(),
+            &self.filter,
             item_context_menu.clone(),
             ctx,
         );
 
+        let root_path = sanitized_root.map(TreeItemPath::root);
+
         let path_text;
         let tree_root;
-        let scroll_viewer = ScrollViewerBuilder::new(
-            WidgetBuilder::new()
-                .on_row(match self.mode {
-                    FileBrowserMode::Open => 1,
-                    FileBrowserMode::Save { .. } => 2,
-                })
-                .on_column(0),
-        )
-        .with_content({
-            tree_root = TreeRootBuilder::new(WidgetBuilder::new())
+        let scroll_viewer = ScrollViewerBuilder::new(WidgetBuilder::new().on_row(1).on_column(0))
+            .with_content({
+                tree_root = TreeRootBuilder::new(
+                    WidgetBuilder::new().with_user_data_value_opt(root_path.clone()),
+                )
                 .with_items(items)
                 .build(ctx);
-            tree_root
-        })
-        .build(ctx);
+                tree_root
+            })
+            .build(ctx);
 
         let home_dir;
         let desktop_dir;
@@ -1014,6 +666,7 @@ impl FileBrowserBuilder {
                             .with_child({
                                 home_dir = ButtonBuilder::new(
                                     WidgetBuilder::new()
+                                        .with_visibility(self.root.is_none())
                                         .on_column(0)
                                         .with_width(24.0)
                                         .with_tooltip(make_simple_tooltip(ctx, "Home Folder"))
@@ -1026,6 +679,7 @@ impl FileBrowserBuilder {
                             .with_child({
                                 desktop_dir = ButtonBuilder::new(
                                     WidgetBuilder::new()
+                                        .with_visibility(self.root.is_none())
                                         .on_column(1)
                                         .with_width(24.0)
                                         .with_tooltip(make_simple_tooltip(ctx, "Desktop Folder"))
@@ -1038,15 +692,19 @@ impl FileBrowserBuilder {
                             .with_child({
                                 path_text = TextBoxBuilder::new(
                                     WidgetBuilder::new()
-                                        // Disable path if we're in Save mode
-                                        .with_enabled(matches!(self.mode, FileBrowserMode::Open))
                                         .on_row(0)
                                         .on_column(2)
                                         .with_margin(Thickness::uniform(2.0)),
                                 )
+                                .with_editable(false)
                                 .with_text_commit_mode(TextCommitMode::Immediate)
                                 .with_vertical_text_alignment(VerticalAlignment::Center)
-                                .with_text(self.path.to_string_lossy().as_ref())
+                                .with_text(
+                                    fs_tree::sanitize_path(&self.path)
+                                        .ok()
+                                        .map(|p| p.to_string_lossy().to_string())
+                                        .unwrap_or_default(),
+                                )
                                 .build(ctx);
                                 path_text
                             }),
@@ -1060,179 +718,119 @@ impl FileBrowserBuilder {
                 .with_child(scroll_viewer),
         )
         .add_column(Column::stretch())
-        .add_rows(match self.mode {
-            FileBrowserMode::Open => {
-                vec![Row::auto(), Row::stretch()]
-            }
-            FileBrowserMode::Save { .. } => {
-                vec![Row::auto(), Row::strict(24.0), Row::stretch()]
-            }
-        })
+        .add_rows(vec![Row::auto(), Row::stretch()])
         .build(ctx);
 
-        let file_name = match self.mode {
-            FileBrowserMode::Save {
-                ref default_file_name,
-            } => {
-                let file_name;
-                let name_grid = GridBuilder::new(
-                    WidgetBuilder::new()
-                        .on_row(1)
-                        .on_column(0)
-                        .with_child(
-                            TextBuilder::new(
-                                WidgetBuilder::new()
-                                    .on_row(0)
-                                    .on_column(0)
-                                    .with_vertical_alignment(VerticalAlignment::Center),
-                            )
-                            .with_text("File Name:")
-                            .build(ctx),
-                        )
-                        .with_child({
-                            file_name = TextBoxBuilder::new(
-                                WidgetBuilder::new()
-                                    .on_row(0)
-                                    .on_column(1)
-                                    .with_margin(Thickness::uniform(2.0)),
-                            )
-                            .with_text_commit_mode(TextCommitMode::Immediate)
-                            .with_vertical_text_alignment(VerticalAlignment::Center)
-                            .with_text(default_file_name.to_string_lossy())
-                            .build(ctx);
-                            file_name
-                        }),
-                )
-                .add_row(Row::stretch())
-                .add_column(Column::strict(80.0))
-                .add_column(Column::stretch())
-                .build(ctx);
+        let no_items_message = TextBuilder::new(
+            WidgetBuilder::new()
+                .with_foreground(ctx.style.property(Style::BRUSH_BRIGHT))
+                .with_visibility(items_count == 0)
+                .with_hit_test_visibility(false),
+        )
+        .with_wrap(WrapMode::Word)
+        .with_vertical_text_alignment(VerticalAlignment::Center)
+        .with_horizontal_text_alignment(HorizontalAlignment::Center)
+        .with_text(self.no_items_text)
+        .build(ctx);
 
-                ctx.link(name_grid, grid);
-
-                file_name
-            }
-            FileBrowserMode::Open => Default::default(),
-        };
+        let root_container = GridBuilder::new(
+            WidgetBuilder::new()
+                .with_child(grid)
+                .with_child(no_items_message),
+        )
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .build(ctx);
 
         let widget = self
             .widget_builder
+            .with_user_data_value_opt(root_path)
+            .with_context_menu(item_context_menu.clone())
             .with_need_update(true)
-            .with_child(grid)
+            .with_child(root_container)
             .build(ctx);
 
         let the_path = match &self.root {
             Some(path) => path.clone(),
             _ => self.path.clone(),
         };
-        let (fs_sender, fs_receiver) = mpsc::channel();
         let browser = FileBrowser {
-            fs_receiver: Some(fs_receiver),
             widget,
             tree_root,
             home_dir,
             desktop_dir,
             path_text,
-            path: match self.mode {
-                FileBrowserMode::Open => self.path,
-                FileBrowserMode::Save {
-                    ref default_file_name,
-                } => self.path.join(default_file_name),
-            },
-            file_name_value: match self.mode {
-                FileBrowserMode::Open => Default::default(),
-                FileBrowserMode::Save {
-                    ref default_file_name,
-                } => default_file_name.clone(),
-            },
+            path: self.path,
             filter: self.filter,
-            mode: self.mode,
             scroll_viewer,
             root: self.root,
-            file_name,
-            watcher: setup_filebrowser_fs_watcher(fs_sender, the_path),
+            watcher: None,
             item_context_menu,
+            no_items_message,
+            fs_events: Default::default(),
         };
-        ctx.add_node(UiNode::new(browser))
+        let file_browser_handle = ctx.add(browser);
+        let sender = ctx.sender();
+        ctx[file_browser_handle].watcher =
+            setup_file_browser_fs_watcher(sender, file_browser_handle, the_path);
+        file_browser_handle
     }
 }
 
-fn setup_filebrowser_fs_watcher(
-    fs_sender: mpsc::Sender<notify::Event>,
+struct EventReceiver {
+    file_browser_handle: Handle<FileBrowser>,
+    sender: Sender<UiMessage>,
+}
+
+impl EventReceiver {
+    fn send(&self, message: impl MessageData) {
+        Log::verify(
+            self.sender
+                .send(UiMessage::for_widget(self.file_browser_handle, message)),
+        )
+    }
+}
+
+impl notify::EventHandler for EventReceiver {
+    fn handle_event(&mut self, event: notify::Result<Event>) {
+        let event = ok_or_return!(event);
+
+        if event.need_rescan() {
+            self.send(FileBrowserMessage::Rescan);
+            return;
+        }
+
+        for path in event.paths.iter() {
+            let path = ok_or_continue!(std::path::absolute(path));
+
+            match event.kind {
+                notify::EventKind::Remove(_) => {
+                    self.send(FsEventMessage::Remove(path.clone()));
+                }
+                notify::EventKind::Create(_) => {
+                    self.send(FsEventMessage::Add(path.clone()));
+                }
+                _ => (),
+            }
+        }
+    }
+}
+
+fn setup_file_browser_fs_watcher(
+    sender: Sender<UiMessage>,
+    file_browser_handle: Handle<FileBrowser>,
     the_path: PathBuf,
-) -> Option<(notify::RecommendedWatcher, thread::JoinHandle<()>)> {
-    let (tx, rx) = mpsc::channel();
-    match notify::RecommendedWatcher::new(
-        tx,
-        notify::Config::default().with_poll_interval(time::Duration::from_secs(1)),
-    ) {
+) -> Option<notify::RecommendedWatcher> {
+    let handler = EventReceiver {
+        file_browser_handle,
+        sender,
+    };
+    let config = notify::Config::default().with_poll_interval(time::Duration::from_secs(1));
+    match notify::RecommendedWatcher::new(handler, config) {
         Ok(mut watcher) => {
-            #[allow(clippy::while_let_loop)]
-            let watcher_conversion_thread = std::thread::spawn(move || loop {
-                match rx.recv() {
-                    Ok(event) => {
-                        if let Ok(event) = event {
-                            let _ = fs_sender.send(event);
-                        }
-                    }
-                    Err(_) => {
-                        break;
-                    }
-                };
-            });
-            let _ = watcher.watch(&the_path, notify::RecursiveMode::Recursive);
-            Some((watcher, watcher_conversion_thread))
+            Log::verify(watcher.watch(&the_path, notify::RecursiveMode::Recursive));
+            Some(watcher)
         }
         Err(_) => None,
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::file_browser::FileBrowserBuilder;
-    use crate::test::test_widget_deletion;
-    use crate::{
-        core::pool::Handle,
-        file_browser::{build_tree, find_tree},
-        tree::TreeRootBuilder,
-        widget::WidgetBuilder,
-        RcUiNodeHandle, UserInterface,
-    };
-    use fyrox_core::algebra::Vector2;
-    use fyrox_core::parking_lot::Mutex;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    #[test]
-    fn test_deletion() {
-        test_widget_deletion(|ctx| FileBrowserBuilder::new(WidgetBuilder::new()).build(ctx));
-    }
-
-    #[test]
-    fn test_find_tree() {
-        let mut ui = UserInterface::new(Vector2::new(100.0, 100.0));
-
-        let root = TreeRootBuilder::new(
-            WidgetBuilder::new().with_user_data(Arc::new(Mutex::new(PathBuf::from("test")))),
-        )
-        .build(&mut ui.build_ctx());
-
-        let path = build_tree(
-            root,
-            true,
-            "./test/path1",
-            "./test",
-            RcUiNodeHandle::new(Handle::new(0, 1), ui.sender()),
-            &mut ui,
-        );
-
-        while ui.poll_message().is_some() {}
-
-        // This passes.
-        assert_eq!(find_tree(root, &"./test/path1", &ui), path);
-
-        // This expected to fail
-        // https://github.com/rust-lang/rust/issues/31374
-        assert_eq!(find_tree(root, &"test/path1", &ui), Handle::NONE);
     }
 }

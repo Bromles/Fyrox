@@ -18,17 +18,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Rect editor widget is used to show and edit [`Rect`] values. It shows four numeric fields: two for top left corner
+//! Rect editor widget is used to show and edit [`Rect`] values. It shows four numeric fields: two for the top left corner
 //! of a rect, two for its size. See [`RectEditor`] docs for more info and usage examples.
 
 #![warn(missing_docs)]
 
 use crate::{
-    core::{
-        algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, type_traits::prelude::*,
-        visitor::prelude::*,
-    },
-    define_constructor,
+    core::{algebra::Vector2, math::Rect, pool::Handle, reflect::prelude::*, visitor::prelude::*},
     grid::{Column, GridBuilder, Row},
     message::{MessageDirection, UiMessage},
     numeric::NumericType,
@@ -38,6 +34,9 @@ use crate::{
     BuildContext, Control, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 
+use crate::grid::Grid;
+use crate::message::MessageData;
+use crate::vec::VecEditor;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::{
@@ -54,15 +53,9 @@ where
     /// A message, that can be used to either modify or fetch the current value of a [`RectEditor`] widget.
     Value(Rect<T>),
 }
+impl<T: NumericType> MessageData for RectEditorMessage<T> {}
 
-impl<T: NumericType> RectEditorMessage<T> {
-    define_constructor!(
-        /// Creates [`RectEditorMessage::Value`] message.
-        RectEditorMessage:Value => fn value(Rect<T>), layout: false
-    );
-}
-
-/// Rect editor widget is used to show and edit [`Rect`] values. It shows four numeric fields: two for top left corner
+/// Rect editor widget is used to show and edit [`Rect`] values. It shows four numeric fields: two for the top left corner
 /// of a rect, two for its size.
 ///
 /// ## Example
@@ -76,8 +69,9 @@ impl<T: NumericType> RectEditorMessage<T> {
 /// #     widget::WidgetBuilder,
 /// #     BuildContext, UiNode,
 /// # };
+/// # use fyrox_ui::rect::RectEditor;
 /// #
-/// fn create_rect_editor(ctx: &mut BuildContext) -> Handle<UiNode> {
+/// fn create_rect_editor(ctx: &mut BuildContext) -> Handle<RectEditor<u32>> {
 ///     RectEditorBuilder::new(WidgetBuilder::new())
 ///         .with_value(Rect::new(0, 0, 10, 20))
 ///         .build(ctx)
@@ -97,11 +91,7 @@ impl<T: NumericType> RectEditorMessage<T> {
 /// # };
 /// #
 /// fn change_value(rect_editor: Handle<UiNode>, ui: &UserInterface) {
-///     ui.send_message(RectEditorMessage::value(
-///         rect_editor,
-///         MessageDirection::ToWidget,
-///         Rect::new(20, 20, 60, 80),
-///     ));
+///     ui.send(rect_editor, RectEditorMessage::Value(Rect::new(20, 20, 60, 80)));
 /// }
 /// ```
 ///
@@ -125,8 +115,11 @@ impl<T: NumericType> RectEditorMessage<T> {
 ///     }
 /// }
 /// ```
-#[derive(Default, Debug, Clone, Visit, Reflect, ComponentProvider)]
-#[reflect(derived_type = "UiNode")]
+#[derive(Default, Debug, Clone, Visit, Reflect)]
+#[reflect(
+    derived_type = "UiNode",
+    type_uuid = "5a3daf9d-f33b-494b-b111-eb55721dc7ac"
+)]
 pub struct RectEditor<T>
 where
     T: NumericType,
@@ -134,9 +127,9 @@ where
     /// Base widget of the rect editor.
     pub widget: Widget,
     /// A handle to a widget, that is used to show/edit position part of the rect.
-    pub position: InheritableVariable<Handle<UiNode>>,
+    pub position: InheritableVariable<Handle<VecEditor<T, 2>>>,
     /// A handle to a widget, that is used to show/edit size part of the rect.
-    pub size: InheritableVariable<Handle<UiNode>>,
+    pub size: InheritableVariable<Handle<VecEditor<T, 2>>>,
     /// Current value of the rect editor.
     pub value: InheritableVariable<Rect<T>>,
 }
@@ -149,6 +142,7 @@ impl<T: NumericType> ConstructorProvider<UiNode, UserInterface> for RectEditor<T
                 |ui| {
                     RectEditorBuilder::<T>::new(WidgetBuilder::new())
                         .build(&mut ui.build_ctx())
+                        .to_base()
                         .into()
                 },
             )
@@ -176,18 +170,6 @@ where
     }
 }
 
-impl<T> TypeUuidProvider for RectEditor<T>
-where
-    T: NumericType,
-{
-    fn type_uuid() -> Uuid {
-        combine_uuids(
-            uuid!("5a3daf9d-f33b-494b-b111-eb55721dc7ac"),
-            T::type_uuid(),
-        )
-    }
-}
-
 impl<T> Control for RectEditor<T>
 where
     T: NumericType,
@@ -195,14 +177,12 @@ where
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(RectEditorMessage::Value(value)) = message.data::<RectEditorMessage<T>>() {
-            if message.destination() == self.handle
-                && message.direction() == MessageDirection::ToWidget
-                && *value != *self.value
-            {
+        if let Some(RectEditorMessage::Value(value)) =
+            message.data_for::<RectEditorMessage<T>>(self.handle)
+        {
+            if *value != *self.value {
                 self.value.set_value_and_mark_modified(*value);
-
-                ui.send_message(message.reverse());
+                ui.try_send_response(message);
             }
         } else if let Some(VecEditorMessage::Value(value)) =
             message.data::<VecEditorMessage<T, 2>>()
@@ -210,23 +190,26 @@ where
             if message.direction() == MessageDirection::FromWidget {
                 if message.destination() == *self.position {
                     if self.value.position != *value {
-                        ui.send_message(RectEditorMessage::value(
+                        ui.send(
                             self.handle,
-                            MessageDirection::ToWidget,
-                            Rect::new(value.x, value.y, self.value.size.x, self.value.size.y),
-                        ));
+                            RectEditorMessage::Value(Rect::new(
+                                value.x,
+                                value.y,
+                                self.value.size.x,
+                                self.value.size.y,
+                            )),
+                        );
                     }
                 } else if message.destination() == *self.size && self.value.size != *value {
-                    ui.send_message(RectEditorMessage::value(
+                    ui.send(
                         self.handle,
-                        MessageDirection::ToWidget,
-                        Rect::new(
+                        RectEditorMessage::Value(Rect::new(
                             self.value.position.x,
                             self.value.position.y,
                             value.x,
                             value.y,
-                        ),
-                    ));
+                        )),
+                    );
                 }
             }
         }
@@ -247,7 +230,7 @@ fn create_field<T: NumericType>(
     name: &str,
     value: Vector2<T>,
     row: usize,
-) -> (Handle<UiNode>, Handle<UiNode>) {
+) -> (Handle<Grid>, Handle<VecEditor<T, 2>>) {
     let editor;
     let grid = GridBuilder::new(
         WidgetBuilder::new()
@@ -292,7 +275,7 @@ where
     }
 
     /// Finished rect editor widget building and adds it to the user interface.
-    pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    pub fn build(self, ctx: &mut BuildContext) -> Handle<RectEditor<T>> {
         let (position_grid, position) = create_field(ctx, "Position", self.value.position, 0);
         let (size_grid, size) = create_field(ctx, "Size", self.value.size, 1);
         let node = RectEditor {
@@ -315,7 +298,7 @@ where
             size: size.into(),
         };
 
-        ctx.add_node(UiNode::new(node))
+        ctx.add(node)
     }
 }
 

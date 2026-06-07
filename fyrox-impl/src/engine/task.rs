@@ -20,6 +20,7 @@
 
 //! Asynchronous task handler. See [`TaskPoolHandler`] for more info and usage examples.
 
+use crate::plugin::error::GameResult;
 use crate::plugin::PluginContainer;
 use crate::{
     core::{
@@ -35,19 +36,19 @@ use fxhash::FxHashMap;
 use std::sync::Arc;
 
 pub(crate) type NodeTaskHandlerClosure = Box<
-    dyn for<'a, 'b, 'c> Fn(
+    dyn for<'a, 'b, 'c> FnOnce(
         Box<dyn AsyncTaskResult>,
         &mut dyn ScriptTrait,
         &mut ScriptContext<'a, 'b, 'c>,
-    ),
+    ) -> GameResult,
 >;
 
 pub(crate) type PluginTaskHandler = Box<
-    dyn for<'a, 'b> Fn(
+    dyn for<'a, 'b> FnOnce(
         Box<dyn AsyncTaskResult>,
         &'a mut [PluginContainer],
         &mut PluginContext<'a, 'b>,
-    ),
+    ) -> GameResult,
 >;
 
 pub(crate) struct NodeTaskHandler {
@@ -97,13 +98,13 @@ impl TaskPoolHandler {
     /// ## Example
     ///
     /// ```rust ,no_run
-    /// # use fyrox_impl::plugin::{Plugin, PluginContext};
+    /// # use fyrox_impl::plugin::{Plugin, PluginContext, error::GameResult};
     /// # use fyrox_impl::core::visitor::prelude::*;
     /// # use fyrox_impl::core::reflect::prelude::*;
     /// # use std::{fs::File, io::Read};
     ///
     /// #[derive(Visit, Reflect, Debug)]
-    /// #[reflect(non_cloneable)]
+    /// #[reflect(non_cloneable, type_uuid = "a7ba17c1-6104-4938-9ba7-ba479acf716a")]
     /// struct MyGame {
     ///     data: Option<Vec<u8>>,
     /// }
@@ -124,6 +125,7 @@ impl TaskPoolHandler {
     ///             |data, game: &mut MyGame, _context| {
     ///                 // Store the data in the game instance.
     ///                 game.data = Some(data);
+    ///                 Ok(())
     ///             },
     ///         );
     ///
@@ -133,11 +135,12 @@ impl TaskPoolHandler {
     /// }
     ///
     /// impl Plugin for MyGame {
-    ///     fn update(&mut self, _context: &mut PluginContext) {
+    ///     fn update(&mut self, _context: &mut PluginContext) -> GameResult {
     ///         // Do something with the data.
     ///         if let Some(data) = self.data.take() {
     ///             println!("The data is: {:?}", data);
     ///         }
+    ///         Ok(())
     ///     }
     /// }
     /// ```
@@ -147,7 +150,7 @@ impl TaskPoolHandler {
         F: AsyncTask<T>,
         T: AsyncTaskResult,
         P: Plugin,
-        for<'a, 'b> C: Fn(T, &mut P, &mut PluginContext<'a, 'b>) + 'static,
+        for<'a, 'b> C: FnOnce(T, &mut P, &mut PluginContext<'a, 'b>) -> GameResult + 'static,
     {
         let task_id = self.task_pool.spawn_with_result(future);
         self.plugin_task_handlers.insert(
@@ -171,20 +174,19 @@ impl TaskPoolHandler {
     ///
     /// ```rust ,no_run
     /// # use fyrox_impl::{
-    /// #     core::{reflect::prelude::*, uuid::Uuid, visitor::prelude::*, impl_component_provider},
+    /// #     core::{reflect::prelude::*, uuid::Uuid, visitor::prelude::*},
     /// #     resource::model::{Model, ModelResourceExtension},
     /// #     script::{ScriptContext, ScriptTrait},
     /// # };
-    /// # use fyrox_core::uuid_provider;
+    /// #
+    /// # use fyrox_impl::plugin::error::GameResult;
     /// #
     /// #[derive(Reflect, Visit, Default, Debug, Clone)]
+    /// #[reflect(type_uuid = "f5ded79e-6101-4e23-b20d-48cbdb25d87a")]
     /// struct MyScript;
     ///
-    /// # impl_component_provider!(MyScript);
-    /// # uuid_provider!(MyScript = "f5ded79e-6101-4e23-b20d-48cbdb25d87a");
-    ///
     /// impl ScriptTrait for MyScript {
-    ///     fn on_start(&mut self, ctx: &mut ScriptContext) {
+    ///     fn on_start(&mut self, ctx: &mut ScriptContext) -> GameResult {
     ///         ctx.task_pool.spawn_script_task(
     ///             ctx.scene_handle,
     ///             ctx.handle,
@@ -199,11 +201,11 @@ impl TaskPoolHandler {
     ///             // This closure will executed only when the upper future is done and only on the next
     ///             // update iteration.
     ///             |result, script: &mut MyScript, ctx| {
-    ///                 if let Ok(model) = result {
-    ///                     model.instantiate(&mut ctx.scene);
-    ///                 }
+    ///                 result?.instantiate(&mut ctx.scene);
+    ///                 Ok(())
     ///             },
     ///         );
+    ///         Ok(())
     ///     }
     /// }
     /// ```
@@ -218,7 +220,8 @@ impl TaskPoolHandler {
     ) where
         F: AsyncTask<T>,
         T: AsyncTaskResult,
-        for<'a, 'b, 'c> C: Fn(T, &mut S, &mut ScriptContext<'a, 'b, 'c>) + 'static,
+        for<'a, 'b, 'c> C:
+            FnOnce(T, &mut S, &mut ScriptContext<'a, 'b, 'c>) -> GameResult + 'static,
         S: ScriptTrait,
     {
         let task_id = self.task_pool.spawn_with_result(future);
@@ -234,7 +237,7 @@ impl TaskPoolHandler {
                         .downcast_mut::<S>()
                         .expect("Types must match");
                     let result = result.downcast::<T>().expect("Types must match");
-                    on_complete(*result, script, context);
+                    on_complete(*result, script, context)
                 }),
             },
         );

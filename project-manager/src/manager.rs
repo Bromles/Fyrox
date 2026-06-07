@@ -25,32 +25,43 @@ use crate::{
     utils::{self, is_production_ready},
 };
 use fyrox::{
-    core::{color::Color, log::Log, pool::Handle, some_or_return},
+    core::{
+        color::Color,
+        log::Log,
+        pool::{Handle, HandlesVecExtension},
+        some_or_return,
+    },
+    event_loop::ActiveEventLoop,
     gui::{
         border::BorderBuilder,
         brush::Brush,
-        button::{ButtonBuilder, ButtonMessage},
-        check_box::{CheckBoxBuilder, CheckBoxMessage},
-        decorator::DecoratorBuilder,
-        file_browser::{FileBrowserMode, FileSelectorBuilder, FileSelectorMessage, Filter},
+        button::{Button, ButtonBuilder, ButtonMessage},
+        check_box::{CheckBox, CheckBoxBuilder, CheckBoxMessage},
+        decorator::{Decorator, DecoratorBuilder},
+        file_browser::{
+            FileSelector, FileSelectorBuilder, FileSelectorMessage, FileSelectorMode, PathFilter,
+        },
         formatted_text::WrapMode,
-        grid::{Column, GridBuilder, Row},
+        grid::{Column, Grid, GridBuilder, Row},
         image::ImageBuilder,
-        list_view::{ListViewBuilder, ListViewMessage},
+        list_view::{ListView, ListViewBuilder, ListViewMessage},
         log::LogPanel,
-        message::{KeyCode, MessageDirection, UiMessage},
-        messagebox::{MessageBoxBuilder, MessageBoxButtons, MessageBoxMessage, MessageBoxResult},
+        message::{KeyCode, UiMessage},
+        messagebox::{
+            MessageBox, MessageBoxBuilder, MessageBoxButtons, MessageBoxMessage, MessageBoxResult,
+        },
         navigation::NavigationLayerBuilder,
-        searchbar::{SearchBarBuilder, SearchBarMessage},
-        stack_panel::StackPanelBuilder,
+        searchbar::{SearchBar, SearchBarBuilder, SearchBarMessage},
+        stack_panel::{StackPanel, StackPanelBuilder},
         style::{resource::StyleResourceExt, Style},
-        text::{TextBuilder, TextMessage},
+        text::{Text, TextBuilder, TextMessage},
+        text_box::EmptyTextPlaceholder,
         utils::{
-            load_image, make_image_button_with_tooltip, make_simple_tooltip,
-            make_text_and_image_button_with_tooltip,
+            load_image, make_simple_tooltip, make_text_and_image_button_with_tooltip,
+            ImageButtonBuilder,
         },
         widget::{WidgetBuilder, WidgetMessage},
-        window::{WindowBuilder, WindowMessage, WindowTitle},
+        window::{WindowAlignment, WindowBuilder, WindowMessage, WindowTitle},
         BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
         VerticalAlignment,
     },
@@ -60,6 +71,7 @@ use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::mpsc::{channel, Receiver, Sender},
 };
 
 pub enum Mode {
@@ -89,7 +101,7 @@ impl Default for UpdateLoopState {
 impl UpdateLoopState {
     pub fn request_update_in_next_frame(&mut self) {
         if !self.is_warming_up() {
-            self.0 = 2;
+            self.0 = 3;
         }
     }
 
@@ -112,41 +124,50 @@ impl UpdateLoopState {
     }
 }
 
+pub struct ProjectSize {
+    widget_handle: Handle<Text>,
+    size: u64,
+}
+
 pub struct ProjectManager {
-    pub root_grid: Handle<UiNode>,
-    create: Handle<UiNode>,
-    import: Handle<UiNode>,
-    projects: Handle<UiNode>,
-    edit: Handle<UiNode>,
-    run: Handle<UiNode>,
-    delete: Handle<UiNode>,
-    search_bar: Handle<UiNode>,
-    project_controls: Handle<UiNode>,
-    hot_reload: Handle<UiNode>,
-    download: Handle<UiNode>,
+    pub root_grid: Handle<Grid>,
+    create: Handle<Button>,
+    import: Handle<Button>,
+    projects: Handle<ListView>,
+    edit: Handle<Button>,
+    run: Handle<Button>,
+    delete: Handle<Button>,
+    search_bar: Handle<SearchBar>,
+    project_controls: Handle<StackPanel>,
+    hot_reload: Handle<CheckBox>,
+    download: Handle<Button>,
+    donate: Handle<Button>,
     selection: Option<usize>,
     pub settings: Settings,
     project_wizard: Option<ProjectWizard>,
     build_window: Option<BuildWindow>,
-    import_project_dialog: Handle<UiNode>,
+    import_project_dialog: Handle<FileSelector>,
     pub mode: Mode,
     search_text: String,
     log: LogPanel,
-    open_log: Handle<UiNode>,
-    message_count: Handle<UiNode>,
-    deletion_confirmation_dialog: Handle<UiNode>,
-    upgrade: Handle<UiNode>,
-    locate: Handle<UiNode>,
-    open_settings: Handle<UiNode>,
-    open_help: Handle<UiNode>,
-    open_ide: Handle<UiNode>,
+    open_log: Handle<Button>,
+    message_count: Handle<Text>,
+    deletion_confirmation_dialog: Handle<MessageBox>,
+    upgrade: Handle<Button>,
+    locate: Handle<Button>,
+    open_settings: Handle<Button>,
+    open_help: Handle<Button>,
+    open_ide: Handle<Button>,
     upgrade_tool: Option<UpgradeTool>,
     settings_window: Option<SettingsWindow>,
-    no_projects_warning: Handle<UiNode>,
-    exclude_project: Handle<UiNode>,
-    clean_project: Handle<UiNode>,
+    no_projects_warning: Handle<Text>,
+    exclude_project: Handle<Button>,
+    clean_project: Handle<Button>,
+    project_size_receiver: Receiver<ProjectSize>,
+    project_size_sender: Sender<ProjectSize>,
     pub focused: bool,
     pub update_loop_state: UpdateLoopState,
+    pub exit_confirmation_dialog: Handle<MessageBox>,
 }
 
 fn make_project_item(
@@ -155,8 +176,9 @@ fn make_project_item(
     hot_reload: bool,
     visible: bool,
     engine_version: &str,
+    project_size_sender: Sender<ProjectSize>,
     ctx: &mut BuildContext,
-) -> Handle<UiNode> {
+) -> Handle<Decorator> {
     let icon = ImageBuilder::new(
         WidgetBuilder::new()
             .with_margin(Thickness::uniform(4.0))
@@ -191,13 +213,6 @@ fn make_project_item(
     .with_text(engine_version)
     .build(ctx);
 
-    let project_size = if let Some(project_dir) = Path::new(path).parent() {
-        let size = utils::calculate_directory_size(project_dir);
-        utils::format_size(size)
-    } else {
-        String::from("N/A")
-    };
-
     let size_text = TextBuilder::new(
         WidgetBuilder::new()
             .with_foreground(ctx.style.property(Style::BRUSH_BRIGHTEST))
@@ -209,8 +224,18 @@ fn make_project_item(
             }),
     )
     .with_font_size(13.0.into())
-    .with_text(format!("Size: {}", project_size))
+    .with_text("Size: N/A")
     .build(ctx);
+
+    if let Some(project_dir) = Path::new(path).parent().map(|p| p.to_path_buf()) {
+        std::thread::spawn(move || {
+            let size = utils::calculate_directory_size(&project_dir);
+            project_size_sender.send(ProjectSize {
+                widget_handle: size_text,
+                size,
+            })
+        });
+    }
 
     let info = StackPanelBuilder::new(
         WidgetBuilder::new()
@@ -278,8 +303,9 @@ fn make_project_item(
 fn make_project_items(
     settings: &Settings,
     search_text: &str,
+    project_size_sender: &Sender<ProjectSize>,
     ctx: &mut BuildContext,
-) -> Vec<Handle<UiNode>> {
+) -> Vec<Handle<Decorator>> {
     settings
         .projects
         .iter()
@@ -301,6 +327,7 @@ fn make_project_items(
                 project.hot_reload,
                 visible,
                 &engine_version,
+                project_size_sender.clone(),
                 ctx,
             )
         })
@@ -340,7 +367,8 @@ impl ProjectManager {
                     )
                     .with_text(
                         "Rust is not installed, please click the button at the right \
-                        and follow build instructions for your platform.",
+                        and follow build instructions for your platform. Also make sure that cargo \
+                        is added to PATH environment variable!",
                     )
                     .with_font_size(18.0.into())
                     .with_wrap(WrapMode::Word)
@@ -389,68 +417,67 @@ impl ProjectManager {
             WidgetBuilder::new()
                 .on_column(2)
                 .with_tab_index(Some(2))
-                .with_margin(Thickness::uniform(1.0))
-                .with_height(25.0),
+                .with_margin(Thickness::uniform(1.0)),
         )
+        .with_empty_text_placeholder(EmptyTextPlaceholder::Text("Search for a project"))
         .build(ctx);
-        let open_settings = make_image_button_with_tooltip(
-            ctx,
-            18.0,
-            18.0,
-            load_image(include_bytes!("../resources/gear.png")),
-            "Settings\nHotkey: Ctrl+S",
-            Some(7),
-        );
+        let open_settings = ImageButtonBuilder::default()
+            .with_image(load_image(include_bytes!("../resources/gear.png")))
+            .with_image_size(18.0)
+            .with_tooltip("Settings\nHotkey: Ctrl+S")
+            .with_tab_index(Some(7))
+            .build_button(ctx);
         ctx[open_settings].set_column(3);
 
-        let open_help = make_image_button_with_tooltip(
-            ctx,
-            18.0,
-            18.0,
-            load_image(include_bytes!("../resources/question.png")),
-            "Help\nHotkey: F1",
-            Some(8),
-        );
+        let open_help = ImageButtonBuilder::default()
+            .with_image(load_image(include_bytes!("../resources/question.png")))
+            .with_image_size(18.0)
+            .with_tooltip("Help\nHotkey: F1")
+            .with_tab_index(Some(8))
+            .build_button(ctx);
         ctx[open_help].set_column(4);
 
         let message_count;
-        let open_log = ButtonBuilder::new(WidgetBuilder::new().on_column(4).with_visibility(false))
-            .with_content(
-                GridBuilder::new(
-                    WidgetBuilder::new()
-                        .with_vertical_alignment(VerticalAlignment::Center)
-                        .with_child(
-                            ImageBuilder::new(
-                                WidgetBuilder::new()
-                                    .with_margin(Thickness::uniform(1.0))
-                                    .with_width(18.0)
-                                    .with_height(18.0)
-                                    .on_column(0),
-                            )
-                            .with_opt_texture(load_image(include_bytes!(
-                                "../resources/caution.png"
-                            )))
-                            .build(ctx),
+        let open_log = ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(1.0))
+                .on_column(5)
+                .with_visibility(false),
+        )
+        .with_content(
+            GridBuilder::new(
+                WidgetBuilder::new()
+                    .with_vertical_alignment(VerticalAlignment::Center)
+                    .with_child(
+                        ImageBuilder::new(
+                            WidgetBuilder::new()
+                                .with_margin(Thickness::uniform(1.0))
+                                .with_width(18.0)
+                                .with_height(18.0)
+                                .on_column(0),
                         )
-                        .with_child({
-                            message_count = TextBuilder::new(
-                                WidgetBuilder::new()
-                                    .on_column(1)
-                                    .with_margin(Thickness::uniform(1.0))
-                                    .with_vertical_alignment(VerticalAlignment::Center)
-                                    .with_foreground(Brush::Solid(Color::GOLD).into()),
-                            )
-                            .with_text("0")
-                            .build(ctx);
-                            message_count
-                        }),
-                )
-                .add_column(Column::auto())
-                .add_column(Column::auto())
-                .add_row(Row::auto())
-                .build(ctx),
+                        .with_opt_texture(load_image(include_bytes!("../resources/caution.png")))
+                        .build(ctx),
+                    )
+                    .with_child({
+                        message_count = TextBuilder::new(
+                            WidgetBuilder::new()
+                                .on_column(1)
+                                .with_margin(Thickness::uniform(1.0))
+                                .with_vertical_alignment(VerticalAlignment::Center)
+                                .with_foreground(Brush::Solid(Color::GOLD).into()),
+                        )
+                        .with_text("0")
+                        .build(ctx);
+                        message_count
+                    }),
             )
-            .build(ctx);
+            .add_column(Column::auto())
+            .add_column(Column::auto())
+            .add_row(Row::auto())
+            .build(ctx),
+        )
+        .build(ctx);
 
         let toolbar = GridBuilder::new(
             WidgetBuilder::new()
@@ -466,6 +493,7 @@ impl ProjectManager {
         .add_column(Column::auto())
         .add_column(Column::auto())
         .add_column(Column::stretch())
+        .add_column(Column::auto())
         .add_column(Column::auto())
         .add_column(Column::auto())
         .add_column(Column::auto())
@@ -490,6 +518,7 @@ impl ProjectManager {
         let exclude_project_tooltip = "Removes the project from the project manager, \
         but does NOT delete it.\nHotkey: Ctrl+E";
         let clean_project_tooltip = "Removes project's build artifacts.\nHotkey: Ctrl+N";
+        let donate_tooltip = "Donate for sustainable Fyrox development.";
 
         let edit = make_text_and_image_button_with_tooltip(
             ctx,
@@ -595,6 +624,19 @@ impl ProjectManager {
             Color::LIGHT_STEEL_BLUE,
             font_size,
         );
+        let donate = make_text_and_image_button_with_tooltip(
+            ctx,
+            "Donate",
+            22.0,
+            22.0,
+            load_image(include_bytes!("../resources/donate.png")),
+            donate_tooltip,
+            2,
+            0,
+            None,
+            Color::WHITE,
+            font_size,
+        );
         let hot_reload = CheckBoxBuilder::new(
             WidgetBuilder::new()
                 .with_tab_index(Some(4))
@@ -604,14 +646,16 @@ impl ProjectManager {
         .with_content(
             TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::left(2.0)))
                 .with_text("Hot Reloading")
+                .with_vertical_text_alignment(VerticalAlignment::Center)
                 .build(ctx),
         )
         .build(ctx);
 
+        let (project_size_sender, project_size_receiver) = channel();
+
         let project_controls = StackPanelBuilder::new(
             WidgetBuilder::new()
                 .with_enabled(false)
-                .on_column(1)
                 .with_child(hot_reload)
                 .with_child(edit)
                 .with_child(run)
@@ -624,13 +668,25 @@ impl ProjectManager {
         )
         .build(ctx);
 
+        let project_controls_container = GridBuilder::new(
+            WidgetBuilder::new()
+                .on_column(1)
+                .with_child(project_controls)
+                .with_child(donate),
+        )
+        .add_column(Column::auto())
+        .add_row(Row::auto())
+        .add_row(Row::stretch())
+        .add_row(Row::auto())
+        .build(ctx);
+
         let projects = ListViewBuilder::new(
             WidgetBuilder::new()
                 .with_enabled(is_ready)
                 .with_tab_index(Some(3))
                 .with_margin(Thickness::uniform(1.0)),
         )
-        .with_items(make_project_items(&settings, "", ctx))
+        .with_items(make_project_items(&settings, "", &project_size_sender, ctx).to_base())
         .build(ctx);
 
         let no_projects_warning =
@@ -657,7 +713,7 @@ impl ProjectManager {
             WidgetBuilder::new()
                 .on_row(2)
                 .with_child(border)
-                .with_child(project_controls),
+                .with_child(project_controls_container),
         )
         .add_column(Column::stretch())
         .add_column(Column::auto())
@@ -686,10 +742,7 @@ impl ProjectManager {
         .add_column(Column::stretch())
         .build(ctx);
 
-        ctx.send_message(WidgetMessage::focus(
-            navigation_layer,
-            MessageDirection::ToWidget,
-        ));
+        ctx.inner().send(navigation_layer, WidgetMessage::Focus);
 
         Self {
             root_grid,
@@ -703,6 +756,7 @@ impl ProjectManager {
             project_controls,
             hot_reload,
             download,
+            donate,
             selection: None,
             settings,
             project_wizard: None,
@@ -725,7 +779,10 @@ impl ProjectManager {
             exclude_project,
             clean_project,
             focused: true,
+            project_size_receiver,
             update_loop_state: Default::default(),
+            project_size_sender,
+            exit_confirmation_dialog: Default::default(),
         }
     }
 
@@ -736,17 +793,44 @@ impl ProjectManager {
     }
 
     fn refresh(&mut self, ui: &mut UserInterface) {
-        let items = make_project_items(&self.settings, &self.search_text, &mut ui.build_ctx());
-        ui.send_message(WidgetMessage::visibility(
+        let items = make_project_items(
+            &self.settings,
+            &self.search_text,
+            &self.project_size_sender,
+            &mut ui.build_ctx(),
+        )
+        .to_base();
+        ui.send(
             self.no_projects_warning,
-            MessageDirection::ToWidget,
-            items.is_empty(),
-        ));
-        ui.send_message(ListViewMessage::items(
-            self.projects,
-            MessageDirection::ToWidget,
-            items,
-        ));
+            WidgetMessage::Visibility(items.is_empty()),
+        );
+        ui.send(self.projects, ListViewMessage::Items(items));
+    }
+
+    pub fn request_close(&mut self, ui: &mut UserInterface, active_event_loop: &ActiveEventLoop) {
+        if self.mode.is_build() {
+            self.exit_confirmation_dialog = MessageBoxBuilder::new(
+                WindowBuilder::new(WidgetBuilder::new().with_width(280.0).with_height(120.0))
+                    .open(false)
+                    .with_remove_on_close(true)
+                    .with_title(WindowTitle::text("Confirm Exit")),
+            )
+            .with_text(
+                "The project manager is currently running a child process. An attempt to close \
+             the project manager will close your game/editor. Do you really want to exit?",
+            )
+            .with_buttons(MessageBoxButtons::YesNo)
+            .build(&mut ui.build_ctx());
+            ui.send(
+                self.exit_confirmation_dialog,
+                MessageBoxMessage::Open {
+                    title: None,
+                    text: None,
+                },
+            );
+        } else {
+            active_event_loop.exit()
+        }
     }
 
     fn handle_modes(&mut self, ui: &mut UserInterface) {
@@ -825,24 +909,17 @@ impl ProjectManager {
     pub fn update(&mut self, ui: &mut UserInterface, dt: f32) {
         self.handle_modes(ui);
 
-        if let Some(active_tooltip) = ui.active_tooltip() {
-            if !active_tooltip.shown {
-                // Keep the manager running until the current tooltip is not shown.
-                self.update_loop_state.request_update_in_next_frame();
-            }
+        for project_size in self.project_size_receiver.try_iter() {
+            let size_str = utils::format_size(project_size.size);
+            ui.send(project_size.widget_handle, TextMessage::Text(size_str));
         }
 
         if self.log.update(65536, ui) {
-            ui.send_message(TextMessage::text(
+            ui.send(
                 self.message_count,
-                MessageDirection::ToWidget,
-                self.log.message_count.to_string(),
-            ));
-            ui.send_message(WidgetMessage::visibility(
-                self.open_log,
-                MessageDirection::ToWidget,
-                true,
-            ));
+                TextMessage::Text(self.log.message_count.to_string()),
+            );
+            ui.send(self.open_log, WidgetMessage::Visibility(true));
         }
 
         if let Some(build_window) = self.build_window.as_mut() {
@@ -879,7 +956,7 @@ impl ProjectManager {
         {
             self.settings.projects.push(Project {
                 manifest_path,
-                name: game_package.name.clone(),
+                name: game_package.name.as_str().to_string(),
                 hot_reload: false,
             });
             self.refresh(ui);
@@ -917,10 +994,14 @@ impl ProjectManager {
 
         let ctx = &mut ui.build_ctx();
         self.deletion_confirmation_dialog = MessageBoxBuilder::new(
-            WindowBuilder::new(WidgetBuilder::new())
+            WindowBuilder::new(WidgetBuilder::new().with_width(350.0).with_height(120.0))
                 .with_remove_on_close(true)
                 .with_title(WindowTitle::text("Delete Project"))
-                .open(false),
+                .open(false)
+                .can_close(false)
+                .can_maximize(false)
+                .can_minimize(false)
+                .can_resize(false),
         )
         .with_text(&format!(
             "Do you really want to delete {} project?\n\
@@ -929,12 +1010,14 @@ impl ProjectManager {
         ))
         .with_buttons(MessageBoxButtons::YesNo)
         .build(ctx);
-        ui.send_message(WindowMessage::open_modal(
+        ui.send(
             self.deletion_confirmation_dialog,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
     }
 
     fn on_open_help_clicked(&mut self) {
@@ -954,21 +1037,28 @@ impl ProjectManager {
         self.import_project_dialog = FileSelectorBuilder::new(
             WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(400.0))
                 .open(false)
+                .with_title(WindowTitle::text("Select an Existing Project Folder"))
                 .with_remove_on_close(true),
         )
-        .with_filter(Filter::new(|path| path.is_dir()))
-        .with_mode(FileBrowserMode::Open)
+        .with_filter(PathFilter::folder())
+        .with_mode(FileSelectorMode::Open)
         .build(ctx);
-        ui.send_message(WindowMessage::open_modal(
+        ui.send(
             self.import_project_dialog,
-            MessageDirection::ToWidget,
-            true,
-            true,
-        ));
-        ui.send_message(FileSelectorMessage::focus_current_path(
+            FileSelectorMessage::Path(PathBuf::from("./")),
+        );
+        ui.send(
             self.import_project_dialog,
-            MessageDirection::ToWidget,
-        ));
+            WindowMessage::Open {
+                alignment: WindowAlignment::Center,
+                modal: true,
+                focus_content: true,
+            },
+        );
+        ui.send(
+            self.import_project_dialog,
+            FileSelectorMessage::FocusCurrentPath,
+        );
     }
 
     fn on_create_clicked(&mut self, ui: &mut UserInterface) {
@@ -995,6 +1085,10 @@ impl ProjectManager {
             .into(),
             ui,
         )
+    }
+
+    fn on_donate_clicked(&mut self) {
+        let _ = open::that("https://fyrox.rs/sponsor.html");
     }
 
     fn on_button_click(&mut self, button: Handle<UiNode>, ui: &mut UserInterface) {
@@ -1026,6 +1120,8 @@ impl ProjectManager {
             self.on_clean_clicked(ui);
         } else if button == self.open_help {
             self.on_open_help_clicked();
+        } else if button == self.donate {
+            self.on_donate_clicked()
         }
     }
 
@@ -1056,16 +1152,14 @@ impl ProjectManager {
 
         if !has_updated_args {
             Log::warn(format!(
-                "{} and {} variables are not specified!",
-                MANIFEST_PATH_VAR, MANIFEST_DIR_VAR
+                "{MANIFEST_PATH_VAR} and {MANIFEST_DIR_VAR} variables are not specified!"
             ));
         }
 
         let mut command = open_ide_command.make_command();
         if let Err(err) = command.spawn() {
             Log::err(format!(
-                "Unable to open the IDE using {} command. Reason: {:?}",
-                open_ide_command, err
+                "Unable to open the IDE using {open_ide_command} command. Reason: {err:?}"
             ));
 
             self.on_open_settings_click(ui);
@@ -1100,17 +1194,19 @@ impl ProjectManager {
         ui: &mut UserInterface,
     ) {
         let mut build_profile = build_profile.clone();
-        // Force run `cargo update` before running the project to prevent various issues with
-        // dependency versions incompatibility.
-        build_profile.build_commands.insert(
-            0,
-            CommandDescriptor {
-                command: "cargo".to_string(),
-                args: vec!["update".to_string()],
-                environment_variables: vec![],
-                skip_passthrough_marker: false,
-            },
-        );
+        if self.settings.run_cargo_update {
+            // Force run `cargo update` before running the project to prevent various issues with
+            // dependency versions incompatibility.
+            build_profile.build_commands.insert(
+                0,
+                CommandDescriptor {
+                    command: "cargo".to_string(),
+                    args: vec!["update".to_string()],
+                    environment_variables: vec![],
+                    skip_passthrough_marker: false,
+                },
+            );
+        }
         self.run_selected_project_command(name, build_profile.build_and_run_queue(), ui);
     }
 
@@ -1149,7 +1245,12 @@ impl ProjectManager {
         }
     }
 
-    pub fn handle_ui_message(&mut self, message: &UiMessage, ui: &mut UserInterface) {
+    pub fn handle_ui_message(
+        &mut self,
+        message: &UiMessage,
+        ui: &mut UserInterface,
+        active_event_loop: &ActiveEventLoop,
+    ) {
         if let Some(project_wizard) = self.project_wizard.as_mut() {
             if project_wizard.handle_ui_message(message, ui, &mut self.settings) {
                 self.refresh(ui);
@@ -1182,59 +1283,51 @@ impl ProjectManager {
 
         if let Some(ButtonMessage::Click) = message.data() {
             self.on_button_click(message.destination, ui);
-        } else if let Some(ListViewMessage::SelectionChanged(selection)) = message.data() {
-            if message.destination() == self.projects
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.selection.clone_from(&selection.first().cloned());
+        } else if let Some(ListViewMessage::Selection(selection)) = message.data_from(self.projects)
+        {
+            self.selection.clone_from(&selection.first().cloned());
 
-                ui.send_message(WidgetMessage::enabled(
-                    self.project_controls,
-                    MessageDirection::ToWidget,
-                    !selection.is_empty(),
-                ));
+            ui.send(
+                self.project_controls,
+                WidgetMessage::Enabled(!selection.is_empty()),
+            );
 
-                if let Some(project) = self.selection.and_then(|i| self.settings.projects.get(i)) {
-                    ui.send_message(CheckBoxMessage::checked(
-                        self.hot_reload,
-                        MessageDirection::ToWidget,
-                        Some(project.hot_reload),
-                    ));
-                }
+            if let Some(project) = self.selection.and_then(|i| self.settings.projects.get(i)) {
+                ui.send(
+                    self.hot_reload,
+                    CheckBoxMessage::Check(Some(project.hot_reload)),
+                );
             }
-        } else if let Some(SearchBarMessage::Text(filter)) = message.data() {
-            if message.destination() == self.search_bar
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.search_text = filter.clone();
-                self.refresh(ui);
-            }
-        } else if let Some(CheckBoxMessage::Check(Some(value))) = message.data() {
-            if message.destination() == self.hot_reload
-                && message.direction() == MessageDirection::FromWidget
-            {
-                self.on_hot_reload_changed(*value, ui);
-            }
+        } else if let Some(SearchBarMessage::Text(filter)) = message.data_from(self.search_bar) {
+            self.search_text = filter.clone();
+            self.refresh(ui);
+        } else if let Some(CheckBoxMessage::Check(Some(value))) = message.data_from(self.hot_reload)
+        {
+            self.on_hot_reload_changed(*value, ui);
         } else if let Some(FileSelectorMessage::Commit(path)) = message.data() {
             if message.destination() == self.import_project_dialog {
                 self.try_import(path, ui);
             }
-        } else if let Some(MessageBoxMessage::Close(MessageBoxResult::Yes)) = message.data() {
-            if message.destination() == self.deletion_confirmation_dialog {
-                if let Some(index) = self.selection {
-                    if let Some(project) = self.settings.projects.get(index) {
-                        if let Some(dir) = project.manifest_path.parent() {
-                            let _ = std::fs::remove_dir_all(dir);
-                        }
-                        self.settings.projects.remove(index);
-                        self.refresh(ui);
+        } else if let Some(MessageBoxMessage::Close(MessageBoxResult::Yes)) =
+            message.data_from(self.deletion_confirmation_dialog)
+        {
+            if let Some(index) = self.selection {
+                if let Some(project) = self.settings.projects.get(index) {
+                    if let Some(dir) = project.manifest_path.parent() {
+                        let _ = std::fs::remove_dir_all(dir);
                     }
+                    self.settings.projects.remove(index);
+                    self.refresh(ui);
                 }
             }
         } else if let Some(WidgetMessage::KeyDown(key)) = message.data() {
             if !message.handled() {
                 self.on_hot_key(*key, ui)
             }
+        } else if let Some(MessageBoxMessage::Close(MessageBoxResult::Yes)) =
+            message.data_from(self.exit_confirmation_dialog)
+        {
+            active_event_loop.exit()
         }
     }
 }
