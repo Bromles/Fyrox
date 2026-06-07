@@ -42,7 +42,7 @@ use crate::{
         GameScene, Selection,
     },
     settings::Settings,
-    world::graph::selection::GraphSelection,
+    world::selection::GraphSelection,
     Engine,
 };
 
@@ -78,7 +78,7 @@ impl InteractionMode for ScaleInteractionMode {
         engine: &mut Engine,
         mouse_pos: Vector2<f32>,
         _frame_size: Vector2<f32>,
-        _settings: &Settings,
+        settings: &Settings,
     ) {
         let Some(game_scene) = controller.downcast_mut::<GameScene>() else {
             return;
@@ -97,6 +97,7 @@ impl InteractionMode for ScaleInteractionMode {
                     ignore_back_faces: false,
                     use_picking_loop: true,
                     only_meshes: false,
+                    settings: &settings.selection,
                 },
             ) {
                 if self.scale_gizmo.handle_pick(result.node, graph) {
@@ -157,6 +158,7 @@ impl InteractionMode for ScaleInteractionMode {
                         ignore_back_faces: settings.selection.ignore_back_faces,
                         use_picking_loop: true,
                         only_meshes: false,
+                        settings: &settings.selection,
                     },
                 )
                 .map(|result| {
@@ -192,7 +194,7 @@ impl InteractionMode for ScaleInteractionMode {
         controller: &mut dyn SceneController,
         engine: &mut Engine,
         frame_size: Vector2<f32>,
-        _settings: &Settings,
+        settings: &Settings,
     ) {
         let Some(game_scene) = controller.downcast_mut::<GameScene>() else {
             return;
@@ -229,6 +231,7 @@ impl InteractionMode for ScaleInteractionMode {
                             ignore_back_faces: false,
                             use_picking_loop: false,
                             only_meshes: false,
+                            settings: &settings.selection,
                         },
                     )
                     .map(|r| r.node)
@@ -251,14 +254,14 @@ impl InteractionMode for ScaleInteractionMode {
 
         if let Some(selection) = editor_selection.as_graph() {
             let graph = &mut engine.scenes[game_scene.scene].graph;
-            if editor_selection.is_empty() || game_scene.preview_camera.is_some() {
+            if editor_selection.is_empty() {
                 self.scale_gizmo.set_visible(graph, false);
             } else {
                 let scale = calculate_gizmo_distance_scaling(
                     graph,
                     game_scene.camera_controller.camera,
                     self.scale_gizmo.origin,
-                );
+                ) * _settings.graphics.gizmo_scale;
                 self.scale_gizmo.sync_transform(graph, selection, scale);
                 self.scale_gizmo.set_visible(graph, true);
             }

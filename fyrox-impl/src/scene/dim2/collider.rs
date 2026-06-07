@@ -24,16 +24,19 @@
 use crate::scene::node::constructor::NodeConstructor;
 use crate::{
     core::{
-        algebra::Vector2,
+        algebra::{Isometry2, Translation2, UnitComplex, Vector2},
         log::Log,
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
         reflect::prelude::*,
         type_traits::prelude::*,
         uuid::{uuid, Uuid},
+        uuid_provider,
         variable::InheritableVariable,
         visitor::prelude::*,
+        ImmutableString, TypeUuidProvider,
     },
+    graph::{BaseSceneGraph, SceneGraphNode},
     scene::{
         base::{Base, BaseBuilder},
         collider::InteractionGroups,
@@ -46,10 +49,8 @@ use crate::{
         Scene,
     },
 };
-use fyrox_core::algebra::{Isometry2, Translation2, UnitComplex};
-use fyrox_core::uuid_provider;
+
 use fyrox_graph::constructor::ConstructorProvider;
-use fyrox_graph::{BaseSceneGraph, SceneGraphNode};
 use rapier2d::geometry::ColliderHandle;
 use std::{
     cell::Cell,
@@ -173,11 +174,13 @@ pub struct HeightfieldShape {
     pub geometry_source: GeometrySource,
 }
 
-/// Arbitrary height field shape.
+/// Arbitrary tile map shape.
 #[derive(Default, Clone, Debug, PartialEq, Visit, Reflect, Eq)]
 pub struct TileMapShape {
     /// A handle to tile map scene node.
     pub tile_map: GeometrySource,
+    /// Name of a collider layer in the tile map's tile set.
+    pub layer_name: ImmutableString,
 }
 
 /// Possible collider shapes.
@@ -266,6 +269,7 @@ impl ColliderShape {
 /// Collider is a geometric entity that can be attached to a rigid body to allow participate it
 /// participate in contact generation, collision response and proximity queries.
 #[derive(Reflect, Visit, Debug, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Collider {
     base: Base,
 
@@ -539,7 +543,22 @@ impl Collider {
     }
 
     /// Returns an iterator that yields contact information for the collider.
-    /// Contacts checks between two regular colliders
+    /// Contacts checks between two non-sensor colliders.
+    /// This includes only cases where two colliders are pressing against each other,
+    /// and only if [`ContactPair::has_any_active_contact`] is true.
+    /// When `has_any_active_contact` is false, the colliders may merely have overlapping
+    /// bounding boxes. See [`Collider::active_contacts`] for an interator that yields
+    /// only pairs where `has_any_active_contact` is true.
+    ///
+    /// When a collider is passing through a sensor collider, that goes into the
+    /// [`Collider::intersects`] list. Those intersections will not be produced by
+    /// this iterator.
+    ///
+    /// Each pair produced by this iterator includes the handles of two colliders,
+    /// this collider and some other collider. There is no guarantee about whether
+    /// this collider will be the first member of the pair or the second,
+    /// but [`ContactPair::other`] can be used to get the handle of the other collider
+    /// given the handle of this collider.
     pub fn contacts<'a>(
         &self,
         physics: &'a PhysicsWorld,
@@ -547,13 +566,59 @@ impl Collider {
         physics.contacts_with(self.native.get())
     }
 
+    /// Returns an iterator that yields contact information for the collider.
+    /// Contacts checks between two non-sensor colliders that are actually touching.
+    /// This includes only cases where two colliders are pressing against each other.
+    /// When a collider is passing through a sensor collider, that goes into the
+    /// [`Collider::intersects`] list.
+    ///
+    /// [`ContactPair::has_any_active_contact`] is guaranteed to be true for every pair
+    /// produced by this iterator.
+    ///
+    /// Each pair produced by this iterator includes the handles of two colliders,
+    /// this collider and some other collider. There is no guarantee about whether
+    /// this collider will be the first member of the pair or the second,
+    /// but [`ContactPair::other`] can be used to get the handle of the other collider
+    /// given the handle of this collider.
+    pub fn active_contacts<'a>(
+        &self,
+        physics: &'a PhysicsWorld,
+    ) -> impl Iterator<Item = ContactPair> + 'a {
+        self.contacts(physics)
+            .filter(|pair| pair.has_any_active_contact)
+    }
+
     /// Returns an iterator that yields intersection information for the collider.
-    /// Intersections checks between regular colliders and sensor colliders
+    /// Intersections checks for colliders passing through each other due to at least
+    /// one of the colliders being a sensor.
+    /// If [`IntersectionPair::has_any_active_contact`] is true, that means the colliders are actually touching.
+    /// When `has_any_active_contact` is false, the colliders may merely have overlapping
+    /// bounding boxes. See [`Collider::active_intersects`] for an interator that yields
+    /// only colliders that actually overlap this collider.
+    ///
+    /// Each pair produced by this iterator includes the handles of two colliders,
+    /// this collider and some other collider. There is no guarantee about whether
+    /// this collider will be the first member of the pair or the second,
+    /// but [`IntersectionPair::other`] can be used to get the handle of the other collider
+    /// given the handle of this collider.
     pub fn intersects<'a>(
         &self,
         physics: &'a PhysicsWorld,
     ) -> impl Iterator<Item = IntersectionPair> + 'a {
         physics.intersections_with(self.native.get())
+    }
+
+    /// Returns an iterator that yields intersection information for the collider.
+    /// Intersections checks for colliders passing through each other due to at least
+    /// one of the colliders being a sensor.
+    pub fn active_intersects<'a>(
+        &self,
+        physics: &'a PhysicsWorld,
+    ) -> impl Iterator<Item = Handle<Node>> + 'a {
+        let self_handle = self.handle();
+        self.intersects(physics)
+            .filter(|pair| pair.has_any_active_contact)
+            .map(move |pair| pair.other(self_handle))
     }
 
     pub(crate) fn needs_sync_model(&self) -> bool {
@@ -730,7 +795,7 @@ impl ColliderBuilder {
         self
     }
 
-    /// Sets desired friction value.    
+    /// Sets desired friction value.
     pub fn with_friction(mut self, friction: f32) -> Self {
         self.friction = friction;
         self
@@ -742,7 +807,7 @@ impl ColliderBuilder {
         self
     }
 
-    /// Sets desired solver groups.    
+    /// Sets desired solver groups.
     pub fn with_solver_groups(mut self, solver_groups: InteractionGroups) -> Self {
         self.solver_groups = solver_groups;
         self

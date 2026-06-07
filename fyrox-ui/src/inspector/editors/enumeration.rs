@@ -47,6 +47,8 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+
+use crate::inspector::InspectorContextArgs;
 use fyrox_core::ComponentProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::{
@@ -76,6 +78,7 @@ impl EnumPropertyEditorMessage {
 }
 
 #[derive(Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct EnumPropertyEditor<T: InspectableEnum> {
     pub widget: Widget,
     pub variant_selector: Handle<UiNode>,
@@ -104,6 +107,9 @@ pub struct EnumPropertyEditor<T: InspectableEnum> {
     #[visit(skip)]
     #[reflect(hidden)]
     pub name_column_width: f32,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    pub base_path: String,
 }
 
 impl<T: InspectableEnum> Debug for EnumPropertyEditor<T> {
@@ -126,6 +132,7 @@ impl<T: InspectableEnum> Clone for EnumPropertyEditor<T> {
             generate_property_string_values: self.generate_property_string_values,
             filter: self.filter.clone(),
             name_column_width: self.name_column_width,
+            base_path: self.base_path.clone(),
         }
     }
 }
@@ -168,17 +175,18 @@ impl<T: InspectableEnum> Control for EnumPropertyEditor<T> {
             {
                 let variant = (self.definition.variant_generator)(*variant);
 
-                let ctx = InspectorContext::from_object(
-                    &variant,
-                    &mut ui.build_ctx(),
-                    self.definition_container.clone(),
-                    self.environment.clone(),
-                    self.sync_flag,
-                    self.layer_index,
-                    self.generate_property_string_values,
-                    self.filter.clone(),
-                    self.name_column_width,
-                );
+                let ctx = InspectorContext::from_object(InspectorContextArgs {
+                    object: &variant,
+                    ctx: &mut ui.build_ctx(),
+                    definition_container: self.definition_container.clone(),
+                    environment: self.environment.clone(),
+                    sync_flag: self.sync_flag,
+                    layer_index: self.layer_index,
+                    generate_property_string_values: self.generate_property_string_values,
+                    filter: self.filter.clone(),
+                    name_column_width: self.name_column_width,
+                    base_path: self.base_path.clone(),
+                });
 
                 ui.send_message(InspectorMessage::context(
                     self.inspector,
@@ -293,22 +301,24 @@ impl EnumPropertyEditorBuilder {
         definition: &EnumPropertyEditorDefinition<T>,
         value: &T,
         name_column_width: f32,
+        base_path: String,
     ) -> Handle<UiNode> {
         let definition_container = self
             .definition_container
             .unwrap_or_else(|| Arc::new(PropertyEditorDefinitionContainer::with_default_editors()));
 
-        let context = InspectorContext::from_object(
-            value,
+        let context = InspectorContext::from_object(InspectorContextArgs {
+            object: value,
             ctx,
-            definition_container.clone(),
-            self.environment.clone(),
-            self.sync_flag,
-            self.layer_index,
-            self.generate_property_string_values,
-            self.filter.clone(),
+            definition_container: definition_container.clone(),
+            environment: self.environment.clone(),
+            sync_flag: self.sync_flag,
+            layer_index: self.layer_index,
+            generate_property_string_values: self.generate_property_string_values,
+            filter: self.filter.clone(),
             name_column_width,
-        );
+            base_path: base_path.clone(),
+        });
 
         let inspector = InspectorBuilder::new(WidgetBuilder::new())
             .with_context(context)
@@ -330,6 +340,7 @@ impl EnumPropertyEditorBuilder {
             generate_property_string_values: self.generate_property_string_values,
             filter: self.filter,
             name_column_width,
+            base_path,
         };
 
         ctx.add_node(UiNode::new(editor))
@@ -456,7 +467,13 @@ where
                     .with_sync_flag(ctx.sync_flag)
                     .with_generate_property_string_values(ctx.generate_property_string_values)
                     .with_filter(ctx.filter)
-                    .build(ctx.build_context, self, value, ctx.name_column_width);
+                    .build(
+                        ctx.build_context,
+                        self,
+                        value,
+                        ctx.name_column_width,
+                        ctx.base_path.clone(),
+                    );
                 editor
             },
             ctx.name_column_width,
@@ -505,17 +522,18 @@ where
 
             let inspector = instance_ref.inspector;
 
-            let context = InspectorContext::from_object(
-                value,
-                &mut ctx.ui.build_ctx(),
-                ctx.definition_container.clone(),
+            let context = InspectorContext::from_object(InspectorContextArgs {
+                object: value,
+                ctx: &mut ctx.ui.build_ctx(),
+                definition_container: ctx.definition_container.clone(),
                 environment,
-                ctx.sync_flag,
-                ctx.layer_index + 1,
-                ctx.generate_property_string_values,
-                ctx.filter,
-                ctx.name_column_width,
-            );
+                sync_flag: ctx.sync_flag,
+                layer_index: ctx.layer_index + 1,
+                generate_property_string_values: ctx.generate_property_string_values,
+                filter: ctx.filter,
+                name_column_width: ctx.name_column_width,
+                base_path: ctx.base_path.clone(),
+            });
 
             Ok(Some(InspectorMessage::context(
                 inspector,
@@ -538,6 +556,7 @@ where
                 layer_index + 1,
                 ctx.generate_property_string_values,
                 ctx.filter,
+                ctx.base_path.clone(),
             ) {
                 Err(InspectorError::Group(e))
             } else {
@@ -552,13 +571,13 @@ where
                 EnumPropertyEditorMessage::PropertyChanged(property_changed) => {
                     Some(PropertyChanged {
                         name: ctx.name.to_string(),
-                        owner_type_id: ctx.owner_type_id,
+
                         value: FieldKind::Inspectable(Box::new(property_changed.clone())),
                     })
                 }
                 EnumPropertyEditorMessage::Variant(index) => Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    owner_type_id: ctx.owner_type_id,
+
                     value: FieldKind::object((self.variant_generator)(*index)),
                 }),
             };

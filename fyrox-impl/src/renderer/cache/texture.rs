@@ -22,20 +22,30 @@ use crate::{
     core::log::{Log, MessageKind},
     renderer::{
         cache::{TemporaryCache, TimeToLive},
-        framework::{
-            error::FrameworkError,
-            gpu_texture::{Coordinate, GpuTexture, PixelKind},
-            server::GraphicsServer,
-        },
+        framework::{error::FrameworkError, gpu_texture::PixelKind, server::GraphicsServer},
     },
     resource::texture::{Texture, TextureResource},
 };
-use fyrox_graphics::gpu_texture::GpuTextureDescriptor;
-use std::{cell::RefCell, rc::Rc};
+use fyrox_core::err_once;
+use fyrox_graphics::gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind};
+use fyrox_graphics::sampler::{
+    GpuSampler, GpuSamplerDescriptor, MagnificationFilter, MinificationFilter, WrapMode,
+};
+use fyrox_resource::manager::ResourceManager;
+use fyrox_texture::{
+    TextureKind, TextureMagnificationFilter, TextureMinificationFilter, TexturePixelKind,
+    TextureWrapMode,
+};
+use std::borrow::Cow;
+use std::time::Duration;
+use uuid::Uuid;
 
-pub(crate) struct TextureRenderData {
-    pub gpu_texture: Rc<RefCell<dyn GpuTexture>>,
-    pub modifications_counter: u64,
+#[derive(Clone)]
+pub struct TextureRenderData {
+    pub gpu_texture: GpuTexture,
+    pub gpu_sampler: GpuSampler,
+    modifications_counter: u64,
+    sampler_modifications_counter: u64,
 }
 
 #[derive(Default)]
@@ -43,27 +53,135 @@ pub struct TextureCache {
     cache: TemporaryCache<TextureRenderData>,
 }
 
-fn create_gpu_texture(
+fn convert_texture_kind(v: TextureKind) -> GpuTextureKind {
+    match v {
+        TextureKind::Line { length } => GpuTextureKind::Line {
+            length: length as usize,
+        },
+        TextureKind::Rectangle { width, height } => GpuTextureKind::Rectangle {
+            width: width as usize,
+            height: height as usize,
+        },
+        TextureKind::Cube { size } => GpuTextureKind::Cube {
+            size: size as usize,
+        },
+        TextureKind::Volume {
+            width,
+            height,
+            depth,
+        } => GpuTextureKind::Volume {
+            width: width as usize,
+            height: height as usize,
+            depth: depth as usize,
+        },
+    }
+}
+
+fn convert_pixel_kind(texture_kind: TexturePixelKind) -> PixelKind {
+    match texture_kind {
+        TexturePixelKind::R8 => PixelKind::R8,
+        TexturePixelKind::RGB8 => PixelKind::RGB8,
+        TexturePixelKind::RGBA8 => PixelKind::RGBA8,
+        TexturePixelKind::RG8 => PixelKind::RG8,
+        TexturePixelKind::R16 => PixelKind::R16,
+        TexturePixelKind::RG16 => PixelKind::RG16,
+        TexturePixelKind::BGR8 => PixelKind::BGR8,
+        TexturePixelKind::BGRA8 => PixelKind::BGRA8,
+        TexturePixelKind::RGB16 => PixelKind::RGB16,
+        TexturePixelKind::RGBA16 => PixelKind::RGBA16,
+        TexturePixelKind::RGB16F => PixelKind::RGB16F,
+        TexturePixelKind::DXT1RGB => PixelKind::DXT1RGB,
+        TexturePixelKind::DXT1RGBA => PixelKind::DXT1RGBA,
+        TexturePixelKind::DXT3RGBA => PixelKind::DXT3RGBA,
+        TexturePixelKind::DXT5RGBA => PixelKind::DXT5RGBA,
+        TexturePixelKind::R8RGTC => PixelKind::R8RGTC,
+        TexturePixelKind::RG8RGTC => PixelKind::RG8RGTC,
+        TexturePixelKind::RGB32F => PixelKind::RGB32F,
+        TexturePixelKind::RGBA32F => PixelKind::RGBA32F,
+        TexturePixelKind::Luminance8 => PixelKind::L8,
+        TexturePixelKind::LuminanceAlpha8 => PixelKind::LA8,
+        TexturePixelKind::Luminance16 => PixelKind::L16,
+        TexturePixelKind::LuminanceAlpha16 => PixelKind::LA16,
+        TexturePixelKind::R32F => PixelKind::R32F,
+        TexturePixelKind::R16F => PixelKind::R16F,
+    }
+}
+
+fn convert_magnification_filter(v: TextureMagnificationFilter) -> MagnificationFilter {
+    match v {
+        TextureMagnificationFilter::Nearest => MagnificationFilter::Nearest,
+        TextureMagnificationFilter::Linear => MagnificationFilter::Linear,
+    }
+}
+
+fn convert_minification_filter(v: TextureMinificationFilter) -> MinificationFilter {
+    match v {
+        TextureMinificationFilter::Nearest => MinificationFilter::Nearest,
+        TextureMinificationFilter::NearestMipMapNearest => MinificationFilter::NearestMipMapNearest,
+        TextureMinificationFilter::NearestMipMapLinear => MinificationFilter::NearestMipMapLinear,
+        TextureMinificationFilter::Linear => MinificationFilter::Linear,
+        TextureMinificationFilter::LinearMipMapNearest => MinificationFilter::LinearMipMapNearest,
+        TextureMinificationFilter::LinearMipMapLinear => MinificationFilter::LinearMipMapLinear,
+    }
+}
+
+fn convert_wrap_mode(v: TextureWrapMode) -> WrapMode {
+    match v {
+        TextureWrapMode::Repeat => WrapMode::Repeat,
+        TextureWrapMode::ClampToEdge => WrapMode::ClampToEdge,
+        TextureWrapMode::ClampToBorder => WrapMode::ClampToBorder,
+        TextureWrapMode::MirroredRepeat => WrapMode::MirroredRepeat,
+        TextureWrapMode::MirrorClampToEdge => WrapMode::MirrorClampToEdge,
+    }
+}
+
+fn create_sampler(
     server: &dyn GraphicsServer,
     texture: &Texture,
+) -> Result<GpuSampler, FrameworkError> {
+    server.create_sampler(GpuSamplerDescriptor {
+        mag_filter: convert_magnification_filter(texture.magnification_filter()),
+        min_filter: convert_minification_filter(texture.minification_filter()),
+        s_wrap_mode: convert_wrap_mode(texture.s_wrap_mode()),
+        t_wrap_mode: convert_wrap_mode(texture.t_wrap_mode()),
+        r_wrap_mode: convert_wrap_mode(texture.r_wrap_mode()),
+        anisotropy: texture.anisotropy_level(),
+        min_lod: texture.min_lod(),
+        max_lod: texture.max_lod(),
+        lod_bias: texture.lod_bias(),
+    })
+}
+
+fn create_gpu_texture(
+    server: &dyn GraphicsServer,
+    resource_manager: &ResourceManager,
+    uuid: &Uuid,
+    texture: &Texture,
 ) -> Result<TextureRenderData, FrameworkError> {
-    server
-        .create_texture(GpuTextureDescriptor {
-            kind: texture.kind().into(),
-            pixel_kind: PixelKind::from(texture.pixel_kind()),
-            mag_filter: texture.magnification_filter().into(),
-            min_filter: texture.minification_filter().into(),
-            mip_count: texture.mip_count() as usize,
-            s_wrap_mode: texture.s_wrap_mode().into(),
-            t_wrap_mode: texture.t_wrap_mode().into(),
-            r_wrap_mode: texture.r_wrap_mode().into(),
-            anisotropy: texture.anisotropy_level(),
-            data: Some(texture.data()),
-        })
-        .map(|gpu_texture| TextureRenderData {
-            gpu_texture,
-            modifications_counter: texture.modifications_count(),
-        })
+    let path = resource_manager
+        .try_get_state(Duration::from_millis(1))
+        .and_then(|state| state.uuid_to_resource_path(*uuid));
+    let name = path
+        .as_ref()
+        .map(|path| path.to_string_lossy())
+        .unwrap_or_else(|| Cow::Borrowed(""));
+
+    let gpu_texture = server.create_texture(GpuTextureDescriptor {
+        name: &name,
+        kind: convert_texture_kind(texture.kind()),
+        pixel_kind: convert_pixel_kind(texture.pixel_kind()),
+        mip_count: texture.mip_count() as usize,
+        data: Some(texture.data()),
+        base_level: texture.base_level(),
+        max_level: texture.max_level(),
+    })?;
+
+    Ok(TextureRenderData {
+        gpu_texture,
+        gpu_sampler: create_sampler(server, texture)?,
+        modifications_counter: texture.modifications_count(),
+        sampler_modifications_counter: texture.sampler_modifications_count(),
+    })
 }
 
 impl TextureCache {
@@ -72,14 +190,15 @@ impl TextureCache {
     pub fn upload(
         &mut self,
         server: &dyn GraphicsServer,
+        resource_manager: &ResourceManager,
         texture: &TextureResource,
     ) -> Result<(), FrameworkError> {
-        let mut texture = texture.state();
-        if let Some(texture) = texture.data() {
+        let texture = texture.state();
+        if let Some((texture, uuid)) = texture.data_ref_with_id() {
             self.cache.get_entry_mut_or_insert_with(
                 &texture.cache_index,
                 Default::default(),
-                || create_gpu_texture(server, texture),
+                || create_gpu_texture(server, resource_manager, uuid, texture),
             )?;
             Ok(())
         } else {
@@ -92,15 +211,15 @@ impl TextureCache {
     pub fn get(
         &mut self,
         server: &dyn GraphicsServer,
+        resource_manager: &ResourceManager,
         texture_resource: &TextureResource,
-    ) -> Option<&Rc<RefCell<dyn GpuTexture>>> {
-        let mut texture_data_guard = texture_resource.state();
-
-        if let Some(texture) = texture_data_guard.data() {
+    ) -> Option<&TextureRenderData> {
+        let texture_data_guard = texture_resource.state();
+        if let Some((texture, uuid)) = texture_data_guard.data_ref_with_id() {
             match self.cache.get_mut_or_insert_with(
                 &texture.cache_index,
                 Default::default(),
-                || create_gpu_texture(server, texture),
+                || create_gpu_texture(server, resource_manager, uuid, texture),
             ) {
                 Ok(entry) => {
                     // Check if some value has changed in resource.
@@ -108,10 +227,9 @@ impl TextureCache {
                     // Data might change from last frame, so we have to check it and upload new if so.
                     let modifications_count = texture.modifications_count();
                     if entry.modifications_counter != modifications_count {
-                        let mut gpu_texture = entry.gpu_texture.borrow_mut();
-                        if let Err(e) = gpu_texture.set_data(
-                            texture.kind().into(),
-                            texture.pixel_kind().into(),
+                        if let Err(e) = entry.gpu_texture.set_data(
+                            convert_texture_kind(texture.kind()),
+                            convert_pixel_kind(texture.pixel_kind()),
                             texture.mip_count() as usize,
                             Some(texture.data()),
                         ) {
@@ -124,43 +242,20 @@ impl TextureCache {
                         }
                     }
 
-                    let mut gpu_texture = entry.gpu_texture.borrow_mut();
-
-                    let new_mag_filter = texture.magnification_filter().into();
-                    if gpu_texture.magnification_filter() != new_mag_filter {
-                        gpu_texture.set_magnification_filter(new_mag_filter);
+                    if entry.sampler_modifications_counter != texture.sampler_modifications_count()
+                    {
+                        entry.gpu_sampler = create_sampler(server, texture).unwrap();
                     }
 
-                    let new_min_filter = texture.minification_filter().into();
-                    if gpu_texture.minification_filter() != new_min_filter {
-                        gpu_texture.set_minification_filter(new_min_filter);
-                    }
-
-                    if gpu_texture.anisotropy().ne(&texture.anisotropy_level()) {
-                        gpu_texture.set_anisotropy(texture.anisotropy_level());
-                    }
-
-                    let new_s_wrap_mode = texture.s_wrap_mode().into();
-                    if gpu_texture.wrap_mode(Coordinate::S) != new_s_wrap_mode {
-                        gpu_texture.set_wrap(Coordinate::S, new_s_wrap_mode);
-                    }
-
-                    let new_t_wrap_mode = texture.t_wrap_mode().into();
-                    if gpu_texture.wrap_mode(Coordinate::T) != new_t_wrap_mode {
-                        gpu_texture.set_wrap(Coordinate::T, new_t_wrap_mode);
-                    }
-
-                    return Some(&entry.gpu_texture);
+                    return Some(entry);
                 }
                 Err(e) => {
                     drop(texture_data_guard);
-                    Log::writeln(
-                        MessageKind::Error,
-                        format!(
-                            "Failed to create GPU texture from {} texture. Reason: {:?}",
-                            texture_resource.kind(),
-                            e
-                        ),
+                    err_once!(
+                        texture_resource.key() as usize,
+                        "Failed to create GPU texture from {} texture. Reason: {:?}",
+                        texture_resource.kind(),
+                        e,
                     );
                 }
             }
@@ -176,7 +271,7 @@ impl TextureCache {
         self.cache.clear();
     }
 
-    pub fn unload(&mut self, texture: TextureResource) {
+    pub fn unload(&mut self, texture: &TextureResource) {
         if let Some(texture) = texture.state().data() {
             self.cache.remove(&texture.cache_index);
         }
@@ -191,9 +286,10 @@ impl TextureCache {
     /// for a certain time period (see [`TimeToLive`]).
     pub fn try_register(
         &mut self,
+        server: &dyn GraphicsServer,
         texture: &TextureResource,
-        gpu_texture: Rc<RefCell<dyn GpuTexture>>,
-    ) {
+        gpu_texture: GpuTexture,
+    ) -> Result<(), FrameworkError> {
         let data = texture.data_ref();
         let index = data.cache_index.clone();
         let entry = self.cache.get_mut(&index);
@@ -201,11 +297,14 @@ impl TextureCache {
             self.cache.spawn(
                 TextureRenderData {
                     gpu_texture,
+                    gpu_sampler: create_sampler(server, &data)?,
                     modifications_counter: data.modifications_count(),
+                    sampler_modifications_counter: data.sampler_modifications_count(),
                 },
                 index,
                 TimeToLive::default(),
             );
         }
+        Ok(())
     }
 }

@@ -23,13 +23,12 @@
 use crate::{
     asset::{io::ResourceIo, Resource, ResourceData, CURVE_RESOURCE_UUID},
     core::{
-        io::FileLoadError, math::curve::Curve, reflect::prelude::*, uuid::Uuid,
-        visitor::prelude::*, TypeUuidProvider,
+        io::FileError, math::curve::Curve, reflect::prelude::*, uuid::Uuid, visitor::prelude::*,
+        TypeUuidProvider,
     },
 };
 use std::error::Error;
 use std::{
-    any::Any,
     fmt::{Display, Formatter},
     path::Path,
 };
@@ -40,7 +39,7 @@ pub mod loader;
 #[derive(Debug)]
 pub enum CurveResourceError {
     /// An i/o error has occurred.
-    Io(FileLoadError),
+    Io(FileError),
 
     /// An error that may occur due to version incompatibilities.
     Visit(VisitError),
@@ -62,8 +61,8 @@ impl Display for CurveResourceError {
     }
 }
 
-impl From<FileLoadError> for CurveResourceError {
-    fn from(e: FileLoadError) -> Self {
+impl From<FileError> for CurveResourceError {
+    fn from(e: FileError) -> Self {
         Self::Io(e)
     }
 }
@@ -75,21 +74,13 @@ impl From<VisitError> for CurveResourceError {
 }
 
 /// State of the [`CurveResource`]
-#[derive(Debug, Visit, Default, Reflect)]
+#[derive(Debug, Clone, Visit, Default, Reflect)]
 pub struct CurveResourceState {
     /// Actual curve.
     pub curve: Curve,
 }
 
 impl ResourceData for CurveResourceState {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -101,6 +92,10 @@ impl ResourceData for CurveResourceState {
 
     fn can_be_saved(&self) -> bool {
         false
+    }
+
+    fn try_clone_box(&self) -> Option<Box<dyn ResourceData>> {
+        Some(Box::new(self.clone()))
     }
 }
 

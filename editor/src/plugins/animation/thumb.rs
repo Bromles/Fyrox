@@ -39,6 +39,7 @@ use crate::fyrox::{
         BuildContext, Control, UiNode, UserInterface,
     },
 };
+
 use fyrox::gui::curve::CurveTransformCell;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
@@ -58,6 +59,7 @@ impl ThumbMessage {
 }
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Thumb {
     widget: Widget,
     #[visit(skip)]
@@ -99,6 +101,7 @@ impl Control for Thumb {
             self.clip_bounds(),
             self.foreground(),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }

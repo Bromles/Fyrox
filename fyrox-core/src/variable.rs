@@ -44,7 +44,9 @@ bitflags! {
         const NONE = 0;
         /// A variable was externally modified.
         const MODIFIED = 0b0000_0001;
-        /// A variable must be synced with respective variable from data model.
+        /// A variable must be synced with respective variable from a data model. This flag is won't
+        /// be serialized when serializing an inheritable variable. This is purely a runtime flag
+        /// anyway.
         const NEED_SYNC = 0b0000_0010;
     }
 }
@@ -355,7 +357,12 @@ where
             {
                 let mut region = visitor.enter_region(name)?;
                 self.value.visit("Value", &mut region)?;
-                self.flags.get_mut().0.visit("Flags", &mut region)?;
+
+                let mut flags = self.flags.get();
+                // Remove NEED_SYNC flag, because it is a runtime flag and when saved, it produces
+                // a lot of merge conflicts in the assets.
+                flags.remove(VariableFlags::NEED_SYNC);
+                flags.0.visit("Flags", &mut region)?;
             } else {
                 // Non-modified variables do not write anything.
             }
@@ -372,6 +379,21 @@ where
     #[inline]
     fn source_path() -> &'static str {
         file!()
+    }
+
+    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
+        Some(Box::new(self.value.clone()))
+    }
+
+    fn derived_types() -> &'static [TypeId]
+    where
+        Self: Sized,
+    {
+        T::derived_types()
+    }
+
+    fn query_derived_types(&self) -> &'static [TypeId] {
+        Self::derived_types()
     }
 
     #[inline]
@@ -393,8 +415,13 @@ where
     }
 
     #[inline]
-    fn fields_info(&self, func: &mut dyn FnMut(&[FieldInfo])) {
-        self.value.fields_info(func)
+    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
+        self.value.fields_ref(func)
+    }
+
+    #[inline]
+    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+        self.value.fields_mut(func)
     }
 
     #[inline]
@@ -433,20 +460,10 @@ where
         &mut self,
         field: &str,
         value: Box<dyn Reflect>,
-        func: &mut dyn FnMut(Result<Box<dyn Reflect>, Box<dyn Reflect>>),
+        func: &mut dyn FnMut(Result<Box<dyn Reflect>, SetFieldError>),
     ) {
         self.mark_modified_and_need_sync();
         self.value.set_field(field, value, func)
-    }
-
-    #[inline]
-    fn fields(&self, func: &mut dyn FnMut(&[&dyn Reflect])) {
-        self.value.fields(func)
-    }
-
-    #[inline]
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [&mut dyn Reflect])) {
-        self.value.fields_mut(func)
     }
 
     #[inline]
@@ -702,13 +719,15 @@ pub fn try_inherit_properties(
 
     if result.is_none() {
         child.fields_mut(&mut |child_fields| {
-            parent.fields(&mut |parent_fields| {
+            parent.fields_ref(&mut |parent_fields| {
                 for (child_field, parent_field) in child_fields.iter_mut().zip(parent_fields) {
                     // Look into inner properties recursively and try to inherit them. This is mandatory step, because inner
                     // fields may also be InheritableVariable<T>.
-                    if let Err(e) =
-                        try_inherit_properties(*child_field, *parent_field, ignored_types)
-                    {
+                    if let Err(e) = try_inherit_properties(
+                        child_field.value.field_value_as_reflect_mut(),
+                        parent_field.value.field_value_as_reflect(),
+                        ignored_types,
+                    ) {
                         result = Some(Err(e));
                     }
 
@@ -824,7 +843,7 @@ mod test {
         assert!(va.value_equals(&vb))
     }
 
-    #[derive(Reflect, Debug)]
+    #[derive(Reflect, Clone, Debug)]
     enum SomeEnum {
         Bar(InheritableVariable<f32>),
         Baz {
@@ -1143,7 +1162,7 @@ mod test {
     fn inheritable_variable_type_name() {
         let v = InheritableVariable::from(42);
 
-        assert_eq!(v.type_name(), "i32");
+        assert_eq!(Reflect::type_name(&v), "i32");
     }
 
     #[test]

@@ -112,18 +112,10 @@ mod test {
 
     use super::*;
 
-    #[derive(Debug, Default, Reflect, Visit)]
+    #[derive(Debug, Default, Clone, Reflect, Visit)]
     struct Stub {}
 
     impl ResourceData for Stub {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
-        }
-
         fn type_uuid(&self) -> Uuid {
             Uuid::default()
         }
@@ -134,6 +126,10 @@ mod test {
 
         fn can_be_saved(&self) -> bool {
             false
+        }
+
+        fn try_clone_box(&self) -> Option<Box<dyn ResourceData>> {
+            Some(Box::new(self.clone()))
         }
     }
 

@@ -42,6 +42,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, RcUiNodeHandle, UiNode, UserInterface,
 };
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
 use std::{
@@ -61,6 +62,7 @@ impl ColorGradientEditorMessage {
 
 #[derive(Default, Clone, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "50d00eb7-f30b-4973-8a36-03d6b8f007ec")]
+#[reflect(derived_type = "UiNode")]
 pub struct ColorGradientField {
     widget: Widget,
     color_gradient: ColorGradient,
@@ -91,6 +93,7 @@ impl Control for ColorGradientField {
             self.bounding_rect(),
             self.clip_bounds(),
             6.0,
+            &self.material,
             drawing_context,
         );
 
@@ -103,6 +106,7 @@ impl Control for ColorGradientField {
                 self.clip_bounds(),
                 Brush::Solid(ColorGradient::STUB_COLOR),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         } else {
@@ -137,6 +141,7 @@ impl Control for ColorGradientField {
                 self.clip_bounds(),
                 Brush::Solid(Color::WHITE),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         }
@@ -184,6 +189,7 @@ impl ColorGradientFieldBuilder {
 
 #[derive(Default, Clone, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "82843d8b-1972-46e6-897c-9619b74059cc")]
+#[reflect(derived_type = "UiNode")]
 pub struct ColorGradientEditor {
     widget: Widget,
     gradient_field: Handle<UiNode>,
@@ -510,6 +516,7 @@ impl ColorPointMessage {
 
 #[derive(Default, Clone, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "a493a603-3451-4005-8c80-559707729e70")]
+#[reflect(derived_type = "UiNode")]
 pub struct ColorPoint {
     pub widget: Widget,
     pub location: f32,
@@ -544,6 +551,7 @@ impl Control for ColorPoint {
             self.clip_bounds(),
             self.foreground(),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -650,6 +658,7 @@ impl ColorPointBuilder {
 
 #[derive(Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "2608955a-4095-4fd1-af71-99bcdf2600f0")]
+#[reflect(derived_type = "UiNode")]
 struct ColorPointsCanvas {
     widget: Widget,
 }

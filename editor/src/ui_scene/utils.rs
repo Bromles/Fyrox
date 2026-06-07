@@ -20,7 +20,7 @@
 
 use crate::fyrox::graph::SceneGraphNode;
 use crate::fyrox::{
-    asset::{manager::ResourceManager, untyped::UntypedResource},
+    asset::manager::ResourceManager,
     core::{
         futures::executor::block_on, make_pretty_type_name, make_relative_path, pool::ErasedHandle,
         pool::Handle, reflect::Reflect,
@@ -43,8 +43,9 @@ use crate::{
         commands::graph::{AddUiPrefabCommand, LinkWidgetsCommand, SetWidgetChildPosition},
         selection::UiSelection,
     },
-    world::{graph::item::DropAnchor, WorldViewerDataProvider},
+    world::{item::DropAnchor, WorldViewerDataProvider},
 };
+use fyrox::resource::texture::TextureResource;
 use std::{borrow::Cow, path::Path, path::PathBuf};
 
 pub struct UiSceneWorldViewerDataProvider<'a> {
@@ -91,7 +92,7 @@ impl WorldViewerDataProvider for UiSceneWorldViewerDataProvider<'_> {
     fn is_node_has_child(&self, node: ErasedHandle, child: ErasedHandle) -> bool {
         self.ui
             .try_get(node.into())
-            .map_or(false, |n| n.children().iter().any(|c| *c == child.into()))
+            .is_some_and(|n| n.children().iter().any(|c| *c == child.into()))
     }
 
     fn parent_of(&self, node: ErasedHandle) -> ErasedHandle {
@@ -115,7 +116,7 @@ impl WorldViewerDataProvider for UiSceneWorldViewerDataProvider<'_> {
         self.ui.try_get(node.into()).is_some()
     }
 
-    fn icon_of(&self, node: ErasedHandle) -> Option<UntypedResource> {
+    fn icon_of(&self, node: ErasedHandle) -> Option<TextureResource> {
         let node: &UiNode = self.ui.try_get(node.into()).unwrap();
 
         // all icons are able to be used freely
@@ -166,7 +167,7 @@ impl WorldViewerDataProvider for UiSceneWorldViewerDataProvider<'_> {
     fn is_instance(&self, node: ErasedHandle) -> bool {
         self.ui
             .try_get(node.into())
-            .map_or(false, |n| n.resource().is_some())
+            .is_some_and(|n| n.resource().is_some())
     }
 
     fn selection(&self) -> Vec<ErasedHandle> {

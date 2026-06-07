@@ -25,41 +25,45 @@ pub mod menu;
 pub mod selection;
 pub mod utils;
 
-use crate::fyrox::{
-    core::{
-        algebra::{Vector2, Vector3},
-        color::Color,
-        futures::executor::block_on,
-        log::Log,
-        make_relative_path,
-        math::Rect,
-        pool::{ErasedHandle, Handle},
-        reflect::Reflect,
-    },
-    engine::Engine,
-    fxhash::FxHashSet,
-    graph::SceneGraph,
-    graph::{BaseSceneGraph, SceneGraphNode},
-    gui::{
-        absm::AnimationBlendingStateMachine,
-        animation::AnimationPlayer,
-        brush::Brush,
-        draw::{CommandTexture, Draw},
-        inspector::PropertyChanged,
-        message::{KeyCode, MessageDirection, MouseButton},
-        UiNode, UiUpdateSwitches, UserInterface, UserInterfaceResourceExtension,
-    },
-    renderer::framework::gpu_texture::PixelKind,
-    resource::texture::{TextureKind, TextureResource, TextureResourceExtension},
-    scene::SceneContainer,
+use crate::command::SetPropertyCommand;
+use crate::plugins::inspector::editors::handle::{
+    HandlePropertyEditorHierarchyMessage, HandlePropertyEditorNameMessage,
 };
-use crate::plugins::absm::{command::fetch_machine, selection::SelectedEntity};
-use crate::plugins::animation::{self, command::fetch_animations_container};
-use crate::plugins::inspector::editors::handle::HandlePropertyEditorMessage;
 use crate::{
     asset::item::AssetItem,
     command::{make_command, Command, CommandGroup, CommandStack},
+    fyrox::{
+        core::{
+            algebra::{Vector2, Vector3},
+            color::Color,
+            futures::executor::block_on,
+            log::Log,
+            make_relative_path,
+            math::Rect,
+            pool::{ErasedHandle, Handle},
+            reflect::Reflect,
+        },
+        engine::Engine,
+        fxhash::FxHashSet,
+        graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+        gui::{
+            absm::AnimationBlendingStateMachine,
+            animation::AnimationPlayer,
+            brush::Brush,
+            draw::{CommandTexture, Draw},
+            inspector::PropertyChanged,
+            message::{KeyCode, MessageDirection, MouseButton},
+            UiNode, UiUpdateSwitches, UserInterface, UserInterfaceResourceExtension,
+        },
+        renderer::framework::gpu_texture::PixelKind,
+        resource::texture::{TextureKind, TextureResource, TextureResourceExtension},
+        scene::SceneContainer,
+    },
     message::MessageSender,
+    plugins::{
+        absm::{command::fetch_machine, selection::SelectedEntity},
+        animation::{self, command::fetch_animations_container},
+    },
     scene::{
         commands::ChangeSelectionCommand, controller::SceneController, selector::HierarchyNode,
         Selection,
@@ -74,7 +78,8 @@ use crate::{
     },
     Message,
 };
-use std::{any::Any, fs::File, io::Write, path::Path};
+use fyrox::gui::message::UiMessage;
+use std::{fs::File, io::Write, path::Path};
 
 pub struct PreviewInstance {
     pub instance: Handle<UiNode>,
@@ -116,14 +121,6 @@ impl UiScene {
 }
 
 impl SceneController for UiScene {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn on_key_up(
         &mut self,
         _key: KeyCode,
@@ -274,7 +271,7 @@ impl SceneController for UiScene {
         match self.ui.save(path) {
             Ok(visitor) => {
                 if settings.debugging.save_scene_in_text_form {
-                    let text = visitor.save_text();
+                    let text = visitor.save_ascii_to_string();
                     let mut path = path.to_path_buf();
                     path.set_extension("txt");
                     if let Ok(mut file) = File::create(path) {
@@ -375,12 +372,13 @@ impl SceneController for UiScene {
                 if let Some(node) = self.ui.try_get(*node) {
                     let bounds = node.screen_bounds();
                     let clip_bounds = node.clip_bounds();
-                    let drawing_context = self.ui.get_drawing_context_mut();
+                    let drawing_context = &mut self.ui.drawing_context;
                     drawing_context.push_rect(&bounds, 1.0);
                     drawing_context.commit(
                         clip_bounds,
                         Brush::Solid(Color::GREEN),
                         CommandTexture::None,
+                        &self.ui.standard_material,
                         None,
                     );
                 }
@@ -396,9 +394,10 @@ impl SceneController for UiScene {
                 .render_ui_to_texture(
                     self.render_target.clone(),
                     self.ui.screen_size(),
-                    self.ui.get_drawing_context(),
+                    &self.ui.drawing_context,
                     Color::DIM_GRAY,
                     PixelKind::RGBA8,
+                    &engine.resource_manager,
                 ),
         );
     }
@@ -467,24 +466,23 @@ impl SceneController for UiScene {
                 self.select_object(*handle);
             }
             Message::SyncNodeHandleName { view, handle } => {
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(HandlePropertyEditorMessage::name(
-                        *view,
-                        MessageDirection::ToWidget,
+                engine.user_interfaces.first_mut().send_message(
+                    UiMessage::with_data(HandlePropertyEditorNameMessage(
                         self.ui
                             .try_get((*handle).into())
                             .map(|n| n.name().to_owned()),
-                    ));
+                    ))
+                    .with_destination(*view)
+                    .with_direction(MessageDirection::ToWidget),
+                );
             }
             Message::ProvideSceneHierarchy { view } => {
                 engine.user_interfaces.first_mut().send_message(
-                    HandlePropertyEditorMessage::hierarchy(
-                        *view,
-                        MessageDirection::ToWidget,
-                        HierarchyNode::from_ui_node(self.ui.root(), Handle::NONE, &self.ui),
-                    ),
+                    UiMessage::with_data(HandlePropertyEditorHierarchyMessage(
+                        HierarchyNode::from_scene_node(self.ui.root(), Handle::NONE, &self.ui),
+                    ))
+                    .with_destination(*view)
+                    .with_direction(MessageDirection::ToWidget),
                 );
             }
             _ => {}
@@ -677,6 +675,128 @@ impl SceneController for UiScene {
                 Log::err(format!("Failed to handle a property {}", args.path()))
             }
         } else if group.len() == 1 {
+            self.message_sender
+                .send(Message::DoCommand(group.into_iter().next().unwrap()))
+        } else {
+            self.message_sender.do_command(CommandGroup::from(group));
+        }
+    }
+
+    fn paste_property(
+        &mut self,
+        path: &str,
+        value: &dyn Reflect,
+        selection: &Selection,
+        _engine: &mut Engine,
+    ) {
+        let group = if let Some(selection) = selection.as_ui() {
+            selection
+                .widgets
+                .iter()
+                .filter_map(|&node_handle| {
+                    value.try_clone_box().map(|value| {
+                        Command::new(SetPropertyCommand::new(
+                            path.to_string(),
+                            value,
+                            move |ctx| ctx.get_mut::<UiSceneContext>().ui.node_mut(node_handle),
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else if let Some(selection) = selection.as_animation() {
+            if self
+                .ui
+                .try_get_of_type::<AnimationPlayer>(selection.animation_player)
+                .and_then(|player| player.animations().try_get(selection.animation))
+                .is_some()
+            {
+                let animation_player = selection.animation_player;
+                let animation = selection.animation;
+                selection
+                    .entities
+                    .iter()
+                    .filter_map(|e| {
+                        if let &animation::selection::SelectedEntity::Signal(id) = e {
+                            value.try_clone_box().map(|value| {
+                                Command::new(SetPropertyCommand::new(
+                                    path.to_string(),
+                                    value,
+                                    move |ctx| {
+                                        fetch_animations_container(animation_player, ctx)[animation]
+                                            .signals_mut()
+                                            .iter_mut()
+                                            .find(|s| s.id == id)
+                                            .unwrap()
+                                    },
+                                ))
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else if let Some(selection) = selection.as_absm() {
+            if self
+                .ui
+                .try_get(selection.absm_node_handle)
+                .and_then(|n| n.component_ref::<AnimationBlendingStateMachine>())
+                .is_some()
+            {
+                if let Some(layer_index) = selection.layer {
+                    let absm_node_handle = selection.absm_node_handle;
+                    selection
+                        .entities
+                        .iter()
+                        .filter_map(|ent| match *ent {
+                            SelectedEntity::Transition(transition) => {
+                                value.try_clone_box().map(|value| {
+                                    Command::new(SetPropertyCommand::new(
+                                        path.to_string(),
+                                        value,
+                                        move |ctx| {
+                                            let machine = fetch_machine(ctx, absm_node_handle);
+                                            &mut machine.layers_mut()[layer_index].transitions_mut()
+                                                [transition]
+                                        },
+                                    ))
+                                })
+                            }
+                            SelectedEntity::State(state) => value.try_clone_box().map(|value| {
+                                Command::new(SetPropertyCommand::new(
+                                    path.to_string(),
+                                    value,
+                                    move |ctx| {
+                                        let machine = fetch_machine(ctx, absm_node_handle);
+                                        &mut machine.layers_mut()[layer_index].states_mut()[state]
+                                    },
+                                ))
+                            }),
+                            SelectedEntity::PoseNode(pose) => value.try_clone_box().map(|value| {
+                                Command::new(SetPropertyCommand::new(
+                                    path.to_string(),
+                                    value,
+                                    move |ctx| {
+                                        let machine = fetch_machine(ctx, absm_node_handle);
+                                        &mut machine.layers_mut()[layer_index].nodes_mut()[pose]
+                                    },
+                                ))
+                            }),
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        if group.len() == 1 {
             self.message_sender
                 .send(Message::DoCommand(group.into_iter().next().unwrap()))
         } else {

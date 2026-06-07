@@ -40,6 +40,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
+
 use fyrox_graph::{
     constructor::{ConstructorProvider, GraphNodeConstructor},
     BaseSceneGraph,
@@ -189,6 +190,7 @@ impl DropdownListMessage {
 /// A dropdown list could be opened and closed manually using [`DropdownListMessage::Open`] and
 /// [`DropdownListMessage::Close`] messages.  
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct DropdownList {
     /// Base widget of the dropdown list.
     pub widget: Widget,
@@ -357,7 +359,9 @@ impl Control for DropdownList {
                 ));
             }
         } else if let Some(msg) = message.data::<PopupMessage>() {
-            if message.destination() == *self.popup {
+            if message.destination() == *self.popup
+                && message.direction() == MessageDirection::ToWidget
+            {
                 match msg {
                     PopupMessage::Open => {
                         ui.send_message(DropdownListMessage::open(

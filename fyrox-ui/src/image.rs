@@ -26,25 +26,26 @@
 use crate::{
     brush::Brush,
     color::draw_checker_board,
-    core::{algebra::Vector2, color::Color, math::Rect, pool::Handle},
-    core::{reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*},
+    core::{
+        algebra::Vector2, color::Color, math::Rect, pool::Handle, reflect::prelude::*,
+        type_traits::prelude::*, variable::InheritableVariable, visitor::prelude::*,
+    },
     define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
     message::{MessageDirection, UiMessage},
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, UiNode, UserInterface,
 };
-use fyrox_core::uuid_provider;
-use fyrox_core::variable::InheritableVariable;
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_resource::untyped::UntypedResource;
+use fyrox_texture::{TextureKind, TextureResource};
 use std::ops::{Deref, DerefMut};
 
 /// A set of messages that could be used to alter [`Image`] widget state at runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageMessage {
     /// Used to set new texture of the [`Image`] widget.
-    Texture(Option<UntypedResource>),
+    Texture(Option<TextureResource>),
     /// Used to enable or disable texture flip of the [`Image`] widget. See respective [section](Image#vertical-flip)
     /// of the docs for more info.
     Flip(bool),
@@ -59,7 +60,7 @@ pub enum ImageMessage {
 impl ImageMessage {
     define_constructor!(
         /// Creates [`ImageMessage::Texture`] message.
-        ImageMessage:Texture => fn texture(Option<UntypedResource>), layout: false
+        ImageMessage:Texture => fn texture(Option<TextureResource>), layout: false
     );
 
     define_constructor!(
@@ -84,39 +85,40 @@ impl ImageMessage {
 /// ## Usage
 ///
 /// ```rust,no_run
-/// # use fyrox_resource::untyped::UntypedResource;
+/// # use fyrox_texture::TextureResource;
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
 /// #     image::ImageBuilder, widget::WidgetBuilder, BuildContext, UiNode,
 /// # };
 ///
-/// fn create_image(ctx: &mut BuildContext, texture: UntypedResource) -> Handle<UiNode> {
-///     // You must explicitly set width and height of the image, otherwise it will collapse to a
-///     // point and you won't see anything.
-///     let width = 100.0;
-///     let height = 100.0;
-///     ImageBuilder::new(WidgetBuilder::new().with_width(width).with_height(height))        
+/// fn create_image(ctx: &mut BuildContext, texture: TextureResource) -> Handle<UiNode> {
+///     ImageBuilder::new(WidgetBuilder::new())
 ///         .with_texture(texture)
 ///         .build(ctx)
 /// }
 /// ```
 ///
-/// There are one common pitfall when using Image widget - you must explicitly set width and height of the image if it is
-/// not placed to some panel, that will stretch it automatically. In other words if you created an image with undefined
-/// width and height, then putting it to some container like Grid' cell will stretch the image to fit cell bounds.
+/// By default, the Image widget will try to use the size of the texture as its desired size for layout
+/// process. This means that the widget will be as large as the texture if the outer bounds allows
+/// that. You can specify the desired width and height manually and the image will shrink/expand
+/// automatically.
+///
+/// Keep in mind, that texture is a resource, and it could be loaded asynchronously, and during that
+/// process, the UI can't fetch texture's size, and it will be collapsed into a point. After it fully
+/// loaded, the widget will take texture's size as normal.
 ///
 /// ## Vertical Flip
 ///
 /// In some rare cases you need to flip your source image before showing it, there is `.with_flip` option for that:
 ///
 /// ```rust,no_run
-/// # use fyrox_resource::untyped::UntypedResource;
+/// # use fyrox_texture::TextureResource;
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
 /// #     image::ImageBuilder, widget::WidgetBuilder, BuildContext, UiNode
 /// # };
 ///
-/// fn create_image(ctx: &mut BuildContext, texture: UntypedResource) -> Handle<UiNode> {
+/// fn create_image(ctx: &mut BuildContext, texture: TextureResource) -> Handle<UiNode> {
 ///     ImageBuilder::new(WidgetBuilder::new().with_width(100.0).with_height(100.0))
 ///         .with_flip(true) // Flips an image vertically
 ///         .with_texture(texture)
@@ -136,13 +138,13 @@ impl ImageMessage {
 /// be enabled either when building the widget or via [`ImageMessage::CheckerboardBackground`] message:
 ///
 /// ```rust,no_run
-/// # use fyrox_resource::untyped::UntypedResource;
+/// # use fyrox_texture::TextureResource;
 /// # use fyrox_ui::{
 /// #     core::pool::Handle,
 /// #     image::ImageBuilder, widget::WidgetBuilder, BuildContext, UiNode
 /// # };
 ///
-/// fn create_image(ctx: &mut BuildContext, texture: UntypedResource) -> Handle<UiNode> {
+/// fn create_image(ctx: &mut BuildContext, texture: TextureResource) -> Handle<UiNode> {
 ///     ImageBuilder::new(WidgetBuilder::new().with_width(100.0).with_height(100.0))
 ///         .with_checkerboard_background(true) // Turns on checkerboard background.
 ///         .with_texture(texture)
@@ -156,13 +158,13 @@ impl ImageMessage {
 /// custom UV rect (UV stands for XY coordinates, but texture related):
 ///
 /// ```rust,no_run
-/// # use fyrox_resource::untyped::UntypedResource;
+/// # use fyrox_texture::TextureResource;
 /// # use fyrox_ui::{
 /// #     core::{pool::Handle, math::Rect},
 /// #     image::ImageBuilder, widget::WidgetBuilder, BuildContext, UiNode
 /// # };
 ///
-/// fn create_image(ctx: &mut BuildContext, texture: UntypedResource) -> Handle<UiNode> {
+/// fn create_image(ctx: &mut BuildContext, texture: TextureResource) -> Handle<UiNode> {
 ///     ImageBuilder::new(WidgetBuilder::new().with_width(100.0).with_height(100.0))
 ///         .with_uv_rect(Rect::new(0.0, 0.0, 0.25, 0.25)) // Uses top-left quadrant of the texture.
 ///         .with_texture(texture)
@@ -177,18 +179,23 @@ impl ImageMessage {
 /// It is useful if you have many custom UI elements packed in a single texture atlas. Drawing using atlases is much more
 /// efficient and faster. This could also be used for animations, when you have multiple frames packed in a single atlas
 /// and changing texture coordinates over the time.
-#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider, TypeUuidProvider)]
+#[type_uuid(id = "18e18d0f-cb84-4ac1-8050-3480a2ec3de5")]
+#[visit(optional)]
+#[reflect(derived_type = "UiNode")]
 pub struct Image {
     /// Base widget of the image.
     pub widget: Widget,
     /// Current texture of the image.
-    pub texture: InheritableVariable<Option<UntypedResource>>,
+    pub texture: InheritableVariable<Option<TextureResource>>,
     /// Defines whether to vertically flip the image or not.
     pub flip: InheritableVariable<bool>,
-    /// Specifies arbitrary portion of the texture.
+    /// Specifies an arbitrary portion of the texture.
     pub uv_rect: InheritableVariable<Rect<f32>>,
-    /// Defines whether to use checkerboard background or not.
+    /// Defines whether to use the checkerboard background or not.
     pub checkerboard_background: InheritableVariable<bool>,
+    /// Defines whether the image should keep its aspect ratio or stretch to the available size.
+    pub keep_aspect_ratio: InheritableVariable<bool>,
 }
 
 impl ConstructorProvider<UiNode, UserInterface> for Image {
@@ -210,14 +217,43 @@ impl ConstructorProvider<UiNode, UserInterface> for Image {
 
 crate::define_widget_deref!(Image);
 
-uuid_provider!(Image = "18e18d0f-cb84-4ac1-8050-3480a2ec3de5");
-
 impl Control for Image {
+    fn measure_override(&self, ui: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
+        let mut size: Vector2<f32> = self.widget.measure_override(ui, available_size);
+
+        if let Some(texture) = self.texture.as_ref() {
+            let state = texture.state();
+            if let Some(data) = state.data_ref() {
+                if let TextureKind::Rectangle { width, height } = data.kind() {
+                    let width = width as f32;
+                    let height = height as f32;
+
+                    if *self.keep_aspect_ratio {
+                        let aspect_ratio = width / height;
+                        size.x = size.x.max(width).min(available_size.x);
+                        size.y = size.x * aspect_ratio;
+                    } else {
+                        size.x = size.x.max(width);
+                        size.y = size.y.max(height);
+                    }
+                }
+            }
+        }
+
+        size
+    }
+
     fn draw(&self, drawing_context: &mut DrawingContext) {
         let bounds = self.widget.bounding_rect();
 
         if *self.checkerboard_background {
-            draw_checker_board(bounds, self.clip_bounds(), 8.0, drawing_context);
+            draw_checker_board(
+                bounds,
+                self.clip_bounds(),
+                8.0,
+                &self.material,
+                drawing_context,
+            );
         }
 
         if self.texture.is_some() || !*self.checkerboard_background {
@@ -259,7 +295,13 @@ impl Control for Image {
                 .texture
                 .as_ref()
                 .map_or(CommandTexture::None, |t| CommandTexture::Texture(t.clone()));
-            drawing_context.commit(self.clip_bounds(), self.widget.background(), texture, None);
+            drawing_context.commit(
+                self.clip_bounds(),
+                self.widget.background(),
+                texture,
+                &self.material,
+                None,
+            );
         }
     }
 
@@ -291,10 +333,11 @@ impl Control for Image {
 /// Image builder is used to create [`Image`] widget instances and register them in the user interface.
 pub struct ImageBuilder {
     widget_builder: WidgetBuilder,
-    texture: Option<UntypedResource>,
+    texture: Option<TextureResource>,
     flip: bool,
     uv_rect: Rect<f32>,
     checkerboard_background: bool,
+    keep_aspect_ratio: bool,
 }
 
 impl ImageBuilder {
@@ -306,6 +349,7 @@ impl ImageBuilder {
             flip: false,
             uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             checkerboard_background: false,
+            keep_aspect_ratio: true,
         }
     }
 
@@ -317,13 +361,13 @@ impl ImageBuilder {
     }
 
     /// Sets the texture that will be used for drawing.
-    pub fn with_texture(mut self, texture: UntypedResource) -> Self {
+    pub fn with_texture(mut self, texture: TextureResource) -> Self {
         self.texture = Some(texture);
         self
     }
 
     /// Specifies the texture that will be used for drawing.
-    pub fn with_opt_texture(mut self, texture: Option<UntypedResource>) -> Self {
+    pub fn with_opt_texture(mut self, texture: Option<TextureResource>) -> Self {
         self.texture = texture;
         self
     }
@@ -342,6 +386,12 @@ impl ImageBuilder {
         self
     }
 
+    /// Sets whether the image should keep its aspect ratio or stretch to the available size.
+    pub fn with_keep_aspect_ratio(mut self, keep_aspect_ratio: bool) -> Self {
+        self.keep_aspect_ratio = keep_aspect_ratio;
+        self
+    }
+
     /// Builds the [`Image`] widget, but does not add it to the UI.
     pub fn build_node(mut self, ctx: &BuildContext) -> UiNode {
         if self.widget_builder.background.is_none() {
@@ -354,6 +404,7 @@ impl ImageBuilder {
             flip: self.flip.into(),
             uv_rect: self.uv_rect.into(),
             checkerboard_background: self.checkerboard_background.into(),
+            keep_aspect_ratio: self.keep_aspect_ratio.into(),
         };
         UiNode::new(image)
     }

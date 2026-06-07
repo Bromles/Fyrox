@@ -48,9 +48,11 @@ use crate::{
 };
 use fyrox_core::algebra::{Isometry3, Translation3};
 use fyrox_core::uuid_provider;
+
 use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::{BaseSceneGraph, SceneGraphNode};
 use rapier3d::geometry::{self, ColliderHandle};
+use std::fmt::Write;
 use std::{
     cell::Cell,
     ops::{Add, BitAnd, BitOr, Deref, DerefMut, Mul, Not, Shl},
@@ -222,10 +224,65 @@ pub struct ConvexPolyhedronShape {
 }
 
 /// A set of bits used for pairwise collision filtering.
-#[derive(Clone, Copy, Default, PartialEq, Debug, Reflect, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Reflect, Eq)]
 pub struct BitMask(pub u32);
 
 uuid_provider!(BitMask = "f2db0c2a-921b-4728-9ce4-2506d95c60fa");
+
+impl BitMask {
+    /// BitMask with all bits set. BitMask(u32::MAX)
+    pub const fn all() -> Self {
+        Self(u32::MAX)
+    }
+    /// BitMask with no bits set. BitMask(0)
+    pub const fn none() -> Self {
+        Self(0)
+    }
+    /// Construct BitMask from this BitMask plus setting bit at the given index to 1.
+    pub const fn with(self, index: usize) -> Self {
+        Self(self.0 | (1 << index))
+    }
+    /// Construct BitMask from this BitMask plus resetting the bit at the given index to 0.
+    pub const fn without(self, index: usize) -> Self {
+        Self(self.0 & !(1 << index))
+    }
+    /// True if the bit at `index` is set.
+    pub fn bit(&self, index: usize) -> bool {
+        (self.0 >> index) & 1 != 0
+    }
+    /// Set or reset the bit at `index`.
+    pub fn set_bit(&mut self, index: usize, value: bool) {
+        if value {
+            self.0 |= 1 << index;
+        } else {
+            self.0 &= !(1 << index);
+        }
+    }
+}
+
+impl std::fmt::Debug for BitMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BitMask({:08x})", self.0)
+    }
+}
+
+impl std::fmt::Display for BitMask {
+    /// Represent the bit mask in the same way it is shown in the editor, with bit 0 on the left and bit 31 on the right.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut value = self.0;
+        for i in 0..4 {
+            if i != 0 {
+                f.write_char(' ')?;
+            }
+            for _ in 0..8 {
+                let bit = if value & 1 == 1 { '1' } else { '0' };
+                value >>= 1;
+                f.write_char(bit)?;
+            }
+        }
+        Ok(())
+    }
+}
 
 impl Visit for BitMask {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
@@ -346,11 +403,17 @@ impl InteractionGroups {
     }
 }
 
+impl std::fmt::Display for InteractionGroups {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (filter: {})", self.memberships, self.filter)
+    }
+}
+
 impl Default for InteractionGroups {
     fn default() -> Self {
         Self {
-            memberships: BitMask(u32::MAX),
-            filter: BitMask(u32::MAX),
+            memberships: BitMask::all(),
+            filter: BitMask::all(),
         }
     }
 }
@@ -549,6 +612,7 @@ impl ColliderShape {
 /// Collider is a geometric entity that can be attached to a rigid body to allow participate it
 /// participate in contact generation, collision response and proximity queries.
 #[derive(Reflect, Visit, Debug, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Collider {
     base: Base,
 
@@ -822,7 +886,22 @@ impl Collider {
     }
 
     /// Returns an iterator that yields contact information for the collider.
-    /// Contacts checks between two regular colliders
+    /// Contacts checks between two non-sensor colliders.
+    /// This includes only cases where two colliders are pressing against each other,
+    /// and only if [`ContactPair::has_any_active_contact`] is true.
+    /// When `has_any_active_contact` is false, the colliders may merely have overlapping
+    /// bounding boxes. See [`Collider::active_contacts`] for an interator that yields
+    /// only pairs where `has_any_active_contact` is true.
+    ///
+    /// When a collider is passing through a sensor collider, that goes into the
+    /// [`Collider::intersects`] list. Those intersections will not be produced by
+    /// this iterator.
+    ///
+    /// Each pair produced by this iterator includes the handles of two colliders,
+    /// this collider and some other collider. There is no guarantee about whether
+    /// this collider will be the first member of the pair or the second,
+    /// but [`ContactPair::other`] can be used to get the handle of the other collider
+    /// given the handle of this collider.
     pub fn contacts<'a>(
         &self,
         physics: &'a PhysicsWorld,
@@ -830,13 +909,59 @@ impl Collider {
         physics.contacts_with(self.native.get())
     }
 
+    /// Returns an iterator that yields contact information for the collider.
+    /// Contacts checks between two non-sensor colliders that are actually touching.
+    /// This includes only cases where two colliders are pressing against each other.
+    /// When a collider is passing through a sensor collider, that goes into the
+    /// [`Collider::intersects`] list.
+    ///
+    /// [`ContactPair::has_any_active_contact`] is guaranteed to be true for every pair
+    /// produced by this iterator.
+    ///
+    /// Each pair produced by this iterator includes the handles of two colliders,
+    /// this collider and some other collider. There is no guarantee about whether
+    /// this collider will be the first member of the pair or the second,
+    /// but [`ContactPair::other`] can be used to get the handle of the other collider
+    /// given the handle of this collider.
+    pub fn active_contacts<'a>(
+        &self,
+        physics: &'a PhysicsWorld,
+    ) -> impl Iterator<Item = ContactPair> + 'a {
+        self.contacts(physics)
+            .filter(|pair| pair.has_any_active_contact)
+    }
+
     /// Returns an iterator that yields intersection information for the collider.
-    /// Intersections checks between regular colliders and sensor colliders
+    /// Intersections checks for colliders passing through each other due to at least
+    /// one of the colliders being a sensor.
+    /// If [`IntersectionPair::has_any_active_contact`] is true, that means the colliders are actually touching.
+    /// When `has_any_active_contact` is false, the colliders may merely have overlapping
+    /// bounding boxes. See [`Collider::active_intersects`] for an interator that yields
+    /// only colliders that actually overlap this collider.
+    ///
+    /// Each pair produced by this iterator includes the handles of two colliders,
+    /// this collider and some other collider. There is no guarantee about whether
+    /// this collider will be the first member of the pair or the second,
+    /// but [`IntersectionPair::other`] can be used to get the handle of the other collider
+    /// given the handle of this collider.
     pub fn intersects<'a>(
         &self,
         physics: &'a PhysicsWorld,
     ) -> impl Iterator<Item = IntersectionPair> + 'a {
         physics.intersections_with(self.native.get())
+    }
+
+    /// Returns an iterator that yields intersection information for the collider.
+    /// Intersections checks for colliders passing through each other due to at least
+    /// one of the colliders being a sensor.
+    pub fn active_intersects<'a>(
+        &self,
+        physics: &'a PhysicsWorld,
+    ) -> impl Iterator<Item = Handle<Node>> + 'a {
+        let self_handle = self.handle();
+        self.intersects(physics)
+            .filter(|pair| pair.has_any_active_contact)
+            .map(move |pair| pair.other(self_handle))
     }
 
     pub(crate) fn needs_sync_model(&self) -> bool {
@@ -1011,7 +1136,7 @@ impl ColliderBuilder {
         self
     }
 
-    /// Sets desired friction value.    
+    /// Sets desired friction value.
     pub fn with_friction(mut self, friction: f32) -> Self {
         self.friction = friction;
         self
@@ -1023,7 +1148,7 @@ impl ColliderBuilder {
         self
     }
 
-    /// Sets desired solver groups.    
+    /// Sets desired solver groups.
     pub fn with_solver_groups(mut self, solver_groups: InteractionGroups) -> Self {
         self.solver_groups = solver_groups;
         self
@@ -1077,6 +1202,7 @@ impl ColliderBuilder {
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use crate::core::algebra::Vector2;
     use crate::scene::{
         base::BaseBuilder,
@@ -1145,5 +1271,58 @@ mod test {
                 .intersects(&graph.physics)
                 .count()
         );
+    }
+    #[test]
+    fn test_bitmask_display() {
+        assert_eq!(
+            BitMask(1).to_string(),
+            "10000000 00000000 00000000 00000000"
+        );
+        assert_eq!(
+            BitMask(15).to_string(),
+            "11110000 00000000 00000000 00000000"
+        );
+        assert_eq!(
+            BitMask(16).to_string(),
+            "00001000 00000000 00000000 00000000"
+        );
+        assert_eq!(
+            BitMask(256).to_string(),
+            "00000000 10000000 00000000 00000000"
+        );
+        assert_eq!(
+            BitMask(1 << 31).to_string(),
+            "00000000 00000000 00000000 00000001"
+        );
+    }
+    #[test]
+    fn test_bitmask_debug() {
+        assert_eq!(format!("{:?}", BitMask(1)), "BitMask(00000001)");
+        assert_eq!(format!("{:?}", BitMask(15)), "BitMask(0000000f)");
+        assert_eq!(format!("{:?}", BitMask(16)), "BitMask(00000010)");
+        assert_eq!(format!("{:?}", BitMask(256)), "BitMask(00000100)");
+        assert_eq!(format!("{:?}", BitMask(1 << 31)), "BitMask(80000000)");
+    }
+    #[test]
+    fn test_bitmask_set_bit() {
+        let mut mask = BitMask::none();
+        mask.set_bit(0, true);
+        assert!(mask.bit(0));
+        assert_eq!(mask.to_string(), "10000000 00000000 00000000 00000000");
+        mask.set_bit(3, true);
+        assert!(mask.bit(3));
+        assert_eq!(mask.to_string(), "10010000 00000000 00000000 00000000");
+        mask.set_bit(0, false);
+        assert!(!mask.bit(0));
+        assert_eq!(mask.to_string(), "00010000 00000000 00000000 00000000");
+    }
+    #[test]
+    fn test_bitmask_with() {
+        let mask = BitMask::none().with(8);
+        assert_eq!(mask.to_string(), "00000000 10000000 00000000 00000000");
+        let mask = BitMask::all().without(8);
+        assert_eq!(mask.to_string(), "11111111 01111111 11111111 11111111");
+        let mask = BitMask::none().with(1).with(2).with(3);
+        assert_eq!(mask.to_string(), "01110000 00000000 00000000 00000000");
     }
 }

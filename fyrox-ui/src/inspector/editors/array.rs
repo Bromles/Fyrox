@@ -20,8 +20,8 @@
 
 use crate::{
     core::{
-        pool::Handle, reflect::prelude::*, reflect::FieldValue, type_traits::prelude::*,
-        uuid_provider, visitor::prelude::*, PhantomDataSendSync,
+        pool::Handle, reflect::prelude::*, type_traits::prelude::*, uuid_provider,
+        visitor::prelude::*, PhantomDataSendSync,
     },
     define_constructor,
     inspector::{
@@ -39,6 +39,7 @@ use crate::{
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
+
 use fyrox_graph::BaseSceneGraph;
 use std::sync::Arc;
 use std::{
@@ -62,6 +63,7 @@ impl ArrayEditorMessage {
 }
 
 #[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ArrayEditor {
     pub widget: Widget,
     pub items: Vec<Item>,
@@ -92,7 +94,7 @@ impl Control for ArrayEditor {
 
 pub struct ArrayEditorBuilder<'a, T, I>
 where
-    T: Reflect + 'static,
+    T: Reflect,
     I: IntoIterator<Item = &'a T>,
 {
     widget_builder: WidgetBuilder,
@@ -114,48 +116,21 @@ fn create_item_views(items: &[Item]) -> Vec<Handle<UiNode>> {
         .collect::<Vec<_>>()
 }
 
-fn make_proxy<'a, 'b, T>(
-    array_property_info: &'b FieldInfo<'a, 'b>,
-    item: &'a T,
-    name: &'b str,
-    display_name: &'b str,
-) -> Result<FieldInfo<'a, 'b>, InspectorError>
-where
-    T: Reflect + FieldValue,
-    'b: 'a,
-{
-    Ok(FieldInfo {
-        owner_type_id: TypeId::of::<T>(),
-        name,
-        display_name,
-        value: item,
-        reflect_value: item,
-        read_only: array_property_info.read_only,
-        immutable_collection: array_property_info.immutable_collection,
-        min_value: array_property_info.min_value,
-        max_value: array_property_info.max_value,
-        step: array_property_info.step,
-        precision: array_property_info.precision,
-        description: array_property_info.description,
-        type_name: array_property_info.type_name,
-        doc: array_property_info.doc,
-    })
-}
-
 fn create_items<'a, 'b, T, I>(
     iter: I,
     environment: Option<Arc<dyn InspectorEnvironment>>,
     definition_container: Arc<PropertyEditorDefinitionContainer>,
-    property_info: &FieldInfo<'a, 'b>,
+    property_info: &FieldRef<'a, 'b>,
     ctx: &mut BuildContext,
     sync_flag: u64,
     layer_index: usize,
     generate_property_string_values: bool,
     filter: PropertyFilter,
     name_column_width: f32,
+    base_path: String,
 ) -> Result<Vec<Item>, InspectorError>
 where
-    T: Reflect + 'static,
+    T: Reflect,
     I: IntoIterator<Item = &'a T>,
 {
     let mut items = Vec::new();
@@ -165,12 +140,31 @@ where
             let name = format!("{}[{index}]", property_info.name);
             let display_name = format!("{}[{index}]", property_info.display_name);
 
+            let metadata = FieldMetadata {
+                name: &name,
+                display_name: &display_name,
+                read_only: property_info.read_only,
+                immutable_collection: property_info.immutable_collection,
+                min_value: property_info.min_value,
+                max_value: property_info.max_value,
+                step: property_info.step,
+                precision: property_info.precision,
+                description: property_info.description,
+                tag: property_info.tag,
+                doc: property_info.doc,
+            };
+
+            let proxy_property_info = FieldRef {
+                metadata: &metadata,
+                value: item,
+            };
+
             let editor =
                 definition
                     .property_editor
                     .create_instance(PropertyEditorBuildContext {
                         build_context: ctx,
-                        property_info: &make_proxy::<T>(property_info, item, &name, &display_name)?,
+                        property_info: &proxy_property_info,
                         environment: environment.clone(),
                         definition_container: definition_container.clone(),
                         sync_flag,
@@ -178,6 +172,7 @@ where
                         generate_property_string_values,
                         filter: filter.clone(),
                         name_column_width,
+                        base_path: format!("{base_path}[{index}]"),
                     })?;
 
             if let PropertyEditorInstance::Simple { editor } = editor {
@@ -200,7 +195,7 @@ where
 
 impl<'a, T, I> ArrayEditorBuilder<'a, T, I>
 where
-    T: Reflect + 'static,
+    T: Reflect,
     I: IntoIterator<Item = &'a T>,
 {
     pub fn new(widget_builder: WidgetBuilder) -> Self {
@@ -254,9 +249,10 @@ where
     pub fn build(
         self,
         ctx: &mut BuildContext,
-        property_info: &FieldInfo<'a, '_>,
+        property_info: &FieldRef<'a, '_>,
         sync_flag: u64,
         name_column_width: f32,
+        base_path: String,
     ) -> Result<Handle<UiNode>, InspectorError> {
         let definition_container = self
             .definition_container
@@ -275,6 +271,7 @@ where
                 self.generate_property_string_values,
                 self.filter,
                 name_column_width,
+                base_path,
             )?
         } else {
             Vec::new()
@@ -296,7 +293,7 @@ where
 #[derive(Debug)]
 pub struct ArrayPropertyEditorDefinition<T, const N: usize>
 where
-    T: Reflect + Debug + 'static,
+    T: Reflect,
 {
     #[allow(dead_code)]
     phantom: PhantomDataSendSync<T>,
@@ -304,7 +301,7 @@ where
 
 impl<T, const N: usize> ArrayPropertyEditorDefinition<T, N>
 where
-    T: Reflect + Debug + 'static,
+    T: Reflect,
 {
     pub fn new() -> Self {
         Self::default()
@@ -313,7 +310,7 @@ where
 
 impl<T, const N: usize> Default for ArrayPropertyEditorDefinition<T, N>
 where
-    T: Reflect + Debug + 'static,
+    T: Reflect,
 {
     fn default() -> Self {
         Self {
@@ -324,7 +321,7 @@ where
 
 impl<T, const N: usize> PropertyEditorDefinition for ArrayPropertyEditorDefinition<T, N>
 where
-    T: Reflect + Debug + 'static,
+    T: Reflect,
 {
     fn value_type_id(&self) -> TypeId {
         TypeId::of::<[T; N]>()
@@ -357,6 +354,7 @@ where
                     ctx.property_info,
                     ctx.sync_flag,
                     ctx.name_column_width,
+                    ctx.base_path.clone(),
                 )?;
                 editor
             },
@@ -382,6 +380,7 @@ where
             definition_container,
             environment,
             name_column_width,
+            base_path,
         } = ctx;
 
         let instance_ref = if let Some(instance) = ui.node(instance).cast::<ArrayEditor>() {
@@ -405,16 +404,30 @@ where
                 let name = format!("{}[{index}]", property_info.name);
                 let display_name = format!("{}[{index}]", property_info.display_name);
 
+                let metadata = FieldMetadata {
+                    name: &name,
+                    display_name: &display_name,
+                    read_only: property_info.read_only,
+                    immutable_collection: property_info.immutable_collection,
+                    min_value: property_info.min_value,
+                    max_value: property_info.max_value,
+                    step: property_info.step,
+                    precision: property_info.precision,
+                    description: property_info.description,
+                    tag: property_info.tag,
+                    doc: property_info.doc,
+                };
+
+                let proxy_property_info = FieldRef {
+                    metadata: &metadata,
+                    value: obj,
+                };
+
                 if let Some(message) =
                     definition
                         .property_editor
                         .create_message(PropertyEditorMessageContext {
-                            property_info: &make_proxy::<T>(
-                                property_info,
-                                obj,
-                                &name,
-                                &display_name,
-                            )?,
+                            property_info: &proxy_property_info,
                             environment: environment.clone(),
                             definition_container: definition_container.clone(),
                             sync_flag,
@@ -424,6 +437,7 @@ where
                             generate_property_string_values,
                             filter: filter.clone(),
                             name_column_width,
+                            base_path: format!("{base_path}[{index}]"),
                         })?
                 {
                     ui.send_message(message.with_flags(ctx.sync_flag))
@@ -444,7 +458,7 @@ where
                 {
                     return Some(PropertyChanged {
                         name: ctx.name.to_string(),
-                        owner_type_id: ctx.owner_type_id,
+
                         value: FieldKind::Collection(Box::new(CollectionChanged::ItemChanged {
                             index: *index,
                             property: definition
@@ -452,7 +466,6 @@ where
                                 .translate_message(PropertyEditorTranslationContext {
                                     environment: ctx.environment.clone(),
                                     name: "",
-                                    owner_type_id: ctx.owner_type_id,
                                     message,
                                     definition_container: ctx.definition_container.clone(),
                                 })?

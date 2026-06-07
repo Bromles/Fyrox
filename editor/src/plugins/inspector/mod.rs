@@ -18,8 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::plugins::absm::animation_container_ref;
-use crate::plugins::inspector::editors::make_property_editors_container;
 use crate::{
     fyrox::{
         asset::manager::ResourceManager,
@@ -49,15 +47,19 @@ use crate::{
     load_image,
     message::MessageSender,
     plugin::EditorPlugin,
+    plugins::{absm::animation_container_ref, inspector::editors::make_property_editors_container},
     scene::{controller::SceneController, GameScene, Selection},
     send_sync_message,
     ui_scene::UiScene,
     utils::window_content,
     Editor, Message, WidgetMessage, WrapMode, MSG_SYNC_FLAG,
 };
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
-use fyrox::gui::utils::make_image_button_with_tooltip;
+use fyrox::gui::{
+    inspector::InspectorContextArgs,
+    stack_panel::StackPanelBuilder,
+    style::{resource::StyleResourceExt, Style},
+    utils::make_image_button_with_tooltip,
+};
 use std::{any::Any, sync::Arc};
 
 pub mod editors;
@@ -79,14 +81,26 @@ pub struct EditorEnvironment {
 }
 
 impl EditorEnvironment {
-    pub fn try_get_from(environment: &Option<Arc<dyn InspectorEnvironment>>) -> Option<&Self> {
+    pub fn try_get_from(
+        environment: &Option<Arc<dyn InspectorEnvironment>>,
+    ) -> Result<&Self, InspectorError> {
+        let environment = &**environment.as_ref().ok_or(InspectorError::Custom(
+            "Missing InspectorEnvironment".into(),
+        ))?;
         environment
-            .as_ref()
-            .and_then(|e| e.as_any().downcast_ref::<Self>())
+            .as_any()
+            .downcast_ref::<Self>()
+            .ok_or(InspectorError::Custom(format!(
+                "Expected InspectorEnvironment to be EditorEnvironment, found: {}",
+                environment.name(),
+            )))
     }
 }
 
 impl InspectorEnvironment for EditorEnvironment {
+    fn name(&self) -> String {
+        format!("EditorEnvironment:{:?}", self.type_id())
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -97,9 +111,11 @@ pub struct InspectorPlugin {
     pub property_editors: Arc<PropertyEditorDefinitionContainer>,
     pub(crate) window: Handle<UiNode>,
     pub inspector: Handle<UiNode>,
+    pub head: Handle<UiNode>,
     warning_text: Handle<UiNode>,
     type_name_text: Handle<UiNode>,
     docs_button: Handle<UiNode>,
+    clipboard: Option<Box<dyn Reflect>>,
 }
 
 fn fetch_available_animations(
@@ -159,19 +175,29 @@ fn is_out_of_sync(sync_errors: &[InspectorError]) -> bool {
 }
 
 impl InspectorPlugin {
-    pub fn new(ctx: &mut BuildContext, sender: MessageSender) -> Self {
-        let property_editors = Arc::new(make_property_editors_container(sender));
+    pub fn new(
+        ctx: &mut BuildContext,
+        sender: MessageSender,
+        resource_manager: ResourceManager,
+    ) -> Self {
+        let property_editors = Arc::new(make_property_editors_container(sender, resource_manager));
 
         let warning_text_str =
             "Multiple objects are selected, showing properties of the first object only!\
             Only common properties will be editable!";
 
+        let head = StackPanelBuilder::new(WidgetBuilder::new()).build(ctx);
+        let inspector = InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
+        let content =
+            StackPanelBuilder::new(WidgetBuilder::new().with_child(head).with_child(inspector))
+                .build(ctx);
+
         let warning_text;
         let type_name_text;
-        let inspector;
         let docs_button;
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("Inspector"))
             .with_title(WindowTitle::text("Inspector"))
+            .with_tab_label("Inspector")
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new()
@@ -223,11 +249,7 @@ impl InspectorPlugin {
                         )
                         .with_child(
                             ScrollViewerBuilder::new(WidgetBuilder::new().on_row(2))
-                                .with_content({
-                                    inspector =
-                                        InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
-                                    inspector
-                                })
+                                .with_content(content)
                                 .build(ctx),
                         ),
                 )
@@ -242,10 +264,12 @@ impl InspectorPlugin {
         Self {
             window,
             inspector,
+            head,
             property_editors,
             warning_text,
             type_name_text,
             docs_button,
+            clipboard: None,
         }
     }
 
@@ -261,7 +285,7 @@ impl InspectorPlugin {
             .context()
             .clone();
 
-        ctx.sync(obj, ui, 0, true, Default::default())
+        ctx.sync(obj, ui, 0, true, Default::default(), Default::default())
     }
 
     fn change_context(
@@ -280,17 +304,18 @@ impl InspectorPlugin {
             sender: sender.clone(),
         });
 
-        let context = InspectorContext::from_object(
-            obj,
-            &mut ui.build_ctx(),
-            self.property_editors.clone(),
-            Some(environment),
-            MSG_SYNC_FLAG,
-            0,
-            true,
-            Default::default(),
-            150.0,
-        );
+        let context = InspectorContext::from_object(InspectorContextArgs {
+            object: obj,
+            ctx: &mut ui.build_ctx(),
+            definition_container: self.property_editors.clone(),
+            environment: Some(environment),
+            sync_flag: MSG_SYNC_FLAG,
+            layer_index: 0,
+            generate_property_string_values: true,
+            filter: Default::default(),
+            name_column_width: 150.0,
+            base_path: Default::default(),
+        });
 
         ui.send_message(InspectorMessage::context(
             self.inspector,
@@ -384,6 +409,80 @@ impl EditorPlugin for InspectorPlugin {
         let Some(entry) = editor.scenes.current_scene_entry_mut() else {
             return;
         };
+
+        if (message.destination() == self.inspector
+            || editor
+                .engine
+                .user_interfaces
+                .first()
+                .is_node_child_of(message.destination(), self.inspector))
+            && message.direction() == MessageDirection::FromWidget
+        {
+            if let Some(msg) = message.data::<InspectorMessage>() {
+                match msg {
+                    InspectorMessage::CopyValue { path } => {
+                        entry.controller.first_selected_entity(
+                            &entry.selection,
+                            &editor.engine.scenes,
+                            &mut |entity| {
+                                entity.resolve_path(path, &mut |result| {
+                                    if let Ok(result) = result {
+                                        self.clipboard = result.try_clone_box();
+                                    }
+                                });
+                            },
+                        );
+                    }
+                    InspectorMessage::PasteValue { dest } => {
+                        if let Some(value) = self.clipboard.as_ref() {
+                            entry.controller.paste_property(
+                                dest,
+                                &**value,
+                                &entry.selection,
+                                &mut editor.engine,
+                            );
+                        }
+                    }
+                    InspectorMessage::PropertyContextMenuOpened { path } => {
+                        let mut can_paste = false;
+                        let mut can_copy = false;
+
+                        // TODO: This could work incorrectly in case of multiselection of objects
+                        // of different types.
+                        entry.controller.first_selected_entity(
+                            &entry.selection,
+                            &editor.engine.scenes,
+                            &mut |entity| {
+                                entity.resolve_path(path, &mut |result| {
+                                    if let Ok(property) = result {
+                                        can_copy = property.try_clone_box().is_some();
+
+                                        if let Some(value) = self.clipboard.as_ref() {
+                                            value.as_any(&mut |value| {
+                                                property.as_any(&mut |property| {
+                                                    can_paste =
+                                                        property.type_id() == value.type_id();
+                                                })
+                                            })
+                                        }
+                                    }
+                                });
+                            },
+                        );
+
+                        editor.engine.user_interfaces.first().send_message(
+                            InspectorMessage::property_context_menu_status(
+                                message.destination(),
+                                MessageDirection::ToWidget,
+                                can_copy,
+                                can_paste,
+                            ),
+                        )
+                    }
+                    _ => (),
+                }
+            }
+        }
 
         if message.destination() == self.inspector
             && message.direction() == MessageDirection::FromWidget

@@ -217,11 +217,12 @@ impl Visit for ParticleSystemRng {
 ///     )
 ///     .with_radius(0.01)
 ///     .build()])
-///     .with_material(MaterialResource::new_ok(Default::default(), material))
+///     .with_material(MaterialResource::new_embedded(material))
 ///     .build(graph);
 /// }
 /// ```
 #[derive(Debug, Clone, Reflect, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct ParticleSystem {
     base: Base,
 
@@ -586,8 +587,8 @@ impl NodeTrait for ParticleSystem {
     }
 
     fn collect_render_data(&self, ctx: &mut RenderContext) -> RdcControlFlow {
-        if !self.should_be_rendered(ctx.frustum)
-            || self.is_distance_clipped(&ctx.observer_info.observer_position)
+        if !self.should_be_rendered(ctx.frustum, ctx.render_mask)
+            || self.is_distance_clipped(&ctx.observer_position.translation)
         {
             return RdcControlFlow::Continue;
         }
@@ -597,8 +598,8 @@ impl NodeTrait for ParticleSystem {
         }
 
         let distance_to_observer = ctx
-            .observer_info
             .observer_position
+            .translation
             .metric_distance(&self.global_position());
 
         let particle_alpha_factor = if distance_to_observer >= self.visible_distance() {
@@ -613,7 +614,7 @@ impl NodeTrait for ParticleSystem {
                 let actual_position = particle.position + self.base.global_position();
                 particle
                     .sqr_distance_to_camera
-                    .set((ctx.observer_info.observer_position - actual_position).norm_squared());
+                    .set((ctx.observer_position.translation - actual_position).norm_squared());
                 sorted_particles.push(i as u32);
             }
         }
@@ -638,6 +639,7 @@ impl NodeTrait for ParticleSystem {
         let sort_index = ctx.calculate_sorting_index(self.global_position());
 
         ctx.storage.push_triangles(
+            ctx.dynamic_surface_cache,
             Vertex::layout(),
             &self.material,
             RenderPath::Forward,
@@ -742,6 +744,7 @@ impl ParticleSystemBuilder {
             base_builder,
             emitters: Default::default(),
             material: MaterialResource::new_ok(
+                Uuid::new_v4(),
                 Default::default(),
                 Material::standard_particle_system(),
             ),

@@ -25,15 +25,17 @@ use crate::core::{
     visitor::prelude::*, TypeUuidProvider,
 };
 use fxhash::FxHashMap;
-use fyrox_resource::manager::BuiltInResource;
-use fyrox_resource::untyped::UntypedResource;
-use fyrox_resource::{embedded_data_source, io::ResourceIo, Resource, ResourceData};
+use fyrox_core::math::Rect;
+use fyrox_core::uuid;
+use fyrox_resource::untyped::ResourceKind;
+use fyrox_resource::{
+    embedded_data_source, io::ResourceIo, manager::BuiltInResource, untyped::UntypedResource,
+    Resource, ResourceData,
+};
 use lazy_static::lazy_static;
-use std::fmt::Formatter;
 use std::{
-    any::Any,
     error::Error,
-    fmt::Debug,
+    fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
     ops::Deref,
     path::Path,
@@ -41,18 +43,20 @@ use std::{
 
 pub mod loader;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FontGlyph {
-    pub top: f32,
-    pub left: f32,
+    pub bitmap_top: f32,
+    pub bitmap_left: f32,
+    pub bitmap_width: f32,
+    pub bitmap_height: f32,
     pub advance: f32,
     pub tex_coords: [Vector2<f32>; 4],
-    pub bitmap_width: usize,
-    pub bitmap_height: usize,
     pub page_index: usize,
+    pub bounds: Rect<f32>,
 }
 
 /// Page is a storage for rasterized glyphs.
+#[derive(Clone)]
 pub struct Page {
     pub pixels: Vec<u8>,
     pub texture: Option<UntypedResource>,
@@ -72,7 +76,7 @@ impl Debug for Page {
 
 /// Atlas is a storage for glyphs of a particular size, each atlas could have any number of pages to
 /// store the rasterized glyphs.
-#[derive(Default, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct Atlas {
     pub glyphs: Vec<FontGlyph>,
     pub char_map: FxHashMap<char, usize>,
@@ -96,6 +100,9 @@ impl Atlas {
                 // it in the inner font and render/pack it.
 
                 if let Some(char_index) = font.chars().get(&unicode) {
+                    if !height.0.is_finite() || height.0 <= f32::EPSILON {
+                        return None;
+                    }
                     let (metrics, glyph_raster) =
                         font.rasterize_indexed(char_index.get(), height.0);
 
@@ -147,12 +154,18 @@ impl Atlas {
                     page.modified = true;
 
                     let mut glyph = FontGlyph {
-                        left: metrics.xmin as f32,
-                        top: metrics.ymin as f32,
+                        bitmap_left: metrics.xmin as f32,
+                        bitmap_top: metrics.ymin as f32,
                         advance: metrics.advance_width,
                         tex_coords: Default::default(),
-                        bitmap_width: metrics.width,
-                        bitmap_height: metrics.height,
+                        bitmap_width: metrics.width as f32,
+                        bitmap_height: metrics.height as f32,
+                        bounds: Rect::new(
+                            metrics.bounds.xmin,
+                            metrics.bounds.ymin,
+                            metrics.bounds.width,
+                            metrics.bounds.height,
+                        ),
                         page_index,
                     };
 
@@ -198,7 +211,7 @@ impl Atlas {
     }
 }
 
-#[derive(Default, Debug, Reflect, Visit)]
+#[derive(Default, Clone, Debug, Reflect, Visit)]
 #[reflect(hide_all)]
 pub struct Font {
     #[visit(skip)]
@@ -212,14 +225,6 @@ pub struct Font {
 uuid_provider!(Font = "692fec79-103a-483c-bb0b-9fc3a349cb48");
 
 impl ResourceData for Font {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -230,6 +235,10 @@ impl ResourceData for Font {
 
     fn can_be_saved(&self) -> bool {
         false
+    }
+
+    fn try_clone_box(&self) -> Option<Box<dyn ResourceData>> {
+        Some(Box::new(self.clone()))
     }
 }
 
@@ -261,13 +270,17 @@ impl Hash for FontHeight {
 pub type FontResource = Resource<Font>;
 
 lazy_static! {
-    pub static ref BUILT_IN_FONT: BuiltInResource<Font> =
-        BuiltInResource::new(embedded_data_source!("./built_in_font.ttf"), |data| {
+    pub static ref BUILT_IN_FONT: BuiltInResource<Font> = BuiltInResource::new(
+        "__BUILT_IN_FONT__",
+        embedded_data_source!("./built_in_font.ttf"),
+        |data| {
             FontResource::new_ok(
-                "__BUILT_IN_FONT__".into(),
+                uuid!("77260e8e-f6fa-429c-8009-13dda2673925"),
+                ResourceKind::External,
                 Font::from_memory(data.to_vec(), 1024).unwrap(),
             )
-        });
+        }
+    );
 }
 
 impl Font {
@@ -339,6 +352,14 @@ impl Font {
             .horizontal_line_metrics(height)
             .map(|m| m.descent)
             .unwrap_or_default()
+    }
+
+    #[inline]
+    pub fn horizontal_kerning(&self, height: f32, left: char, right: char) -> Option<f32> {
+        self.inner
+            .as_ref()
+            .unwrap()
+            .horizontal_kern(left, right, height)
     }
 
     #[inline]

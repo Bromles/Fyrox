@@ -48,6 +48,7 @@ use crate::plugins::absm::{
     transition::{self, TransitionView},
 };
 use crate::utils::fetch_node_screen_center_ui;
+
 use std::{
     cell::Cell,
     ops::{Deref, DerefMut},
@@ -118,6 +119,7 @@ impl AbsmCanvasMessage {
 }
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct AbsmCanvas {
     widget: Widget,
     selection: Vec<Handle<UiNode>>,
@@ -211,7 +213,7 @@ impl AbsmCanvas {
     {
         if ui
             .try_get(node_handle)
-            .map_or(false, |n| n.has_component::<T>())
+            .is_some_and(|n| n.has_component::<T>())
         {
             return node_handle;
         }
@@ -339,6 +341,7 @@ impl Control for AbsmCanvas {
             self.clip_bounds(),
             self.widget.background(),
             CommandTexture::None,
+            &self.material,
             None,
         );
 
@@ -347,6 +350,7 @@ impl Control for AbsmCanvas {
             self.clip_bounds(),
             Brush::Solid(Color::opaque(60, 60, 60)),
             CommandTexture::None,
+            &self.material,
             None,
         );
 
@@ -362,6 +366,7 @@ impl Control for AbsmCanvas {
                     Brush::Solid(Color::WHITE),
                     *source_pos,
                     *dest_pos,
+                    &self.material,
                 );
             }
             Mode::CreateConnection {
@@ -375,6 +380,7 @@ impl Control for AbsmCanvas {
                     *dest_pos,
                     self.clip_bounds(),
                     Brush::Solid(Color::WHITE),
+                    &self.material,
                 );
             }
 

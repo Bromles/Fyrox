@@ -19,12 +19,8 @@
 // SOFTWARE.
 
 //! Renderer is a "workhorse" of the engine, it draws scenes (both 3D and 2D), user interface,
-//! debug geometry and has an ability to add user-defined render passes. Current renderer
-//! implementation is not very flexible, but should cover 95% of use cases.
-//!
-//! # Implementation details
-//!
-//! Renderer is based on OpenGL 3.3+ Core.
+//! debug geometry and can add user-defined render passes. Current renderer implementation is not
+//! very flexible, but should cover 95% of use cases.
 
 #![warn(missing_docs)]
 
@@ -33,90 +29,87 @@ pub mod framework;
 pub mod bundle;
 pub mod cache;
 pub mod debug_renderer;
+pub mod observer;
+pub mod resources;
+pub mod stats;
 pub mod storage;
 pub mod ui_renderer;
+pub mod utils;
 pub mod visibility;
 
 mod bloom;
-mod flat_shader;
-mod forward_renderer;
+mod convolution;
 mod fxaa;
 mod gbuffer;
 mod hdr;
 mod light;
 mod light_volume;
 mod occlusion;
+mod settings;
 mod shadow;
-mod skybox_shader;
 mod ssao;
-mod stats;
 
 use crate::{
     asset::{event::ResourceEvent, manager::ResourceManager},
     core::{
-        algebra::{Matrix4, Vector2, Vector3, Vector4},
-        array_as_u8_slice,
+        algebra::{Matrix4, Vector2, Vector3},
         color::Color,
-        instant,
+        info,
         log::{Log, MessageKind},
         math::Rect,
         pool::Handle,
-        reflect::prelude::*,
         sstorage::ImmutableString,
-        uuid_provider,
     },
-    engine::{error::EngineError, GraphicsContextParams},
-    graph::SceneGraph,
+    engine::error::EngineError,
     gui::draw::DrawingContext,
-    material::shader::{Shader, ShaderDefinition, ShaderResource, ShaderResourceExtension},
+    material::shader::Shader,
     renderer::{
         bloom::BloomRenderer,
-        bundle::{ObserverInfo, RenderDataBundleStorage, RenderDataBundleStorageOptions},
+        bundle::{BundleRenderContext, RenderDataBundleStorage, RenderDataBundleStorageOptions},
         cache::{
-            geometry::GeometryCache, shader::ShaderCache, texture::TextureCache,
-            uniform::UniformBufferCache, uniform::UniformMemoryAllocator,
+            geometry::GeometryCache,
+            shader::{
+                binding, property, PropertyGroup, RenderMaterial, RenderPassContainer, ShaderCache,
+            },
+            texture::TextureCache,
+            uniform::{UniformBufferCache, UniformMemoryAllocator},
         },
+        convolution::{EnvironmentMapIrradianceConvolution, EnvironmentMapSpecularConvolution},
         debug_renderer::DebugRenderer,
-        flat_shader::FlatShader,
-        forward_renderer::{ForwardRenderContext, ForwardRenderer},
         framework::{
-            buffer::{Buffer, BufferKind, BufferUsage},
             error::FrameworkError,
-            framebuffer::{
-                Attachment, AttachmentKind, BufferLocation, FrameBuffer, ResourceBindGroup,
-                ResourceBinding,
-            },
-            geometry_buffer::{DrawCallStatistics, GeometryBuffer},
-            gl::server::GlGraphicsServer,
-            gpu_program::SamplerFallback,
-            gpu_texture::{
-                GpuTexture, GpuTextureDescriptor, GpuTextureKind, MagnificationFilter,
-                MinificationFilter, PixelKind,
-            },
+            framebuffer::{Attachment, DrawCallStatistics, GpuFrameBuffer},
+            gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
             server::{GraphicsServer, SharedGraphicsServer},
-            uniform::StaticUniformBuffer,
-            DrawParameters, ElementRange, GeometryBufferExt, PolygonFace, PolygonFillMode,
+            PolygonFace, PolygonFillMode,
         },
         fxaa::FxaaRenderer,
         gbuffer::{GBuffer, GBufferRenderContext},
         hdr::HighDynamicRangeRenderer,
         light::{DeferredLightRenderer, DeferredRendererContext},
+        ssao::ScreenSpaceAmbientOcclusionRenderer,
         ui_renderer::{UiRenderContext, UiRenderer},
         visibility::VisibilityCache,
     },
     resource::texture::{Texture, TextureKind, TextureResource},
-    scene::{camera::Camera, mesh::surface::SurfaceData, Scene, SceneContainer},
+    scene::{mesh::RenderPath, node::Node, Scene, SceneContainer},
 };
+use cache::DynamicSurfaceCache;
 use fxhash::FxHashMap;
+use fyrox_graph::BaseSceneGraph;
 use lazy_static::lazy_static;
-use serde::{Deserialize, Serialize};
+use observer::{Observer, ObserversCollection};
+use resources::RendererResources;
+pub use settings::*;
 pub use stats::*;
-use std::{any::TypeId, cell::RefCell, collections::hash_map::Entry, rc::Rc, sync::mpsc::Receiver};
-use strum_macros::{AsRefStr, EnumString, VariantNames};
-use winit::{
-    event_loop::EventLoopWindowTarget,
-    window::{Window, WindowBuilder},
+use std::{
+    any::{Any, TypeId},
+    cell::RefCell,
+    collections::hash_map::Entry,
+    rc::Rc,
+    sync::mpsc::Receiver,
 };
+use winit::window::Window;
 
 lazy_static! {
     static ref GBUFFER_PASS_NAME: ImmutableString = ImmutableString::new("GBuffer");
@@ -133,468 +126,203 @@ pub fn is_shadow_pass(render_pass_name: &str) -> bool {
         || render_pass_name == &**POINT_SHADOW_PASS_NAME
 }
 
-/// Shadow map precision allows you to select compromise between quality and performance.
-#[derive(
-    Copy,
-    Clone,
-    Hash,
-    PartialOrd,
-    PartialEq,
-    Eq,
-    Ord,
-    Debug,
-    Serialize,
-    Deserialize,
-    Reflect,
-    AsRefStr,
-    EnumString,
-    VariantNames,
-)]
-pub enum ShadowMapPrecision {
-    /// Shadow map will use 2 times less memory by switching to 16bit pixel format,
-    /// but "shadow acne" may occur.
-    Half,
-    /// Shadow map will use 32bit pixel format. This option gives highest quality,
-    /// but could be less performant than `Half`.
-    Full,
-}
-
-uuid_provider!(ShadowMapPrecision = "f9b2755b-248e-46ba-bcab-473eac1acdb8");
-
-/// Cascaded-shadow maps settings.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Reflect, Eq)]
-pub struct CsmSettings {
-    /// Whether cascaded shadow maps enabled or not.
-    pub enabled: bool,
-
-    /// Size of texture for each cascade.
-    pub size: usize,
-
-    /// Bit-wise precision for each cascade, the lower precision the better performance is,
-    /// but the more artifacts may occur.
-    pub precision: ShadowMapPrecision,
-
-    /// Whether to use Percentage-Closer Filtering or not.
-    pub pcf: bool,
-}
-
-impl Default for CsmSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            size: 2048,
-            precision: ShadowMapPrecision::Full,
-            pcf: true,
-        }
-    }
-}
-
-/// Quality settings allows you to find optimal balance between performance and
-/// graphics quality.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Reflect)]
-pub struct QualitySettings {
-    /// Point shadows
-    /// Size of cube map face of shadow map texture in pixels.
-    pub point_shadow_map_size: usize,
-    /// Use or not percentage close filtering (smoothing) for point shadows.
-    pub point_soft_shadows: bool,
-    /// Point shadows enabled or not.
-    pub point_shadows_enabled: bool,
-    /// Maximum distance from camera to draw shadows.
-    pub point_shadows_distance: f32,
-    /// Point shadow map precision. Allows you to select compromise between
-    /// quality and performance.
-    pub point_shadow_map_precision: ShadowMapPrecision,
-    /// Point shadows fade out range.
-    /// Specifies the distance from the camera at which point shadows start to fade out.
-    /// Shadows beyond this distance will gradually become less visible.
-    pub point_shadows_fade_out_range: f32,
-
-    /// Spot shadows
-    /// Size of square shadow map texture in pixels
-    pub spot_shadow_map_size: usize,
-    /// Use or not percentage close filtering (smoothing) for spot shadows.
-    pub spot_soft_shadows: bool,
-    /// Spot shadows enabled or not.
-    pub spot_shadows_enabled: bool,
-    /// Maximum distance from camera to draw shadows.
-    pub spot_shadows_distance: f32,
-    /// Spot shadow map precision. Allows you to select compromise between
-    /// quality and performance.
-    pub spot_shadow_map_precision: ShadowMapPrecision,
-    /// Specifies the distance from the camera at which spot shadows start to fade out.
-    /// Shadows beyond this distance will gradually become less visible.
-    pub spot_shadows_fade_out_range: f32,
-
-    /// Cascaded-shadow maps settings.
-    pub csm_settings: CsmSettings,
-
-    /// Whether to use screen space ambient occlusion or not.
-    pub use_ssao: bool,
-    /// Radius of sampling hemisphere used in SSAO, it defines much ambient
-    /// occlusion will be in your scene.
-    pub ssao_radius: f32,
-
-    /// Global switch to enable or disable light scattering. Each light can have
-    /// its own scatter switch, but this one is able to globally disable scatter.
-    pub light_scatter_enabled: bool,
-
-    /// Whether to use Fast Approximate AntiAliasing or not.
-    pub fxaa: bool,
-
-    /// Whether to use Parallax Mapping or not.
-    pub use_parallax_mapping: bool,
-
-    /// Whether to use bloom effect.
-    pub use_bloom: bool,
-
-    /// Whether to use occlusion culling for geometry or not. Warning: this is experimental feature
-    /// that may have bugs and unstable behavior. Disabled by default.
-    #[serde(default)]
-    pub use_occlusion_culling: bool,
-
-    /// Whether to use occlusion culling for light sources or not. Warning: this is experimental
-    /// feature that may have bugs and unstable behavior. Disabled by default.
-    #[serde(default)]
-    pub use_light_occlusion_culling: bool,
-}
-
-impl Default for QualitySettings {
-    fn default() -> Self {
-        Self::high()
-    }
-}
-
-impl QualitySettings {
-    /// Highest possible graphics quality. Requires very powerful GPU.
-    pub fn ultra() -> Self {
-        Self {
-            point_shadow_map_size: 2048,
-            point_shadows_distance: 20.0,
-            point_shadows_enabled: true,
-            point_soft_shadows: true,
-            point_shadows_fade_out_range: 1.0,
-
-            spot_shadow_map_size: 2048,
-            spot_shadows_distance: 20.0,
-            spot_shadows_enabled: true,
-            spot_soft_shadows: true,
-            spot_shadows_fade_out_range: 1.0,
-
-            use_ssao: true,
-            ssao_radius: 0.5,
-
-            light_scatter_enabled: true,
-
-            point_shadow_map_precision: ShadowMapPrecision::Full,
-            spot_shadow_map_precision: ShadowMapPrecision::Full,
-
-            fxaa: true,
-
-            use_bloom: true,
-
-            use_parallax_mapping: true,
-
-            csm_settings: Default::default(),
-
-            use_occlusion_culling: false,
-            use_light_occlusion_culling: false,
-        }
-    }
-
-    /// High graphics quality, includes all graphical effects. Requires powerful GPU.
-    pub fn high() -> Self {
-        Self {
-            point_shadow_map_size: 1024,
-            point_shadows_distance: 15.0,
-            point_shadows_enabled: true,
-            point_soft_shadows: true,
-            point_shadows_fade_out_range: 1.0,
-
-            spot_shadow_map_size: 1024,
-            spot_shadows_distance: 15.0,
-            spot_shadows_enabled: true,
-            spot_soft_shadows: true,
-            spot_shadows_fade_out_range: 1.0,
-
-            use_ssao: true,
-            ssao_radius: 0.5,
-
-            light_scatter_enabled: true,
-
-            point_shadow_map_precision: ShadowMapPrecision::Full,
-            spot_shadow_map_precision: ShadowMapPrecision::Full,
-
-            fxaa: true,
-
-            use_bloom: true,
-
-            use_parallax_mapping: true,
-
-            csm_settings: CsmSettings {
-                enabled: true,
-                size: 2048,
-                precision: ShadowMapPrecision::Full,
-                pcf: true,
-            },
-
-            use_occlusion_culling: false,
-            use_light_occlusion_culling: false,
-        }
-    }
-
-    /// Medium graphics quality, some of effects are disabled, shadows will have sharp edges.
-    pub fn medium() -> Self {
-        Self {
-            point_shadow_map_size: 512,
-            point_shadows_distance: 5.0,
-            point_shadows_enabled: true,
-            point_soft_shadows: false,
-            point_shadows_fade_out_range: 1.0,
-
-            spot_shadow_map_size: 512,
-            spot_shadows_distance: 5.0,
-            spot_shadows_enabled: true,
-            spot_soft_shadows: false,
-            spot_shadows_fade_out_range: 1.0,
-
-            use_ssao: true,
-            ssao_radius: 0.5,
-
-            light_scatter_enabled: false,
-
-            point_shadow_map_precision: ShadowMapPrecision::Half,
-            spot_shadow_map_precision: ShadowMapPrecision::Half,
-
-            fxaa: true,
-
-            use_bloom: true,
-
-            use_parallax_mapping: false,
-
-            csm_settings: CsmSettings {
-                enabled: true,
-                size: 512,
-                precision: ShadowMapPrecision::Full,
-                pcf: false,
-            },
-
-            use_occlusion_culling: false,
-            use_light_occlusion_culling: false,
-        }
-    }
-
-    /// Lowest graphics quality, all effects are disabled.
-    pub fn low() -> Self {
-        Self {
-            point_shadow_map_size: 1, // Zero is unsupported.
-            point_shadows_distance: 0.0,
-            point_shadows_enabled: false,
-            point_soft_shadows: false,
-            point_shadows_fade_out_range: 1.0,
-
-            spot_shadow_map_size: 1,
-            spot_shadows_distance: 0.0,
-            spot_shadows_enabled: false,
-            spot_soft_shadows: false,
-            spot_shadows_fade_out_range: 1.0,
-
-            use_ssao: false,
-            ssao_radius: 0.5,
-
-            light_scatter_enabled: false,
-
-            point_shadow_map_precision: ShadowMapPrecision::Half,
-            spot_shadow_map_precision: ShadowMapPrecision::Half,
-
-            fxaa: false,
-
-            use_bloom: false,
-
-            use_parallax_mapping: false,
-
-            csm_settings: CsmSettings {
-                enabled: true,
-                size: 512,
-                precision: ShadowMapPrecision::Half,
-                pcf: false,
-            },
-
-            use_occlusion_culling: false,
-            use_light_occlusion_culling: false,
-        }
-    }
-}
-
-impl Statistics {
-    /// Must be called before render anything.
-    fn begin_frame(&mut self) {
-        self.frame_start_time = instant::Instant::now();
-        self.geometry = Default::default();
-        self.lighting = Default::default();
-    }
-
-    /// Must be called before SwapBuffers but after all rendering is done.
-    fn end_frame(&mut self) {
-        let current_time = instant::Instant::now();
-
-        self.pure_frame_time = current_time
-            .duration_since(self.frame_start_time)
-            .as_secs_f32();
-        self.frame_counter += 1;
-
-        if current_time
-            .duration_since(self.last_fps_commit_time)
-            .as_secs_f32()
-            >= 1.0
-        {
-            self.last_fps_commit_time = current_time;
-            self.frames_per_second = self.frame_counter;
-            self.frame_counter = 0;
-        }
-    }
-
-    /// Must be called after SwapBuffers to get capped frame time.
-    fn finalize(&mut self) {
-        self.capped_frame_time = instant::Instant::now()
-            .duration_since(self.frame_start_time)
-            .as_secs_f32();
-    }
-}
-
-impl Default for Statistics {
-    fn default() -> Self {
-        Self {
-            pipeline: Default::default(),
-            lighting: Default::default(),
-            geometry: Default::default(),
-            pure_frame_time: 0.0,
-            capped_frame_time: 0.0,
-            frames_per_second: 0,
-            texture_cache_size: 0,
-            geometry_cache_size: 0,
-            shader_cache_size: 0,
-            uniform_buffer_cache_size: 0,
-            frame_counter: 0,
-            frame_start_time: instant::Instant::now(),
-            last_fps_commit_time: instant::Instant::now(),
-        }
-    }
-}
-
 /// A set of frame buffers, renderers, that contains scene-specific data.
-pub struct AssociatedSceneData {
-    /// G-Buffer of the scene.
+pub struct SceneRenderData {
+    /// A set of render data containers associated with cameras.
+    pub camera_data: FxHashMap<Handle<Node>, RenderDataContainer>,
+    /// Scene-specific render data.
+    pub scene_data: RenderDataContainer,
+}
+
+impl SceneRenderData {
+    /// Creates new scene-specific render data.
+    pub fn new(
+        server: &dyn GraphicsServer,
+        frame_size: Vector2<f32>,
+        final_frame_texture: FrameTextureKind,
+    ) -> Result<Self, FrameworkError> {
+        Ok(Self {
+            camera_data: Default::default(),
+            scene_data: RenderDataContainer::new(server, frame_size, final_frame_texture)?,
+        })
+    }
+
+    /// Sets the new quality settings.
+    pub fn set_quality_settings(&mut self, settings: &QualitySettings) {
+        for camera_data in self.camera_data.values_mut() {
+            camera_data.set_quality_settings(settings);
+        }
+        self.scene_data.set_quality_settings(settings);
+    }
+}
+
+fn recreate_render_data_if_needed<T: Any>(
+    parent: Handle<T>,
+    server: &dyn GraphicsServer,
+    data: &mut RenderDataContainer,
+    frame_size: Vector2<f32>,
+    final_frame_texture: FrameTextureKind,
+) -> Result<(), FrameworkError> {
+    if data.gbuffer.width != frame_size.x as i32 || data.gbuffer.height != frame_size.y as i32 {
+        Log::info(format!(
+            "Associated scene rendering data was re-created for {} ({}), because render \
+                 frame size was changed. Old is {}x{}, new {}x{}!",
+            parent,
+            std::any::type_name::<T>(),
+            data.gbuffer.width,
+            data.gbuffer.height,
+            frame_size.x,
+            frame_size.y
+        ));
+
+        *data = RenderDataContainer::new(server, frame_size, final_frame_texture)?;
+    }
+
+    Ok(())
+}
+
+/// A set of frame buffers and renderers that can be used to render to.
+pub struct RenderDataContainer {
+    /// Prefiltered environment map that contains a specular component of the environment map with
+    /// roughness encoded in mip levels.
+    pub environment_map_specular_convolution: Option<EnvironmentMapSpecularConvolution>,
+
+    /// Irradiance cube map. Contains computed the irradiance computed from the environment map.
+    pub environment_map_irradiance_convolution: EnvironmentMapIrradianceConvolution,
+
+    /// A flag that defines whether the renderer must recalculate specular/irradiance convolution
+    /// for environment maps.
+    pub need_recalculate_convolution: bool,
+
+    /// Screen space ambient occlusion renderer.
+    pub ssao_renderer: ScreenSpaceAmbientOcclusionRenderer,
+
+    /// G-Buffer of the container.
     pub gbuffer: GBuffer,
 
     /// Intermediate high dynamic range frame buffer.
-    pub hdr_scene_framebuffer: Box<dyn FrameBuffer>,
+    pub hdr_scene_framebuffer: GpuFrameBuffer,
 
-    /// Final frame of the scene. Tone mapped + gamma corrected.
-    pub ldr_scene_framebuffer: Box<dyn FrameBuffer>,
+    /// Final frame of the container. Tone mapped + gamma corrected.
+    pub ldr_scene_framebuffer: GpuFrameBuffer,
 
-    /// Additional frame buffer for post processing.
-    pub ldr_temp_framebuffer: Box<dyn FrameBuffer>,
+    /// Additional frame buffer for post-processing.
+    pub ldr_temp_framebuffer: [GpuFrameBuffer; 2],
 
-    /// HDR renderer has be created per scene, because it contains
+    /// HDR renderer has to be created per container, because it contains
     /// scene luminance.
     pub hdr_renderer: HighDynamicRangeRenderer,
 
-    /// Bloom contains only overly bright pixels that creates light
+    /// Bloom contains only overly bright pixels that create light
     /// bleeding effect (glow effect).
     pub bloom_renderer: BloomRenderer,
 
-    /// Rendering statistics for a scene.
+    /// Rendering statistics for a container.
     pub statistics: SceneStatistics,
 }
 
-impl AssociatedSceneData {
-    /// Creates new scene data.
+/// Texture kind that will be used to store final frame image.
+#[derive(Default)]
+pub enum FrameTextureKind {
+    /// Rectangular texture.
+    #[default]
+    Rectangle,
+    /// Cube texture (six square textures). Used primarily for reflection probes.
+    Cube,
+}
+
+impl RenderDataContainer {
+    /// Creates a new container.
     pub fn new(
         server: &dyn GraphicsServer,
-        width: usize,
-        height: usize,
+        frame_size: Vector2<f32>,
+        final_frame_texture: FrameTextureKind,
     ) -> Result<Self, FrameworkError> {
-        let depth_stencil = server.create_2d_render_target(PixelKind::D24S8, width, height)?;
+        let width = frame_size.x as usize;
+        let height = frame_size.y as usize;
+
+        if matches!(final_frame_texture, FrameTextureKind::Cube) {
+            assert_eq!(width, height);
+        }
+
+        let depth_stencil = server.create_2d_render_target(
+            "ObserverDepthStencil",
+            PixelKind::D24S8,
+            width,
+            height,
+        )?;
         // Intermediate scene frame will be rendered in HDR render target.
-        let hdr_frame_texture =
-            server.create_2d_render_target(PixelKind::RGBA16F, width, height)?;
+        let hdr_frame_texture = server.create_2d_render_target(
+            "ObserverHdrFrame",
+            PixelKind::RGBA16F,
+            width,
+            height,
+        )?;
 
         let hdr_scene_framebuffer = server.create_frame_buffer(
-            Some(Attachment {
-                kind: AttachmentKind::DepthStencil,
-                texture: depth_stencil.clone(),
-            }),
-            vec![Attachment {
-                kind: AttachmentKind::Color,
-                texture: hdr_frame_texture,
-            }],
+            Some(Attachment::depth_stencil(depth_stencil.clone())),
+            vec![Attachment::color(hdr_frame_texture)],
         )?;
 
         let ldr_frame_texture = server.create_texture(GpuTextureDescriptor {
-            kind: GpuTextureKind::Rectangle { width, height },
+            name: "LdrFrameTexture",
+            kind: match final_frame_texture {
+                FrameTextureKind::Rectangle => GpuTextureKind::Rectangle { width, height },
+                FrameTextureKind::Cube => GpuTextureKind::Cube { size: width },
+            },
             // Final scene frame is in standard sRGB space.
             pixel_kind: PixelKind::RGBA8,
-            min_filter: MinificationFilter::Linear,
-            mag_filter: MagnificationFilter::Linear,
-            mip_count: 1,
-            s_wrap_mode: Default::default(),
-            t_wrap_mode: Default::default(),
-            r_wrap_mode: Default::default(),
-            anisotropy: 1.0,
-            data: None,
+            ..Default::default()
         })?;
 
         let ldr_scene_framebuffer = server.create_frame_buffer(
-            Some(Attachment {
-                kind: AttachmentKind::DepthStencil,
-                texture: depth_stencil.clone(),
-            }),
-            vec![Attachment {
-                kind: AttachmentKind::Color,
-                texture: ldr_frame_texture,
-            }],
+            Some(Attachment::depth_stencil(depth_stencil.clone())),
+            vec![Attachment::color(ldr_frame_texture)],
         )?;
 
-        let ldr_temp_texture = server.create_texture(GpuTextureDescriptor {
-            kind: GpuTextureKind::Rectangle { width, height },
-            // Final scene frame is in standard sRGB space.
-            pixel_kind: PixelKind::RGBA8,
-            min_filter: MinificationFilter::Linear,
-            mag_filter: MagnificationFilter::Linear,
-            mip_count: 1,
-            s_wrap_mode: Default::default(),
-            t_wrap_mode: Default::default(),
-            r_wrap_mode: Default::default(),
-            anisotropy: 1.0,
-            data: None,
-        })?;
+        fn make_ldr_temp_frame_buffer(
+            server: &dyn GraphicsServer,
+            width: usize,
+            height: usize,
+            depth_stencil: GpuTexture,
+        ) -> Result<GpuFrameBuffer, FrameworkError> {
+            let ldr_temp_texture = server.create_texture(GpuTextureDescriptor {
+                name: "LdrTempTexture",
+                kind: GpuTextureKind::Rectangle { width, height },
+                // Final scene frame is in standard sRGB space.
+                pixel_kind: PixelKind::RGBA8,
+                ..Default::default()
+            })?;
 
-        let ldr_temp_framebuffer = server.create_frame_buffer(
-            Some(Attachment {
-                kind: AttachmentKind::DepthStencil,
-                texture: depth_stencil,
-            }),
-            vec![Attachment {
-                kind: AttachmentKind::Color,
-                texture: ldr_temp_texture,
-            }],
-        )?;
+            server.create_frame_buffer(
+                Some(Attachment::depth_stencil(depth_stencil)),
+                vec![Attachment::color(ldr_temp_texture)],
+            )
+        }
 
         Ok(Self {
+            need_recalculate_convolution: true,
+            environment_map_specular_convolution: Default::default(),
+            environment_map_irradiance_convolution: EnvironmentMapIrradianceConvolution::new(
+                server, 32,
+            )?,
+            ssao_renderer: ScreenSpaceAmbientOcclusionRenderer::new(server, width, height)?,
             gbuffer: GBuffer::new(server, width, height)?,
             hdr_renderer: HighDynamicRangeRenderer::new(server)?,
             bloom_renderer: BloomRenderer::new(server, width, height)?,
             hdr_scene_framebuffer,
             ldr_scene_framebuffer,
-            ldr_temp_framebuffer,
+            ldr_temp_framebuffer: [
+                make_ldr_temp_frame_buffer(server, width, height, depth_stencil.clone())?,
+                make_ldr_temp_frame_buffer(server, width, height, depth_stencil.clone())?,
+            ],
             statistics: Default::default(),
         })
     }
 
     fn copy_depth_stencil_to_scene_framebuffer(&mut self) {
         self.gbuffer.framebuffer().blit_to(
-            &*self.hdr_scene_framebuffer,
+            &self.hdr_scene_framebuffer,
             0,
             0,
             self.gbuffer.width,
@@ -610,24 +338,23 @@ impl AssociatedSceneData {
     }
 
     /// Returns high-dynamic range frame buffer texture.
-    pub fn hdr_scene_frame_texture(&self) -> Rc<RefCell<dyn GpuTexture>> {
-        self.hdr_scene_framebuffer.color_attachments()[0]
-            .texture
-            .clone()
+    pub fn hdr_scene_frame_texture(&self) -> &GpuTexture {
+        &self.hdr_scene_framebuffer.color_attachments()[0].texture
     }
 
     /// Returns low-dynamic range frame buffer texture (final frame).
-    pub fn ldr_scene_frame_texture(&self) -> Rc<RefCell<dyn GpuTexture>> {
-        self.ldr_scene_framebuffer.color_attachments()[0]
-            .texture
-            .clone()
+    pub fn ldr_scene_frame_texture(&self) -> &GpuTexture {
+        &self.ldr_scene_framebuffer.color_attachments()[0].texture
     }
 
     /// Returns low-dynamic range frame buffer texture (accumulation frame).
-    pub fn ldr_temp_frame_texture(&self) -> Rc<RefCell<dyn GpuTexture>> {
-        self.ldr_temp_framebuffer.color_attachments()[0]
-            .texture
-            .clone()
+    pub fn ldr_temp_frame_texture(&self, i: usize) -> &GpuTexture {
+        &self.ldr_temp_framebuffer[i].color_attachments()[0].texture
+    }
+
+    /// Sets the new quality settings.
+    pub fn set_quality_settings(&mut self, settings: &QualitySettings) {
+        self.ssao_renderer.set_radius(settings.ssao_radius);
     }
 }
 
@@ -647,56 +374,17 @@ pub fn make_viewport_matrix(viewport: Rect<i32>) -> Matrix4<f32> {
     ))
 }
 
-/// A set of textures of certain kinds that could be used as a stub in cases when you don't have
-/// your own texture of this kind.
-pub struct FallbackResources {
-    /// White, one pixel, texture which will be used as stub when rendering something without
-    /// a texture specified.
-    pub white_dummy: Rc<RefCell<dyn GpuTexture>>,
-    /// Black, one pixel, texture.
-    pub black_dummy: Rc<RefCell<dyn GpuTexture>>,
-    /// A cube map with 6 textures of 1x1 black pixel in size.
-    pub environment_dummy: Rc<RefCell<dyn GpuTexture>>,
-    /// One pixel texture with (0, 1, 0) vector is used as stub when rendering something without a
-    /// normal map.
-    pub normal_dummy: Rc<RefCell<dyn GpuTexture>>,
-    /// One pixel texture used as stub when rendering something without a  metallic texture. Default
-    /// metalness is 0.0
-    pub metallic_dummy: Rc<RefCell<dyn GpuTexture>>,
-    /// One pixel volume texture.
-    pub volume_dummy: Rc<RefCell<dyn GpuTexture>>,
-    /// A stub uniform buffer for situation when there's no actual bone matrices.
-    pub bone_matrices_stub_uniform_buffer: Box<dyn Buffer>,
-}
-
-impl FallbackResources {
-    /// Picks a texture that corresponds to the actual value of the given sampler fallback.
-    pub fn sampler_fallback(
-        &self,
-        sampler_fallback: SamplerFallback,
-    ) -> &Rc<RefCell<dyn GpuTexture>> {
-        match sampler_fallback {
-            SamplerFallback::White => &self.white_dummy,
-            SamplerFallback::Normal => &self.normal_dummy,
-            SamplerFallback::Black => &self.black_dummy,
-            SamplerFallback::Volume => &self.volume_dummy,
-        }
-    }
-}
-
 /// See module docs.
 pub struct Renderer {
-    backbuffer: Box<dyn FrameBuffer>,
+    backbuffer: GpuFrameBuffer,
     scene_render_passes: Vec<Rc<RefCell<dyn SceneRenderPass>>>,
     deferred_light_renderer: DeferredLightRenderer,
-    flat_shader: FlatShader,
     /// A set of textures of certain kinds that could be used as a stub in cases when you don't have
     /// your own texture of this kind.
-    pub fallback_resources: FallbackResources,
+    pub renderer_resources: RendererResources,
     /// User interface renderer.
     pub ui_renderer: UiRenderer,
     statistics: Statistics,
-    quad: Box<dyn GeometryBuffer>,
     frame_size: (u32, u32),
     quality_settings: QualitySettings,
     /// Debug renderer instance can be used for debugging purposes
@@ -705,7 +393,7 @@ pub struct Renderer {
     /// on screen. It is useful to debug some rendering algorithms.
     pub screen_space_debug_renderer: DebugRenderer,
     /// A set of associated data for each scene that was rendered.
-    pub scene_data_map: FxHashMap<Handle<Scene>, AssociatedSceneData>,
+    pub scene_data_map: FxHashMap<Handle<Scene>, SceneRenderData>,
     backbuffer_clear_color: Color,
     /// Texture cache with GPU textures.
     pub texture_cache: TextureCache,
@@ -713,14 +401,15 @@ pub struct Renderer {
     pub uniform_buffer_cache: UniformBufferCache,
     shader_cache: ShaderCache,
     geometry_cache: GeometryCache,
-    forward_renderer: ForwardRenderer,
     fxaa_renderer: FxaaRenderer,
     texture_event_receiver: Receiver<ResourceEvent>,
     shader_event_receiver: Receiver<ResourceEvent>,
-    // TextureId -> FrameBuffer mapping. This mapping is used for temporal frame buffers
-    // like ones used to render UI instances.
-    ui_frame_buffers: FxHashMap<u64, Box<dyn FrameBuffer>>,
+    /// TextureId -> FrameBuffer mapping. This mapping is used for temporal frame buffers
+    /// like ones used to render UI instances.
+    pub ui_frame_buffers: FxHashMap<u64, GpuFrameBuffer>,
     uniform_memory_allocator: UniformMemoryAllocator,
+    /// Dynamic surface cache. See [`DynamicSurfaceCache`] docs for more info.
+    pub dynamic_surface_cache: DynamicSurfaceCache,
     /// Visibility cache based on occlusion query.
     pub visibility_cache: VisibilityCache,
     /// Graphics server.
@@ -731,43 +420,36 @@ fn make_ui_frame_buffer(
     frame_size: Vector2<f32>,
     server: &dyn GraphicsServer,
     pixel_kind: PixelKind,
-) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
+) -> Result<GpuFrameBuffer, FrameworkError> {
     let color_texture = server.create_texture(GpuTextureDescriptor {
+        name: "UiFbTexture",
         kind: GpuTextureKind::Rectangle {
             width: frame_size.x as usize,
             height: frame_size.y as usize,
         },
         pixel_kind,
-        min_filter: MinificationFilter::Linear,
-        mag_filter: MagnificationFilter::Linear,
-        mip_count: 1,
-        s_wrap_mode: Default::default(),
-        t_wrap_mode: Default::default(),
-        r_wrap_mode: Default::default(),
-        anisotropy: 1.0,
-        data: None,
+        ..Default::default()
     })?;
 
     let depth_stencil = server.create_2d_render_target(
+        "UiDepthStencil",
         PixelKind::D24S8,
         frame_size.x as usize,
         frame_size.y as usize,
     )?;
 
     server.create_frame_buffer(
-        Some(Attachment {
-            kind: AttachmentKind::DepthStencil,
-            texture: depth_stencil,
-        }),
-        vec![Attachment {
-            kind: AttachmentKind::Color,
-            texture: color_texture,
-        }],
+        Some(Attachment::depth_stencil(depth_stencil)),
+        vec![Attachment::color(color_texture)],
     )
 }
 
 /// A context for custom scene render passes.
 pub struct SceneRenderPassContext<'a, 'b> {
+    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// this value is **not** guaranteed to match real time. A user can change delta time with
+    /// which the engine "ticks" and this delta time affects elapsed time.
+    pub elapsed_time: f32,
     /// A graphics server that is used as a wrapper to underlying graphics API.
     pub server: &'a dyn GraphicsServer,
 
@@ -792,23 +474,20 @@ pub struct SceneRenderPassContext<'a, 'b> {
     pub quality_settings: &'a QualitySettings,
 
     /// Current framebuffer to which scene is being rendered to.
-    pub framebuffer: &'a mut dyn FrameBuffer,
+    pub framebuffer: &'a GpuFrameBuffer,
 
     /// A scene being rendered.
     pub scene: &'b Scene,
 
     /// A camera from the scene that is used as "eyes".
-    pub camera: &'b Camera,
-
-    /// A viewport of the camera.
-    pub viewport: Rect<i32>,
+    pub observer: &'b Observer,
 
     /// A handle of the scene being rendered.
     pub scene_handle: Handle<Scene>,
 
     /// A set of textures of certain kinds that could be used as a stub in cases when you don't have
     /// your own texture of this kind.
-    pub fallback_resources: &'a FallbackResources,
+    pub renderer_resources: &'a RendererResources,
 
     /// A texture with depth values from G-Buffer.
     ///
@@ -817,7 +496,7 @@ pub struct SceneRenderPassContext<'a, 'b> {
     /// Keep in mind that G-Buffer cannot be modified in custom render passes, so you don't
     /// have an ability to write to this texture. However, you can still write to depth of
     /// the frame buffer as you'd normally do.
-    pub depth_texture: Rc<RefCell<dyn GpuTexture>>,
+    pub depth_texture: &'a GpuTexture,
 
     /// A texture with world-space normals from G-Buffer.
     ///
@@ -825,7 +504,7 @@ pub struct SceneRenderPassContext<'a, 'b> {
     ///
     /// Keep in mind that G-Buffer cannot be modified in custom render passes, so you don't
     /// have an ability to write to this texture.
-    pub normal_texture: Rc<RefCell<dyn GpuTexture>>,
+    pub normal_texture: &'a GpuTexture,
 
     /// A texture with ambient lighting values from G-Buffer.
     ///
@@ -833,7 +512,7 @@ pub struct SceneRenderPassContext<'a, 'b> {
     ///
     /// Keep in mind that G-Buffer cannot be modified in custom render passes, so you don't
     /// have an ability to write to this texture.
-    pub ambient_texture: Rc<RefCell<dyn GpuTexture>>,
+    pub ambient_texture: &'a GpuTexture,
 
     /// User interface renderer.
     pub ui_renderer: &'a mut UiRenderer,
@@ -844,6 +523,12 @@ pub struct SceneRenderPassContext<'a, 'b> {
     /// Memory allocator for uniform buffers that tries to pack uniforms densely into large uniform
     /// buffers, giving you offsets to the data.
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
+
+    /// Dynamic surface cache. See [`DynamicSurfaceCache`] docs for more info.
+    pub dynamic_surface_cache: &'a mut DynamicSurfaceCache,
+
+    /// A reference to the resource manager.
+    pub resource_manager: &'a ResourceManager,
 }
 
 /// A trait for custom scene rendering pass. It could be used to add your own rendering techniques.
@@ -874,73 +559,65 @@ pub trait SceneRenderPass {
 
 fn blit_pixels(
     uniform_buffer_cache: &mut UniformBufferCache,
-    framebuffer: &mut dyn FrameBuffer,
-    texture: Rc<RefCell<dyn GpuTexture>>,
-    shader: &FlatShader,
+    framebuffer: &GpuFrameBuffer,
+    texture: &GpuTexture,
+    blit_shader: &RenderPassContainer,
     viewport: Rect<i32>,
-    quad: &dyn GeometryBuffer,
+    renderer_resources: &RendererResources,
 ) -> Result<DrawCallStatistics, FrameworkError> {
-    let matrix = make_viewport_matrix(viewport);
-    let uniform_buffer =
-        uniform_buffer_cache.write(StaticUniformBuffer::<256>::new().with(&matrix))?;
-    framebuffer.draw(
-        quad,
+    let wvp = make_viewport_matrix(viewport);
+    let properties = PropertyGroup::from([property("worldViewProjection", &wvp)]);
+    let material = RenderMaterial::from([
+        binding(
+            "diffuseTexture",
+            (texture, &renderer_resources.linear_clamp_sampler),
+        ),
+        binding("properties", &properties),
+    ]);
+    blit_shader.run_pass(
+        1,
+        &ImmutableString::new("Primary"),
+        framebuffer,
+        &renderer_resources.quad,
         viewport,
-        &*shader.program,
-        &DrawParameters {
-            cull_face: None,
-            color_write: Default::default(),
-            depth_write: true,
-            stencil_test: None,
-            depth_test: None,
-            blend: None,
-            stencil_op: Default::default(),
-            scissor_box: None,
-        },
-        &[ResourceBindGroup {
-            bindings: &[
-                ResourceBinding::texture(&texture, &shader.diffuse_texture),
-                ResourceBinding::Buffer {
-                    buffer: uniform_buffer,
-                    binding: BufferLocation::Auto {
-                        shader_location: shader.uniform_buffer_binding,
-                    },
-                    data_usage: Default::default(),
-                },
-            ],
-        }],
-        ElementRange::Full,
+        &material,
+        uniform_buffer_cache,
+        Default::default(),
+        None,
     )
 }
 
-#[allow(missing_docs)] // TODO
-pub struct LightData<const N: usize = 16> {
-    pub count: usize,
-    pub color_radius: [Vector4<f32>; N],
-    pub position: [Vector3<f32>; N],
-    pub direction: [Vector3<f32>; N],
-    pub parameters: [Vector2<f32>; N],
-}
-
-impl<const N: usize> Default for LightData<N> {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            color_radius: [Default::default(); N],
-            position: [Default::default(); N],
-            direction: [Default::default(); N],
-            parameters: [Default::default(); N],
-        }
-    }
+fn render_target_size(
+    render_target: &TextureResource,
+) -> Result<(Vector2<f32>, FrameTextureKind), FrameworkError> {
+    render_target
+        .data_ref()
+        .as_loaded_ref()
+        .and_then(|rt| match rt.kind() {
+            TextureKind::Rectangle { width, height } => Some((
+                Vector2::new(width as f32, height as f32),
+                FrameTextureKind::Rectangle,
+            )),
+            TextureKind::Cube { size } => Some((
+                Vector2::new(size as f32, size as f32),
+                FrameTextureKind::Cube,
+            )),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            FrameworkError::Custom(
+                "Render target must be a valid rectangle or cube texture!".to_string(),
+            )
+        })
 }
 
 impl Renderer {
-    pub(crate) fn new(
+    /// Creates a new renderer with the given graphics server.
+    pub fn new(
+        server: Rc<dyn GraphicsServer>,
+        frame_size: (u32, u32),
         resource_manager: &ResourceManager,
-        params: &GraphicsContextParams,
-        window_target: &EventLoopWindowTarget<()>,
-        window_builder: WindowBuilder,
-    ) -> Result<(Window, Self), EngineError> {
+    ) -> Result<Self, EngineError> {
         let settings = QualitySettings::default();
 
         let (texture_event_sender, texture_event_receiver) = std::sync::mpsc::channel();
@@ -957,153 +634,25 @@ impl Renderer {
             .event_broadcaster
             .add(shader_event_sender);
 
-        let (window, server) = GlGraphicsServer::new(
-            params.vsync,
-            params.msaa_sample_count,
-            window_target,
-            window_builder,
-        )?;
-
         let caps = server.capabilities();
-        Log::info(format!("Graphics Server Capabilities\n{caps}",));
+        Log::info(format!("Graphics Server Capabilities\n{caps:?}",));
 
-        let frame_size = (window.inner_size().width, window.inner_size().height);
+        let shader_cache = ShaderCache::default();
 
-        let mut shader_cache = ShaderCache::default();
-
-        for shader in ShaderResource::standard_shaders() {
-            shader_cache.get(&*server, &shader.resource);
-        }
-
+        let one_megabyte = 1024 * 1024;
         let uniform_memory_allocator = UniformMemoryAllocator::new(
-            caps.max_uniform_block_size,
+            // Clamp max uniform block size from the upper bound, to prevent allocating huge
+            // uniform buffers when GPU supports it. Some AMD GPUs are able to allocate ~500 Mb
+            // uniform buffers, which will lead to ridiculous VRAM consumption.
+            caps.max_uniform_block_size.min(one_megabyte),
             caps.uniform_buffer_offset_alignment,
         );
 
-        let fallback_resources = FallbackResources {
-            white_dummy: server.create_texture(GpuTextureDescriptor {
-                kind: GpuTextureKind::Rectangle {
-                    width: 1,
-                    height: 1,
-                },
-                pixel_kind: PixelKind::RGBA8,
-                min_filter: MinificationFilter::Linear,
-                mag_filter: MagnificationFilter::Linear,
-                mip_count: 1,
-                s_wrap_mode: Default::default(),
-                t_wrap_mode: Default::default(),
-                r_wrap_mode: Default::default(),
-                anisotropy: 1.0,
-                data: Some(&[255u8, 255u8, 255u8, 255u8]),
-            })?,
-            black_dummy: server.create_texture(GpuTextureDescriptor {
-                kind: GpuTextureKind::Rectangle {
-                    width: 1,
-                    height: 1,
-                },
-                pixel_kind: PixelKind::RGBA8,
-                min_filter: MinificationFilter::Linear,
-                mag_filter: MagnificationFilter::Linear,
-                mip_count: 1,
-                s_wrap_mode: Default::default(),
-                t_wrap_mode: Default::default(),
-                r_wrap_mode: Default::default(),
-                anisotropy: 1.0,
-                data: Some(&[0u8, 0u8, 0u8, 255u8]),
-            })?,
-            environment_dummy: server.create_texture(GpuTextureDescriptor {
-                kind: GpuTextureKind::Cube {
-                    width: 1,
-                    height: 1,
-                },
-                pixel_kind: PixelKind::RGBA8,
-                min_filter: MinificationFilter::Linear,
-                mag_filter: MagnificationFilter::Linear,
-                mip_count: 1,
-                s_wrap_mode: Default::default(),
-                t_wrap_mode: Default::default(),
-                r_wrap_mode: Default::default(),
-                anisotropy: 1.0,
-                data: Some(&[
-                    0u8, 0u8, 0u8, 255u8, // pos-x
-                    0u8, 0u8, 0u8, 255u8, // neg-x
-                    0u8, 0u8, 0u8, 255u8, // pos-y
-                    0u8, 0u8, 0u8, 255u8, // neg-y
-                    0u8, 0u8, 0u8, 255u8, // pos-z
-                    0u8, 0u8, 0u8, 255u8, // neg-z
-                ]),
-            })?,
-            normal_dummy: server.create_texture(GpuTextureDescriptor {
-                kind: GpuTextureKind::Rectangle {
-                    width: 1,
-                    height: 1,
-                },
-                pixel_kind: PixelKind::RGBA8,
-                min_filter: MinificationFilter::Linear,
-                mag_filter: MagnificationFilter::Linear,
-                mip_count: 1,
-                s_wrap_mode: Default::default(),
-                t_wrap_mode: Default::default(),
-                r_wrap_mode: Default::default(),
-                anisotropy: 1.0,
-                data: Some(&[128u8, 128u8, 255u8, 255u8]),
-            })?,
-            metallic_dummy: server.create_texture(GpuTextureDescriptor {
-                kind: GpuTextureKind::Rectangle {
-                    width: 1,
-                    height: 1,
-                },
-                pixel_kind: PixelKind::RGBA8,
-                min_filter: MinificationFilter::Linear,
-                mag_filter: MagnificationFilter::Linear,
-                mip_count: 1,
-                s_wrap_mode: Default::default(),
-                t_wrap_mode: Default::default(),
-                r_wrap_mode: Default::default(),
-                anisotropy: 1.0,
-                data: Some(&[0u8, 0u8, 0u8, 0u8]),
-            })?,
-            volume_dummy: server.create_texture(GpuTextureDescriptor {
-                kind: GpuTextureKind::Volume {
-                    width: 1,
-                    height: 1,
-                    depth: 1,
-                },
-                pixel_kind: PixelKind::RGBA8,
-                min_filter: MinificationFilter::Linear,
-                mag_filter: MagnificationFilter::Linear,
-                mip_count: 1,
-                s_wrap_mode: Default::default(),
-                t_wrap_mode: Default::default(),
-                r_wrap_mode: Default::default(),
-                anisotropy: 1.0,
-                data: Some(&[0u8, 0u8, 0u8, 0u8]),
-            })?,
-            bone_matrices_stub_uniform_buffer: {
-                let buffer = server.create_buffer(
-                    ShaderDefinition::MAX_BONE_MATRICES * size_of::<Matrix4<f32>>(),
-                    BufferKind::Uniform,
-                    BufferUsage::StaticDraw,
-                )?;
-                const SIZE: usize = ShaderDefinition::MAX_BONE_MATRICES * size_of::<Matrix4<f32>>();
-                let zeros = [0.0; SIZE];
-                buffer.write_data(array_as_u8_slice(&zeros))?;
-                buffer
-            },
-        };
-
-        let renderer = Self {
+        Ok(Self {
             backbuffer: server.back_buffer(),
             frame_size,
-            deferred_light_renderer: DeferredLightRenderer::new(&*server, frame_size, &settings)?,
-            flat_shader: FlatShader::new(&*server)?,
-            fallback_resources,
-            quad: <dyn GeometryBuffer>::from_surface_data(
-                &SurfaceData::make_unit_xy_quad(),
-                BufferUsage::StaticDraw,
-                &*server,
-            )?,
-
+            deferred_light_renderer: DeferredLightRenderer::new(&*server, &settings)?,
+            renderer_resources: RendererResources::new(&*server)?,
             ui_renderer: UiRenderer::new(&*server)?,
             quality_settings: settings,
             debug_renderer: DebugRenderer::new(&*server)?,
@@ -1112,9 +661,8 @@ impl Renderer {
             backbuffer_clear_color: Color::BLACK,
             texture_cache: Default::default(),
             geometry_cache: Default::default(),
-            forward_renderer: ForwardRenderer::new(),
             ui_frame_buffers: Default::default(),
-            fxaa_renderer: FxaaRenderer::new(&*server)?,
+            fxaa_renderer: FxaaRenderer::default(),
             statistics: Statistics::default(),
             shader_event_receiver,
             texture_event_receiver,
@@ -1124,9 +672,8 @@ impl Renderer {
             server,
             visibility_cache: Default::default(),
             uniform_memory_allocator,
-        };
-
-        Ok((window, renderer))
+            dynamic_surface_cache: DynamicSurfaceCache::new(),
+        })
     }
 
     /// Adds a custom render pass.
@@ -1161,7 +708,7 @@ impl Renderer {
     }
 
     /// Unloads texture from GPU memory.
-    pub fn unload_texture(&mut self, texture: TextureResource) {
+    pub fn unload_texture(&mut self, texture: &TextureResource) {
         self.texture_cache.unload(texture)
     }
 
@@ -1187,9 +734,6 @@ impl Renderer {
         self.frame_size.0 = new_size.0.max(1);
         self.frame_size.1 = new_size.1.max(1);
 
-        self.deferred_light_renderer
-            .set_frame_size(&*self.server, new_size)?;
-
         self.graphics_server().set_frame_size(new_size);
 
         Ok(())
@@ -1213,6 +757,9 @@ impl Renderer {
         settings: &QualitySettings,
     ) -> Result<(), FrameworkError> {
         self.quality_settings = *settings;
+        for data in self.scene_data_map.values_mut() {
+            data.set_quality_settings(settings);
+        }
         self.deferred_light_renderer
             .set_quality_settings(&*self.server, settings)
     }
@@ -1239,6 +786,7 @@ impl Renderer {
         drawing_context: &DrawingContext,
         clear_color: Color,
         pixel_kind: PixelKind,
+        resource_manager: &ResourceManager,
     ) -> Result<(), FrameworkError> {
         let new_width = screen_size.x as usize;
         let new_height = screen_size.y as usize;
@@ -1248,11 +796,11 @@ impl Renderer {
             Entry::Occupied(entry) => {
                 let frame_buffer = entry.into_mut();
                 let frame = frame_buffer.color_attachments().first().unwrap();
-                let color_texture_kind = frame.texture.borrow().kind();
+                let color_texture_kind = frame.texture.kind();
                 if let GpuTextureKind::Rectangle { width, height } = color_texture_kind {
                     if width != new_width
                         || height != new_height
-                        || frame.texture.borrow().pixel_kind() != pixel_kind
+                        || frame.texture.pixel_kind() != pixel_kind
                     {
                         *frame_buffer =
                             make_ui_frame_buffer(screen_size, &*self.server, pixel_kind)?;
@@ -1268,7 +816,6 @@ impl Renderer {
                 pixel_kind,
             )?),
         };
-        let frame_buffer = &mut **frame_buffer;
 
         let viewport = Rect::new(0, 0, new_width as i32, new_height as i32);
 
@@ -1281,15 +828,18 @@ impl Renderer {
             frame_width: screen_size.x,
             frame_height: screen_size.y,
             drawing_context,
-            fallback_resources: &self.fallback_resources,
+            renderer_resources: &self.renderer_resources,
             texture_cache: &mut self.texture_cache,
             uniform_buffer_cache: &mut self.uniform_buffer_cache,
-            flat_shader: &self.flat_shader,
+            render_pass_cache: &mut self.shader_cache,
+            uniform_memory_allocator: &mut self.uniform_memory_allocator,
+            resource_manager,
         })?;
 
         // Finally register texture in the cache so it will become available as texture in deferred/forward
         // renderer.
         self.texture_cache.try_register(
+            &*self.server,
             &render_target,
             frame_buffer
                 .color_attachments()
@@ -1297,12 +847,10 @@ impl Renderer {
                 .unwrap()
                 .texture
                 .clone(),
-        );
-
-        Ok(())
+        )
     }
 
-    fn update_texture_cache(&mut self, dt: f32) {
+    fn update_texture_cache(&mut self, resource_manager: &ResourceManager, dt: f32) {
         // Maximum amount of textures uploaded to GPU per frame. This defines throughput **only** for
         // requests from resource manager. This is needed to prevent huge lag when there are tons of
         // requests, so this is some kind of work load balancer.
@@ -1312,7 +860,10 @@ impl Renderer {
         while let Ok(event) = self.texture_event_receiver.try_recv() {
             if let ResourceEvent::Loaded(resource) | ResourceEvent::Reloaded(resource) = event {
                 if let Some(texture) = resource.try_cast::<Texture>() {
-                    match self.texture_cache.upload(&*self.server, &texture) {
+                    match self
+                        .texture_cache
+                        .upload(&*self.server, resource_manager, &texture)
+                    {
                         Ok(_) => {
                             uploaded += 1;
                             if uploaded >= THROUGHPUT {
@@ -1351,20 +902,315 @@ impl Renderer {
     ///
     /// Normally, this is called from `Engine::update()`.
     /// You should only call this manually if you don't use that method.
-    pub fn update_caches(&mut self, dt: f32) {
-        self.update_texture_cache(dt);
+    pub fn update_caches(&mut self, resource_manager: &ResourceManager, dt: f32) {
+        self.update_texture_cache(resource_manager, dt);
         self.update_shader_cache(dt);
         self.geometry_cache.update(dt);
     }
 
-    /// Unconditionally renders a scene and returns a reference to a [`AssociatedSceneData`] instance
+    fn render_scene_observer(
+        &mut self,
+        observer: &Observer,
+        scene_handle: Handle<Scene>,
+        scene: &Scene,
+        elapsed_time: f32,
+        dt: f32,
+        resource_manager: &ResourceManager,
+        need_recalculate_convolution: bool,
+        is_reflection_probe: bool,
+    ) -> Result<&mut RenderDataContainer, FrameworkError> {
+        let server = &*self.server;
+
+        let scene_render_data = self.scene_data_map.get_mut(&scene_handle).ok_or_else(|| {
+            FrameworkError::Custom(format!(
+                "No assocated render data for {scene_handle} scene!"
+            ))
+        })?;
+        let render_data = if let Some(render_target) = observer.render_target.as_ref() {
+            let (rt_size, final_frame_texture) = render_target_size(render_target)?;
+            let observer_render_data = match scene_render_data.camera_data.entry(observer.handle) {
+                Entry::Occupied(entry) => {
+                    let observer_render_data = entry.into_mut();
+                    recreate_render_data_if_needed(
+                        scene_handle,
+                        server,
+                        observer_render_data,
+                        rt_size,
+                        final_frame_texture,
+                    )?;
+                    observer_render_data
+                }
+                Entry::Vacant(entry) => {
+                    let render_data = entry.insert(RenderDataContainer::new(
+                        server,
+                        rt_size,
+                        final_frame_texture,
+                    )?);
+                    info!(
+                        "A new associated scene rendering data was created for observer {}!",
+                        observer.handle
+                    );
+                    render_data
+                }
+            };
+
+            if let Some(face) = observer.cube_map_face {
+                observer_render_data
+                    .ldr_scene_framebuffer
+                    .set_cubemap_face(0, face, 0);
+            }
+
+            self.texture_cache.try_register(
+                server,
+                render_target,
+                observer_render_data.ldr_scene_frame_texture().clone(),
+            )?;
+
+            observer_render_data
+        } else {
+            &mut scene_render_data.scene_data
+        };
+
+        render_data.need_recalculate_convolution |= need_recalculate_convolution;
+
+        let visibility_cache = self
+            .visibility_cache
+            .get_or_register(&scene.graph, observer.handle);
+
+        let mut bundle_storage = RenderDataBundleStorage::from_graph(
+            &scene.graph,
+            observer.render_mask,
+            elapsed_time,
+            &observer.position,
+            GBUFFER_PASS_NAME.clone(),
+            RenderDataBundleStorageOptions {
+                collect_lights: true,
+            },
+            &mut self.dynamic_surface_cache,
+        );
+        if is_reflection_probe {
+            bundle_storage.environment_map = None;
+        }
+
+        server.set_polygon_fill_mode(
+            PolygonFace::FrontAndBack,
+            scene.rendering_options.polygon_rasterization_mode,
+        );
+
+        render_data.statistics += render_data.gbuffer.fill(GBufferRenderContext {
+            server,
+            observer,
+            geom_cache: &mut self.geometry_cache,
+            bundle_storage: &bundle_storage,
+            texture_cache: &mut self.texture_cache,
+            shader_cache: &mut self.shader_cache,
+            quality_settings: &self.quality_settings,
+            renderer_resources: &self.renderer_resources,
+            graph: &scene.graph,
+            uniform_buffer_cache: &mut self.uniform_buffer_cache,
+            uniform_memory_allocator: &mut self.uniform_memory_allocator,
+            screen_space_debug_renderer: &mut self.screen_space_debug_renderer,
+            resource_manager,
+        })?;
+
+        server.set_polygon_fill_mode(PolygonFace::FrontAndBack, PolygonFillMode::Fill);
+
+        render_data.copy_depth_stencil_to_scene_framebuffer();
+
+        render_data.hdr_scene_framebuffer.clear(
+            observer.viewport,
+            Some(
+                scene
+                    .rendering_options
+                    .clear_color
+                    .unwrap_or(self.backbuffer_clear_color),
+            ),
+            None, // Keep depth, we've just copied valid data in it.
+            Some(0),
+        );
+
+        let (pass_stats, light_stats) =
+            self.deferred_light_renderer
+                .render(DeferredRendererContext {
+                    elapsed_time,
+                    server,
+                    scene,
+                    observer,
+                    gbuffer: &mut render_data.gbuffer,
+                    ambient_color: scene.rendering_options.ambient_lighting_color,
+                    render_data_bundle: &bundle_storage,
+                    settings: &self.quality_settings,
+                    textures: &mut self.texture_cache,
+                    geometry_cache: &mut self.geometry_cache,
+                    frame_buffer: &render_data.hdr_scene_framebuffer,
+                    shader_cache: &mut self.shader_cache,
+                    renderer_resources: &self.renderer_resources,
+                    uniform_buffer_cache: &mut self.uniform_buffer_cache,
+                    visibility_cache,
+                    uniform_memory_allocator: &mut self.uniform_memory_allocator,
+                    dynamic_surface_cache: &mut self.dynamic_surface_cache,
+                    ssao_renderer: &render_data.ssao_renderer,
+                    resource_manager,
+                    environment_map_specular_convolution: &mut render_data
+                        .environment_map_specular_convolution,
+                    environment_map_irradiance_convolution: &render_data
+                        .environment_map_irradiance_convolution,
+                    need_recalculate_convolution: &mut render_data.need_recalculate_convolution,
+                })?;
+
+        render_data.statistics += light_stats;
+        render_data.statistics += pass_stats;
+
+        let depth = render_data.gbuffer.depth();
+
+        render_data.statistics += bundle_storage.render_to_frame_buffer(
+            server,
+            &mut self.geometry_cache,
+            &mut self.shader_cache,
+            |bundle| bundle.render_path == RenderPath::Forward,
+            |_| true,
+            BundleRenderContext {
+                texture_cache: &mut self.texture_cache,
+                render_pass_name: &ImmutableString::new("Forward"),
+                frame_buffer: &render_data.hdr_scene_framebuffer,
+                viewport: observer.viewport,
+                uniform_memory_allocator: &mut self.uniform_memory_allocator,
+                resource_manager,
+                use_pom: self.quality_settings.use_parallax_mapping,
+                light_position: &Default::default(),
+                renderer_resources: &self.renderer_resources,
+                ambient_light: scene.rendering_options.ambient_lighting_color,
+                scene_depth: Some(depth),
+            },
+        )?;
+
+        for render_pass in self.scene_render_passes.iter() {
+            render_data.statistics +=
+                render_pass
+                    .borrow_mut()
+                    .on_hdr_render(SceneRenderPassContext {
+                        elapsed_time,
+                        server,
+                        texture_cache: &mut self.texture_cache,
+                        geometry_cache: &mut self.geometry_cache,
+                        shader_cache: &mut self.shader_cache,
+                        quality_settings: &self.quality_settings,
+                        bundle_storage: &bundle_storage,
+                        scene,
+                        observer,
+                        scene_handle,
+                        renderer_resources: &self.renderer_resources,
+                        depth_texture: render_data.gbuffer.depth(),
+                        normal_texture: render_data.gbuffer.normal_texture(),
+                        ambient_texture: render_data.gbuffer.ambient_texture(),
+                        framebuffer: &render_data.hdr_scene_framebuffer,
+                        ui_renderer: &mut self.ui_renderer,
+                        uniform_buffer_cache: &mut self.uniform_buffer_cache,
+                        uniform_memory_allocator: &mut self.uniform_memory_allocator,
+                        dynamic_surface_cache: &mut self.dynamic_surface_cache,
+                        resource_manager,
+                    })?;
+        }
+
+        // Prepare glow map.
+        render_data.statistics += render_data.bloom_renderer.render(
+            render_data.hdr_scene_frame_texture(),
+            &mut self.uniform_buffer_cache,
+            &self.renderer_resources,
+        )?;
+
+        // Convert high dynamic range frame to low dynamic range (sRGB) with tone mapping and gamma correction.
+        let mut dest_buf = 0;
+        let mut src_buf = 1;
+        render_data.statistics += render_data.hdr_renderer.render(
+            server,
+            render_data.hdr_scene_frame_texture(),
+            render_data.bloom_renderer.result(),
+            &render_data.ldr_temp_framebuffer[dest_buf],
+            observer.viewport,
+            dt,
+            observer.exposure,
+            observer.color_grading_lut.as_ref(),
+            observer.color_grading_enabled,
+            &mut self.texture_cache,
+            &mut self.uniform_buffer_cache,
+            &self.renderer_resources,
+            resource_manager,
+        )?;
+        std::mem::swap(&mut dest_buf, &mut src_buf);
+
+        // Apply FXAA if needed.
+        if self.quality_settings.fxaa {
+            render_data.statistics += self.fxaa_renderer.render(
+                observer.viewport,
+                render_data.ldr_temp_frame_texture(src_buf),
+                &render_data.ldr_temp_framebuffer[dest_buf],
+                &mut self.uniform_buffer_cache,
+                &self.renderer_resources,
+            )?;
+            std::mem::swap(&mut dest_buf, &mut src_buf);
+        }
+
+        render_data.statistics += blit_pixels(
+            &mut self.uniform_buffer_cache,
+            &render_data.ldr_scene_framebuffer,
+            render_data.ldr_temp_frame_texture(src_buf),
+            &self.renderer_resources.shaders.blit,
+            observer.viewport,
+            &self.renderer_resources,
+        )?;
+
+        // Render debug geometry in the LDR frame buffer.
+        self.debug_renderer.set_lines(&scene.drawing_context.lines);
+        render_data.statistics += self.debug_renderer.render(
+            &mut self.uniform_buffer_cache,
+            observer.viewport,
+            &render_data.ldr_scene_framebuffer,
+            observer.position.view_projection_matrix,
+            &self.renderer_resources,
+        )?;
+
+        for render_pass in self.scene_render_passes.iter() {
+            render_data.statistics +=
+                render_pass
+                    .borrow_mut()
+                    .on_ldr_render(SceneRenderPassContext {
+                        elapsed_time,
+                        server,
+                        texture_cache: &mut self.texture_cache,
+                        geometry_cache: &mut self.geometry_cache,
+                        shader_cache: &mut self.shader_cache,
+                        quality_settings: &self.quality_settings,
+                        bundle_storage: &bundle_storage,
+                        scene,
+                        observer,
+                        scene_handle,
+                        renderer_resources: &self.renderer_resources,
+                        depth_texture: render_data.gbuffer.depth(),
+                        normal_texture: render_data.gbuffer.normal_texture(),
+                        ambient_texture: render_data.gbuffer.ambient_texture(),
+                        framebuffer: &render_data.ldr_scene_framebuffer,
+                        ui_renderer: &mut self.ui_renderer,
+                        uniform_buffer_cache: &mut self.uniform_buffer_cache,
+                        uniform_memory_allocator: &mut self.uniform_memory_allocator,
+                        dynamic_surface_cache: &mut self.dynamic_surface_cache,
+                        resource_manager,
+                    })?;
+        }
+
+        Ok(render_data)
+    }
+
+    /// Unconditionally renders a scene and returns a reference to a [`RenderDataContainer`] instance
     /// that contains rendered data (including intermediate data, such as G-Buffer content, etc.).
     pub fn render_scene(
         &mut self,
         scene_handle: Handle<Scene>,
         scene: &Scene,
+        elapsed_time: f32,
         dt: f32,
-    ) -> Result<&AssociatedSceneData, FrameworkError> {
+        resource_manager: &ResourceManager,
+    ) -> Result<&SceneRenderData, FrameworkError> {
         let graph = &scene.graph;
 
         let backbuffer_width = self.frame_size.0 as f32;
@@ -1391,289 +1237,114 @@ impl Renderer {
             // Clamp to [1.0; infinity] range.
             .sup(&Vector2::new(1.0, 1.0));
 
-        let server = &*self.server;
-
-        let scene_associated_data = self
-            .scene_data_map
-            .entry(scene_handle)
-            .and_modify(|data| {
-                if data.gbuffer.width != frame_size.x as i32
-                    || data.gbuffer.height != frame_size.y as i32
-                {
-                    let width = frame_size.x as usize;
-                    let height = frame_size.y as usize;
-
-                    Log::info(format!(
-                        "Associated scene rendering data was re-created for scene {}, because render frame size was changed. Old is {}x{}, new {}x{}!",
-                        scene_handle,
-                        data.gbuffer.width,data.gbuffer.height,width,height
-                    ));
-
-                    *data = AssociatedSceneData::new(server, width, height).unwrap();
-                }
-            })
-            .or_insert_with(|| {
-                let width = frame_size.x as usize;
-                let height = frame_size.y as usize;
-
-                Log::info(format!(
+        let scene_render_data = match self.scene_data_map.entry(scene_handle) {
+            Entry::Occupied(entry) => {
+                let render_data = entry.into_mut();
+                recreate_render_data_if_needed(
+                    scene_handle,
+                    &*self.server,
+                    &mut render_data.scene_data,
+                    frame_size,
+                    FrameTextureKind::Rectangle,
+                )?;
+                render_data
+            }
+            Entry::Vacant(entry) => {
+                let render_data = entry.insert(SceneRenderData::new(
+                    &*self.server,
+                    frame_size,
+                    FrameTextureKind::Rectangle,
+                )?);
+                info!(
                     "A new associated scene rendering data was created for scene {scene_handle}!"
-                ));
+                );
+                render_data
+            }
+        };
 
-                AssociatedSceneData::new(server, width, height).unwrap()
-            });
-
-        let pipeline_stats = server.pipeline_statistics();
-        scene_associated_data.statistics = Default::default();
+        let pipeline_stats = &self.server.pipeline_statistics();
+        scene_render_data.scene_data.statistics = Default::default();
 
         // If we specified a texture to draw to, we have to register it in texture cache
         // so it can be used in later on as texture. This is useful in case if you need
         // to draw something on offscreen and then draw it on some mesh.
         if let Some(rt) = scene.rendering_options.render_target.clone() {
-            self.texture_cache
-                .try_register(&rt, scene_associated_data.ldr_scene_frame_texture());
+            self.texture_cache.try_register(
+                &*self.server,
+                &rt,
+                scene_render_data
+                    .scene_data
+                    .ldr_scene_frame_texture()
+                    .clone(),
+            )?;
         }
 
-        for (camera_handle, camera) in graph.pair_iter().filter_map(|(handle, node)| {
-            if node.is_globally_enabled() {
-                if let Some(camera) = node.cast::<Camera>() {
-                    if camera.is_enabled() {
-                        return Some((handle, camera));
-                    }
-                }
-            }
-            None
-        }) {
-            let visibility_cache = self.visibility_cache.get_or_register(graph, camera_handle);
+        scene_render_data
+            .camera_data
+            .retain(|h, _| graph.is_valid_handle(*h));
 
-            let viewport = camera.viewport_pixels(frame_size);
+        let observers = ObserversCollection::from_scene(scene, frame_size);
 
-            let bundle_storage = RenderDataBundleStorage::from_graph(
-                graph,
-                ObserverInfo {
-                    observer_position: camera.global_position(),
-                    z_near: camera.projection().z_near(),
-                    z_far: camera.projection().z_far(),
-                    view_matrix: camera.view_matrix(),
-                    projection_matrix: camera.projection_matrix(),
-                },
-                GBUFFER_PASS_NAME.clone(),
-                RenderDataBundleStorageOptions {
-                    collect_lights: true,
-                },
-            );
-
-            server.set_polygon_fill_mode(
-                PolygonFace::FrontAndBack,
-                scene.rendering_options.polygon_rasterization_mode,
-            );
-
-            scene_associated_data.statistics +=
-                scene_associated_data.gbuffer.fill(GBufferRenderContext {
-                    server,
-                    camera,
-                    geom_cache: &mut self.geometry_cache,
-                    bundle_storage: &bundle_storage,
-                    texture_cache: &mut self.texture_cache,
-                    shader_cache: &mut self.shader_cache,
-                    quality_settings: &self.quality_settings,
-                    fallback_resources: &self.fallback_resources,
-                    graph,
-                    uniform_buffer_cache: &mut self.uniform_buffer_cache,
-                    uniform_memory_allocator: &mut self.uniform_memory_allocator,
-                    screen_space_debug_renderer: &mut self.screen_space_debug_renderer,
-                    unit_quad: &*self.quad,
-                })?;
-
-            server.set_polygon_fill_mode(PolygonFace::FrontAndBack, PolygonFillMode::Fill);
-
-            scene_associated_data.copy_depth_stencil_to_scene_framebuffer();
-
-            scene_associated_data.hdr_scene_framebuffer.clear(
-                viewport,
-                Some(
-                    scene
-                        .rendering_options
-                        .clear_color
-                        .unwrap_or(self.backbuffer_clear_color),
-                ),
-                None, // Keep depth, we've just copied valid data in it.
-                Some(0),
-            );
-
-            let (pass_stats, light_stats) =
-                self.deferred_light_renderer
-                    .render(DeferredRendererContext {
-                        server,
-                        scene,
-                        camera,
-                        gbuffer: &mut scene_associated_data.gbuffer,
-                        ambient_color: scene.rendering_options.ambient_lighting_color,
-                        render_data_bundle: &bundle_storage,
-                        settings: &self.quality_settings,
-                        textures: &mut self.texture_cache,
-                        geometry_cache: &mut self.geometry_cache,
-                        frame_buffer: &mut *scene_associated_data.hdr_scene_framebuffer,
-                        shader_cache: &mut self.shader_cache,
-                        fallback_resources: &self.fallback_resources,
-                        uniform_buffer_cache: &mut self.uniform_buffer_cache,
-                        visibility_cache,
-                        uniform_memory_allocator: &mut self.uniform_memory_allocator,
-                    })?;
-
-            scene_associated_data.statistics += light_stats;
-            scene_associated_data.statistics += pass_stats;
-
-            let depth = scene_associated_data.gbuffer.depth();
-
-            scene_associated_data.statistics +=
-                self.forward_renderer.render(ForwardRenderContext {
-                    state: server,
-                    geom_cache: &mut self.geometry_cache,
-                    texture_cache: &mut self.texture_cache,
-                    shader_cache: &mut self.shader_cache,
-                    bundle_storage: &bundle_storage,
-                    framebuffer: &mut *scene_associated_data.hdr_scene_framebuffer,
-                    viewport,
-                    quality_settings: &self.quality_settings,
-                    fallback_resources: &self.fallback_resources,
-                    scene_depth: depth,
-                    ambient_light: scene.rendering_options.ambient_lighting_color,
-                    uniform_memory_allocator: &mut self.uniform_memory_allocator,
-                })?;
-
-            for render_pass in self.scene_render_passes.iter() {
-                scene_associated_data.statistics +=
-                    render_pass
-                        .borrow_mut()
-                        .on_hdr_render(SceneRenderPassContext {
-                            server,
-                            texture_cache: &mut self.texture_cache,
-                            geometry_cache: &mut self.geometry_cache,
-                            shader_cache: &mut self.shader_cache,
-                            quality_settings: &self.quality_settings,
-                            bundle_storage: &bundle_storage,
-                            viewport,
-                            scene,
-                            camera,
-                            scene_handle,
-                            fallback_resources: &self.fallback_resources,
-                            depth_texture: scene_associated_data.gbuffer.depth(),
-                            normal_texture: scene_associated_data.gbuffer.normal_texture(),
-                            ambient_texture: scene_associated_data.gbuffer.ambient_texture(),
-                            framebuffer: &mut *scene_associated_data.hdr_scene_framebuffer,
-                            ui_renderer: &mut self.ui_renderer,
-                            uniform_buffer_cache: &mut self.uniform_buffer_cache,
-                            uniform_memory_allocator: &mut self.uniform_memory_allocator,
-                        })?;
-            }
-
-            let quad = &self.quad;
-
-            // Prepare glow map.
-            scene_associated_data.statistics += scene_associated_data.bloom_renderer.render(
-                &**quad,
-                scene_associated_data.hdr_scene_frame_texture(),
-                &mut self.uniform_buffer_cache,
-            )?;
-
-            // Convert high dynamic range frame to low dynamic range (sRGB) with tone mapping and gamma correction.
-            scene_associated_data.statistics += scene_associated_data.hdr_renderer.render(
-                server,
-                scene_associated_data.hdr_scene_frame_texture(),
-                scene_associated_data.bloom_renderer.result(),
-                &mut *scene_associated_data.ldr_scene_framebuffer,
-                viewport,
-                &**quad,
+        // At first, render the reflection probes to off-screen render target.
+        let mut need_recalculate_convolution = false;
+        for observer in observers.reflection_probes.iter() {
+            self.render_scene_observer(
+                observer,
+                scene_handle,
+                scene,
+                elapsed_time,
                 dt,
-                camera.exposure(),
-                camera.color_grading_lut_ref(),
-                camera.color_grading_enabled(),
-                &mut self.texture_cache,
-                &mut self.uniform_buffer_cache,
+                resource_manager,
+                // There's no need to recalculate convolution for the environment map more than once
+                // when rendering reflection probes, because it does not use a dynamic environment map.
+                false,
+                true,
             )?;
+            need_recalculate_convolution = true;
+        }
 
-            // Apply FXAA if needed.
-            if self.quality_settings.fxaa {
-                scene_associated_data.statistics += self.fxaa_renderer.render(
-                    viewport,
-                    scene_associated_data.ldr_scene_frame_texture(),
-                    &mut *scene_associated_data.ldr_temp_framebuffer,
-                    &mut self.uniform_buffer_cache,
-                )?;
-
-                let quad = &self.quad;
-                let temp_frame_texture = scene_associated_data.ldr_temp_frame_texture();
-                scene_associated_data.statistics += blit_pixels(
-                    &mut self.uniform_buffer_cache,
-                    &mut *scene_associated_data.ldr_scene_framebuffer,
-                    temp_frame_texture,
-                    &self.flat_shader,
-                    viewport,
-                    &**quad,
-                )?;
-            }
-
-            // Render debug geometry in the LDR frame buffer.
-            self.debug_renderer.set_lines(&scene.drawing_context.lines);
-            scene_associated_data.statistics += self.debug_renderer.render(
-                &mut self.uniform_buffer_cache,
-                viewport,
-                &mut *scene_associated_data.ldr_scene_framebuffer,
-                camera.view_projection_matrix(),
+        // Then render everything else.
+        for observer in observers.cameras.iter() {
+            self.render_scene_observer(
+                observer,
+                scene_handle,
+                scene,
+                elapsed_time,
+                dt,
+                resource_manager,
+                need_recalculate_convolution,
+                false,
             )?;
-
-            for render_pass in self.scene_render_passes.iter() {
-                scene_associated_data.statistics +=
-                    render_pass
-                        .borrow_mut()
-                        .on_ldr_render(SceneRenderPassContext {
-                            server,
-                            texture_cache: &mut self.texture_cache,
-                            geometry_cache: &mut self.geometry_cache,
-                            shader_cache: &mut self.shader_cache,
-                            quality_settings: &self.quality_settings,
-                            bundle_storage: &bundle_storage,
-                            viewport,
-                            scene,
-                            camera,
-                            scene_handle,
-                            fallback_resources: &self.fallback_resources,
-                            depth_texture: scene_associated_data.gbuffer.depth(),
-                            normal_texture: scene_associated_data.gbuffer.normal_texture(),
-                            ambient_texture: scene_associated_data.gbuffer.ambient_texture(),
-                            framebuffer: &mut *scene_associated_data.ldr_scene_framebuffer,
-                            ui_renderer: &mut self.ui_renderer,
-                            uniform_buffer_cache: &mut self.uniform_buffer_cache,
-                            uniform_memory_allocator: &mut self.uniform_memory_allocator,
-                        })?;
-            }
         }
 
         self.visibility_cache.update(graph);
 
+        let scene_render_data = self.scene_data_map.get_mut(&scene_handle).unwrap();
+
         // Optionally render everything into back buffer.
         if scene.rendering_options.render_target.is_none() {
-            let quad = &self.quad;
-            scene_associated_data.statistics += blit_pixels(
+            scene_render_data.scene_data.statistics += blit_pixels(
                 &mut self.uniform_buffer_cache,
-                &mut *self.backbuffer,
-                scene_associated_data.ldr_scene_frame_texture(),
-                &self.flat_shader,
+                &self.backbuffer,
+                scene_render_data.scene_data.ldr_scene_frame_texture(),
+                &self.renderer_resources.shaders.blit,
                 window_viewport,
-                &**quad,
+                &self.renderer_resources,
             )?;
         }
 
-        self.statistics += scene_associated_data.statistics;
-        scene_associated_data.statistics.pipeline = server.pipeline_statistics() - pipeline_stats;
+        self.statistics += scene_render_data.scene_data.statistics;
+        scene_render_data.scene_data.statistics.pipeline =
+            self.server.pipeline_statistics() - *pipeline_stats;
 
-        Ok(scene_associated_data)
+        Ok(scene_render_data)
     }
 
     fn render_frame<'a>(
         &mut self,
         scenes: &SceneContainer,
+        elapsed_time: f32,
+        resource_manager: &ResourceManager,
         drawing_contexts: impl Iterator<Item = &'a DrawingContext>,
     ) -> Result<(), FrameworkError> {
         if self.frame_size.0 == 0 || self.frame_size.1 == 0 {
@@ -1682,6 +1353,7 @@ impl Renderer {
 
         self.uniform_buffer_cache.mark_all_unused();
         self.uniform_memory_allocator.clear();
+        self.dynamic_surface_cache.clear();
 
         // Make sure to drop associated data for destroyed scenes.
         self.scene_data_map
@@ -1707,7 +1379,7 @@ impl Renderer {
         let backbuffer_height = self.frame_size.1 as f32;
 
         for (scene_handle, scene) in scenes.pair_iter().filter(|(_, s)| *s.enabled) {
-            self.render_scene(scene_handle, scene, dt)?;
+            self.render_scene(scene_handle, scene, elapsed_time, dt, resource_manager)?;
         }
 
         self.graphics_server()
@@ -1718,14 +1390,16 @@ impl Renderer {
             self.statistics += self.ui_renderer.render(UiRenderContext {
                 server: &*self.server,
                 viewport: window_viewport,
-                frame_buffer: &mut *self.backbuffer,
+                frame_buffer: &self.backbuffer,
                 frame_width: backbuffer_width,
                 frame_height: backbuffer_height,
                 drawing_context,
-                fallback_resources: &self.fallback_resources,
+                renderer_resources: &self.renderer_resources,
                 texture_cache: &mut self.texture_cache,
                 uniform_buffer_cache: &mut self.uniform_buffer_cache,
-                flat_shader: &self.flat_shader,
+                render_pass_cache: &mut self.shader_cache,
+                uniform_memory_allocator: &mut self.uniform_memory_allocator,
+                resource_manager,
             })?;
         }
 
@@ -1734,8 +1408,9 @@ impl Renderer {
         self.screen_space_debug_renderer.render(
             &mut self.uniform_buffer_cache,
             window_viewport,
-            &mut *self.backbuffer,
+            &self.backbuffer,
             screen_matrix,
+            &self.renderer_resources,
         )?;
 
         self.statistics.geometry_cache_size = self.geometry_cache.alive_count();
@@ -1749,10 +1424,12 @@ impl Renderer {
     pub(crate) fn render_and_swap_buffers<'a>(
         &mut self,
         scenes: &SceneContainer,
+        elapsed_time: f32,
         drawing_contexts: impl Iterator<Item = &'a DrawingContext>,
         window: &Window,
+        resource_manager: &ResourceManager,
     ) -> Result<(), FrameworkError> {
-        self.render_frame(scenes, drawing_contexts)?;
+        self.render_frame(scenes, elapsed_time, resource_manager, drawing_contexts)?;
         self.statistics.end_frame();
         window.pre_present_notify();
         self.graphics_server().swap_buffers()?;

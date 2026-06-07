@@ -27,7 +27,7 @@ use crate::{
     core::{
         log::Log,
         pool::Handle,
-        reflect::{FieldInfo, Reflect, ReflectArray, ReflectList},
+        reflect::{FieldRef, Reflect, ReflectArray, ReflectList},
         type_traits::ComponentProvider,
         uuid::Uuid,
         visitor::{Visit, VisitResult, Visitor},
@@ -39,6 +39,7 @@ use crate::{
     plugin::{Plugin, PluginContainer},
     scene::{base::NodeScriptMessage, node::Node, Scene},
 };
+use fyrox_core::reflect::FieldMut;
 use std::{
     any::{Any, TypeId},
     fmt::{Debug, Formatter},
@@ -46,6 +47,8 @@ use std::{
     str::FromStr,
     sync::mpsc::Sender,
 };
+
+pub use fyrox_core_derive::ScriptMessagePayload;
 
 pub mod constructor;
 
@@ -55,13 +58,35 @@ pub(crate) trait UniversalScriptContext {
     fn set_script_index(&mut self, index: usize);
 }
 
+/// Alternative to `core::any::TypeId` that allows to dispatch separately messages of the same static type.
+pub type DynamicTypeId = i64;
+
 /// A script message's payload.
+/// Use `#[derive(ScriptMessagePayload)]` to implement this trait:
+///
+/// ```rust
+///     use fyrox_impl::script::ScriptMessagePayload;
+///     #[derive(Debug, ScriptMessagePayload)]
+///     struct MyStruct {
+///     }
+/// ```
 pub trait ScriptMessagePayload: Any + Send + Debug {
     /// Returns `self` as `&dyn Any`
     fn as_any_ref(&self) -> &dyn Any;
 
     /// Returns `self` as `&dyn Any`
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// By default messages are dispatched by [`TypeId::of`]`::<Self>()`.
+    ///
+    /// If this method returns [`Some`], then the message become dynamically typed.
+    /// Dynamically typed messages are dispatched by the returned type identifier instead of static type.
+    /// Subscriptions to dynamically typed messages are managed by
+    /// [`ScriptMessageDispatcher::subscribe_dynamic_to`]
+    /// and [`ScriptMessageDispatcher::unsubscribe_dynamic_from`]
+    fn get_dynamic_type_id(&self) -> Option<DynamicTypeId> {
+        None
+    }
 }
 
 impl dyn ScriptMessagePayload {
@@ -73,19 +98,6 @@ impl dyn ScriptMessagePayload {
     /// Tries to cast the payload to a particular type.
     pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.as_any_mut().downcast_mut::<T>()
-    }
-}
-
-impl<T> ScriptMessagePayload for T
-where
-    T: 'static + Send + Debug,
-{
-    fn as_any_ref(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
 
@@ -333,6 +345,7 @@ pub struct ScriptContext<'a, 'b, 'c> {
     /// # };
     /// #
     /// #[derive(Visit, Reflect, Default, Debug)]
+    /// #[reflect(non_cloneable)]
     /// struct Game {
     ///     player_name: String,
     /// }
@@ -671,6 +684,14 @@ impl Reflect for Script {
         file!()
     }
 
+    fn derived_types() -> &'static [TypeId] {
+        &[]
+    }
+
+    fn query_derived_types(&self) -> &'static [TypeId] {
+        Self::derived_types()
+    }
+
     fn type_name(&self) -> &'static str {
         self.instance.type_name()
     }
@@ -687,8 +708,12 @@ impl Reflect for Script {
         env!("CARGO_PKG_NAME")
     }
 
-    fn fields_info(&self, func: &mut dyn FnMut(&[FieldInfo])) {
-        self.instance.fields_info(func)
+    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
+        self.instance.fields_ref(func)
+    }
+
+    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+        self.instance.fields_mut(func)
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
@@ -715,14 +740,6 @@ impl Reflect for Script {
         self.instance.deref_mut().set(value)
     }
 
-    fn fields(&self, func: &mut dyn FnMut(&[&dyn Reflect])) {
-        self.instance.deref().fields(func)
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [&mut dyn Reflect])) {
-        self.instance.deref_mut().fields_mut(func)
-    }
-
     fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
         self.instance.deref().field(name, func)
     }
@@ -745,6 +762,10 @@ impl Reflect for Script {
 
     fn as_list_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectList>)) {
         self.instance.deref_mut().as_list_mut(func)
+    }
+
+    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
+        Some(Box::new(self.clone()))
     }
 }
 

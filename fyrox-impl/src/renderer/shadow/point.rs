@@ -18,6 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::renderer::resources::RendererResources;
+use crate::renderer::settings::ShadowMapPrecision;
 use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector3},
@@ -25,42 +27,36 @@ use crate::{
         math::Rect,
     },
     renderer::{
-        bundle::{
-            BundleRenderContext, ObserverInfo, RenderDataBundleStorage,
-            RenderDataBundleStorageOptions,
+        bundle::{BundleRenderContext, RenderDataBundleStorage, RenderDataBundleStorageOptions},
+        cache::{
+            shader::ShaderCache, texture::TextureCache, uniform::UniformMemoryAllocator,
+            DynamicSurfaceCache,
         },
-        cache::{shader::ShaderCache, texture::TextureCache, uniform::UniformMemoryAllocator},
         framework::{
             error::FrameworkError,
-            framebuffer::{Attachment, AttachmentKind, FrameBuffer},
-            gpu_texture::{
-                CubeMapFace, GpuTexture, GpuTextureDescriptor, GpuTextureKind, MagnificationFilter,
-                MinificationFilter, PixelKind, WrapMode,
-            },
+            framebuffer::{Attachment, GpuFrameBuffer},
+            gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind},
             server::GraphicsServer,
         },
+        observer::ObserverPosition,
         shadow::cascade_size,
-        FallbackResources, GeometryCache, RenderPassStatistics, ShadowMapPrecision,
-        POINT_SHADOW_PASS_NAME,
+        utils::CubeMapFaceDescriptor,
+        GeometryCache, RenderPassStatistics, POINT_SHADOW_PASS_NAME,
     },
-    scene::graph::Graph,
+    scene::{collider::BitMask, graph::Graph},
 };
-use std::{cell::RefCell, rc::Rc};
+use fyrox_resource::manager::ResourceManager;
 
 pub struct PointShadowMapRenderer {
     precision: ShadowMapPrecision,
-    cascades: [Box<dyn FrameBuffer>; 3],
+    cascades: [GpuFrameBuffer; 3],
     size: usize,
-    faces: [PointShadowCubeMapFace; 6],
-}
-
-struct PointShadowCubeMapFace {
-    face: CubeMapFace,
-    look: Vector3<f32>,
-    up: Vector3<f32>,
+    faces: [CubeMapFaceDescriptor; 6],
 }
 
 pub(crate) struct PointShadowMapRenderContext<'a> {
+    pub render_mask: BitMask,
+    pub elapsed_time: f32,
     pub state: &'a dyn GraphicsServer,
     pub graph: &'a Graph,
     pub light_pos: Vector3<f32>,
@@ -69,8 +65,10 @@ pub(crate) struct PointShadowMapRenderContext<'a> {
     pub cascade: usize,
     pub shader_cache: &'a mut ShaderCache,
     pub texture_cache: &'a mut TextureCache,
-    pub fallback_resources: &'a FallbackResources,
+    pub renderer_resources: &'a RendererResources,
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
+    pub dynamic_surface_cache: &'a mut DynamicSurfaceCache,
+    pub resource_manager: &'a ResourceManager,
 }
 
 impl PointShadowMapRenderer {
@@ -83,8 +81,9 @@ impl PointShadowMapRenderer {
             server: &dyn GraphicsServer,
             size: usize,
             precision: ShadowMapPrecision,
-        ) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
+        ) -> Result<GpuFrameBuffer, FrameworkError> {
             let depth = server.create_2d_render_target(
+                "PointShadowMapDepthTexture",
                 match precision {
                     ShadowMapPrecision::Full => PixelKind::D32F,
                     ShadowMapPrecision::Half => PixelKind::D16,
@@ -94,30 +93,15 @@ impl PointShadowMapRenderer {
             )?;
 
             let cube_map = server.create_texture(GpuTextureDescriptor {
-                kind: GpuTextureKind::Cube {
-                    width: size,
-                    height: size,
-                },
+                name: "PointLightShadowCubeMap",
+                kind: GpuTextureKind::Cube { size },
                 pixel_kind: PixelKind::R16F,
-                min_filter: MinificationFilter::Nearest,
-                mag_filter: MagnificationFilter::Nearest,
-                mip_count: 1,
-                s_wrap_mode: WrapMode::ClampToEdge,
-                t_wrap_mode: WrapMode::ClampToEdge,
-                r_wrap_mode: WrapMode::ClampToEdge,
-                anisotropy: 1.0,
-                data: None,
+                ..Default::default()
             })?;
 
             server.create_frame_buffer(
-                Some(Attachment {
-                    kind: AttachmentKind::Depth,
-                    texture: depth,
-                }),
-                vec![Attachment {
-                    kind: AttachmentKind::Color,
-                    texture: cube_map,
-                }],
+                Some(Attachment::depth(depth)),
+                vec![Attachment::color(cube_map)],
             )
         }
 
@@ -129,38 +113,7 @@ impl PointShadowMapRenderer {
                 make_cascade(server, cascade_size(size, 2), precision)?,
             ],
             size,
-            faces: [
-                PointShadowCubeMapFace {
-                    face: CubeMapFace::PositiveX,
-                    look: Vector3::new(1.0, 0.0, 0.0),
-                    up: Vector3::new(0.0, -1.0, 0.0),
-                },
-                PointShadowCubeMapFace {
-                    face: CubeMapFace::NegativeX,
-                    look: Vector3::new(-1.0, 0.0, 0.0),
-                    up: Vector3::new(0.0, -1.0, 0.0),
-                },
-                PointShadowCubeMapFace {
-                    face: CubeMapFace::PositiveY,
-                    look: Vector3::new(0.0, 1.0, 0.0),
-                    up: Vector3::new(0.0, 0.0, 1.0),
-                },
-                PointShadowCubeMapFace {
-                    face: CubeMapFace::NegativeY,
-                    look: Vector3::new(0.0, -1.0, 0.0),
-                    up: Vector3::new(0.0, 0.0, -1.0),
-                },
-                PointShadowCubeMapFace {
-                    face: CubeMapFace::PositiveZ,
-                    look: Vector3::new(0.0, 0.0, 1.0),
-                    up: Vector3::new(0.0, -1.0, 0.0),
-                },
-                PointShadowCubeMapFace {
-                    face: CubeMapFace::NegativeZ,
-                    look: Vector3::new(0.0, 0.0, -1.0),
-                    up: Vector3::new(0.0, -1.0, 0.0),
-                },
-            ],
+            faces: CubeMapFaceDescriptor::cube_faces(),
         })
     }
 
@@ -172,10 +125,8 @@ impl PointShadowMapRenderer {
         self.precision
     }
 
-    pub fn cascade_texture(&self, cascade: usize) -> Rc<RefCell<dyn GpuTexture>> {
-        self.cascades[cascade].color_attachments()[0]
-            .texture
-            .clone()
+    pub fn cascade_texture(&self, cascade: usize) -> &GpuTexture {
+        &self.cascades[cascade].color_attachments()[0].texture
     }
 
     pub(crate) fn render(
@@ -185,19 +136,23 @@ impl PointShadowMapRenderer {
         let mut statistics = RenderPassStatistics::default();
 
         let PointShadowMapRenderContext {
+            elapsed_time,
             state,
             graph,
+            render_mask,
             light_pos,
             light_radius,
             geom_cache,
             cascade,
             shader_cache,
             texture_cache,
-            fallback_resources,
+            renderer_resources,
             uniform_memory_allocator,
+            dynamic_surface_cache,
+            resource_manager,
         } = args;
 
-        let framebuffer = &mut *self.cascades[cascade];
+        let framebuffer = &self.cascades[cascade];
         let cascade_size = cascade_size(self.size, cascade);
 
         let viewport = Rect::new(0, 0, cascade_size as i32, cascade_size as i32);
@@ -208,7 +163,7 @@ impl PointShadowMapRenderer {
             Matrix4::new_perspective(1.0, std::f32::consts::FRAC_PI_2, z_near, z_far);
 
         for face in self.faces.iter() {
-            framebuffer.set_cubemap_face(0, face.face);
+            framebuffer.set_cubemap_face(0, face.face, 0);
             framebuffer.clear(viewport, Some(Color::WHITE), Some(1.0), None);
 
             let light_look_at = light_pos + face.look;
@@ -220,17 +175,21 @@ impl PointShadowMapRenderer {
 
             let bundle_storage = RenderDataBundleStorage::from_graph(
                 graph,
-                ObserverInfo {
-                    observer_position: light_pos,
+                render_mask,
+                elapsed_time,
+                &ObserverPosition {
+                    translation: light_pos,
                     z_near,
                     z_far,
                     view_matrix: light_view_matrix,
                     projection_matrix: light_projection_matrix,
+                    view_projection_matrix: light_projection_matrix * light_view_matrix,
                 },
                 POINT_SHADOW_PASS_NAME.clone(),
                 RenderDataBundleStorageOptions {
                     collect_lights: false,
                 },
+                dynamic_surface_cache,
             );
 
             statistics += bundle_storage.render_to_frame_buffer(
@@ -245,9 +204,10 @@ impl PointShadowMapRenderer {
                     frame_buffer: framebuffer,
                     viewport,
                     uniform_memory_allocator,
+                    resource_manager,
                     use_pom: false,
                     light_position: &light_pos,
-                    fallback_resources,
+                    renderer_resources,
                     ambient_light: Color::WHITE, // TODO
                     scene_depth: None,
                 },

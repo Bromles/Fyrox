@@ -40,13 +40,14 @@ use crate::fyrox::{
 };
 use crate::plugins::inspector::editors::make_property_editors_container;
 use crate::{message::MessageSender, scene::GameScene, Engine, MSG_SYNC_FLAG};
+use fyrox::gui::inspector::{Inspector, InspectorContextArgs};
 use std::{
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
     sync::Arc,
 };
 
-#[derive(Reflect, Debug)]
+#[derive(Reflect, Clone, Debug)]
 struct LightmapperSettings {
     #[reflect(
         description = "Amount of texels per unit. It defines 'pixels density' per unit of area (square meters). The \
@@ -210,12 +211,16 @@ pub struct LightPanel {
     progress_window: Option<ProgressWindow>,
     sender: Sender<Result<Lightmap, LightmapGenerationError>>,
     receiver: Receiver<Result<Lightmap, LightmapGenerationError>>,
+    clipboard: Option<Box<dyn Reflect>>,
 }
 
 impl LightPanel {
     pub fn new(engine: &mut Engine, sender: MessageSender) -> Self {
         let settings = LightmapperSettings::default();
-        let container = Arc::new(make_property_editors_container(sender));
+        let container = Arc::new(make_property_editors_container(
+            sender,
+            engine.resource_manager.clone(),
+        ));
 
         let generate;
         let inspector;
@@ -241,17 +246,18 @@ impl LightPanel {
                             inspector = InspectorBuilder::new(
                                 WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
                             )
-                            .with_context(InspectorContext::from_object(
-                                &settings,
+                            .with_context(InspectorContext::from_object(InspectorContextArgs {
+                                object: &settings,
                                 ctx,
-                                container,
-                                None,
-                                MSG_SYNC_FLAG,
-                                0,
-                                true,
-                                Default::default(),
-                                150.0,
-                            ))
+                                definition_container: container,
+                                environment: None,
+                                sync_flag: MSG_SYNC_FLAG,
+                                layer_index: 0,
+                                generate_property_string_values: true,
+                                filter: Default::default(),
+                                name_column_width: 150.0,
+                                base_path: Default::default(),
+                            }))
                             .build(ctx);
                             inspector
                         })
@@ -286,6 +292,7 @@ impl LightPanel {
             progress_window: None,
             sender,
             receiver,
+            clipboard: None,
         }
     }
 
@@ -295,6 +302,14 @@ impl LightPanel {
         game_scene: &GameScene,
         engine: &mut Engine,
     ) {
+        Inspector::handle_context_menu_message(
+            self.inspector,
+            message,
+            engine.user_interfaces.first_mut(),
+            &mut self.settings,
+            &mut self.clipboard,
+        );
+
         if let Some(ButtonMessage::Click) = message.data::<ButtonMessage>() {
             if message.destination() == self.generate {
                 let scene = &mut engine.scenes[game_scene.scene];

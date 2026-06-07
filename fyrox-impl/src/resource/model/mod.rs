@@ -35,8 +35,8 @@
 //!
 //! # Supported formats
 //!
-//! Currently only FBX (common format in game industry for storing complex 3d models)
-//! and RGS (native Fyroxed format) formats are supported.
+//! Currently only FBX (common format in game industry for storing complex 3d models),
+//! RGS (native Fyroxed format), GLTF formats are supported.
 
 use crate::{
     asset::{
@@ -51,7 +51,7 @@ use crate::{
         uuid::Uuid,
         uuid_provider,
         variable::InheritableVariable,
-        visitor::{Visit, VisitError, VisitResult, Visitor},
+        visitor::{Visit, VisitResult, Visitor},
         NameProvider, TypeUuidProvider,
     },
     engine::SerializationContext,
@@ -66,10 +66,10 @@ use crate::{
 use fxhash::FxHashMap;
 use fyrox_core::algebra::Point3;
 use fyrox_core::math;
+use fyrox_core::visitor::error::VisitError;
 use fyrox_ui::{UiNode, UserInterface};
 use serde::{Deserialize, Serialize};
 use std::{
-    any::Any,
     error::Error,
     fmt::{Display, Formatter},
     path::{Path, PathBuf},
@@ -80,7 +80,7 @@ use strum_macros::{AsRefStr, EnumString, VariantNames};
 pub mod loader;
 
 /// See module docs.
-#[derive(Debug, Visit, Reflect)]
+#[derive(Debug, Clone, Visit, Reflect)]
 pub struct Model {
     #[visit(skip)]
     pub(crate) mapping: NodeMapping,
@@ -554,7 +554,7 @@ impl ModelResourceExtension for ModelResource {
 
     fn retarget_animations_directly(&self, root: Handle<Node>, graph: &Graph) -> Vec<Animation> {
         let mut header = self.state();
-        let self_kind = header.kind().clone();
+        let self_kind = header.kind();
         if let Some(model) = header.data() {
             model.retarget_animations_directly(root, graph, self_kind)
         } else {
@@ -569,7 +569,7 @@ impl ModelResourceExtension for ModelResource {
         graph: &mut Graph,
     ) -> Vec<Handle<Animation>> {
         let mut header = self.state();
-        let self_kind = header.kind().clone();
+        let self_kind = header.kind();
         if let Some(model) = header.data() {
             model.retarget_animations_to_player(root, dest_animation_player, graph, self_kind)
         } else {
@@ -579,7 +579,7 @@ impl ModelResourceExtension for ModelResource {
 
     fn retarget_animations(&self, root: Handle<Node>, graph: &mut Graph) -> Vec<Handle<Animation>> {
         let mut header = self.state();
-        let self_kind = header.kind().clone();
+        let self_kind = header.kind();
         if let Some(model) = header.data() {
             model.retarget_animations(root, graph, self_kind)
         } else {
@@ -598,14 +598,6 @@ impl ModelResourceExtension for ModelResource {
 }
 
 impl ResourceData for Model {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -613,12 +605,16 @@ impl ResourceData for Model {
     fn save(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
         let mut visitor = Visitor::new();
         self.scene.save("Scene", &mut visitor)?;
-        visitor.save_binary(path)?;
+        visitor.save_ascii_to_file(path)?;
         Ok(())
     }
 
     fn can_be_saved(&self) -> bool {
         true
+    }
+
+    fn try_clone_box(&self) -> Option<Box<dyn ResourceData>> {
+        Some(Box::new(self.clone()))
     }
 }
 

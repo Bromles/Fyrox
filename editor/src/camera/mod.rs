@@ -18,10 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::settings::selection::SelectionSettings;
 use crate::{
     fyrox::{
         core::{
-            algebra::{Matrix4, Point3, UnitQuaternion, Vector2, Vector3},
+            algebra::{clamp, Matrix4, Point3, UnitQuaternion, Vector2, Vector3},
             math::{
                 aabb::AxisAlignedBoundingBox, plane::Plane, ray::Ray, Matrix4Ext,
                 TriangleDefinition, Vector3Ext,
@@ -30,14 +31,15 @@ use crate::{
         },
         graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
         gui::message::{KeyCode, KeyboardModifiers, MouseButton},
+        renderer::bundle::{RenderContext, RenderDataBundleStorage},
         scene::{
             base::BaseBuilder,
             camera::{Camera, CameraBuilder, Exposure, FitParameters, Projection},
+            collider::BitMask,
             graph::Graph,
             mesh::{
                 buffer::{VertexAttributeUsage, VertexReadTrait},
                 surface::SurfaceData,
-                Mesh,
             },
             node::Node,
             pivot::PivotBuilder,
@@ -52,6 +54,8 @@ use crate::{
         Settings,
     },
 };
+use fyrox::renderer::cache::DynamicSurfaceCache;
+use fyrox::renderer::observer::ObserverPosition;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -90,7 +94,6 @@ pub struct CameraController {
     move_up: bool,
     move_down: bool,
     speed_factor: f32,
-    stack: Vec<Handle<Node>>,
     editor_context: PickContext,
     scene_context: PickContext,
     prev_interaction_state: bool,
@@ -117,7 +120,6 @@ struct PickContext {
 
 pub type PickingFilter<'a> = Option<&'a mut dyn FnMut(Handle<Node>, &Node) -> bool>;
 
-#[derive(Default)]
 pub struct PickingOptions<'a> {
     pub cursor_pos: Vector2<f32>,
     pub editor_only: bool,
@@ -125,6 +127,7 @@ pub struct PickingOptions<'a> {
     pub ignore_back_faces: bool,
     pub use_picking_loop: bool,
     pub only_meshes: bool,
+    pub settings: &'a SelectionSettings,
 }
 
 impl CameraController {
@@ -137,7 +140,6 @@ impl CameraController {
         scene_content_root: Handle<Node>,
     ) -> Self {
         let settings = settings.cloned().unwrap_or_default();
-
         let camera;
         let camera_hinge;
         let pivot = PivotBuilder::new(
@@ -169,6 +171,7 @@ impl CameraController {
         )
         .build(graph);
 
+        graph.link_nodes(grid, camera);
         graph.link_nodes(pivot, root);
 
         Self {
@@ -186,7 +189,6 @@ impl CameraController {
             move_up: false,
             move_down: false,
             speed_factor: 1.0,
-            stack: Default::default(),
             editor_context: Default::default(),
             scene_context: Default::default(),
             prev_interaction_state: false,
@@ -242,7 +244,7 @@ impl CameraController {
         world_space_position
     }
 
-    pub fn fit_object(&mut self, scene: &mut Scene, handle: Handle<Node>) {
+    pub fn fit_object(&mut self, scene: &mut Scene, handle: Handle<Node>, scale: Option<f32>) {
         // Combine AABBs from the descendants.
         let mut aabb = AxisAlignedBoundingBox::default();
         for (_, descendant) in scene.graph.traverse_iter(handle) {
@@ -255,6 +257,10 @@ impl CameraController {
         if aabb.is_invalid_or_degenerate() {
             // To prevent the camera from flying away into abyss.
             aabb = AxisAlignedBoundingBox::from_point(scene.graph[handle].global_position());
+        }
+
+        if let Some(scale) = scale {
+            aabb.scale(scale);
         }
 
         let fit_parameters = scene.graph[self.camera].as_camera().fit(
@@ -304,18 +310,17 @@ impl CameraController {
         mouse_position: Vector2<f32>,
         screen_size: Vector2<f32>,
         delta: Vector2<f32>,
+        settings: &Settings,
     ) {
         match self.mouse_control_mode {
             MouseControlMode::None => {}
             MouseControlMode::CenteredRotation { .. } | MouseControlMode::OrbitalRotation => {
-                self.yaw -= delta.x * 0.01;
-                self.pitch += delta.y * 0.01;
-                if self.pitch > 90.0f32.to_radians() {
-                    self.pitch = 90.0f32.to_radians();
-                }
-                if self.pitch < (-90.0f32).to_radians() {
-                    self.pitch = (-90.0f32).to_radians();
-                }
+                const MAX_ANGLE_RAD: f32 = 90.0f32.to_radians();
+                const GLOBAL_MOUSE_SENSITIVITY: f32 = 0.01f32;
+                let mouse_sensitivity = GLOBAL_MOUSE_SENSITIVITY * settings.camera.sensitivity;
+                self.yaw -= delta.x * mouse_sensitivity;
+                self.pitch += delta.y * mouse_sensitivity;
+                self.pitch = clamp(self.pitch, -MAX_ANGLE_RAD, MAX_ANGLE_RAD);
             }
             MouseControlMode::Drag {
                 initial_position,
@@ -441,17 +446,19 @@ impl CameraController {
 
         match button {
             MouseButton::Right => {
-                if modifiers.shift && is_perspective {
-                    self.mouse_control_mode = MouseControlMode::Drag {
-                        initial_position: self.position(graph),
-                        initial_mouse_position: mouse_position,
-                    };
-                } else {
-                    self.mouse_control_mode = MouseControlMode::CenteredRotation {
-                        prev_z_offset: self.z_offset,
-                    };
-                    self.move_along_look_vector(self.z_offset, graph);
-                    self.z_offset = 0.0;
+                if is_perspective {
+                    if modifiers.shift {
+                        self.mouse_control_mode = MouseControlMode::Drag {
+                            initial_position: self.position(graph),
+                            initial_mouse_position: mouse_position,
+                        };
+                    } else {
+                        self.mouse_control_mode = MouseControlMode::CenteredRotation {
+                            prev_z_offset: self.z_offset,
+                        };
+                        self.move_along_look_vector(self.z_offset, graph);
+                        self.z_offset = 0.0;
+                    }
                 }
             }
             MouseButton::Middle => {
@@ -628,17 +635,21 @@ impl CameraController {
 
                 camera
                     .local_transform_mut()
-                    .set_rotation(UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.0));
+                    .set_rotation(Default::default());
 
-                let local_transform = graph[self.pivot].local_transform_mut();
+                graph[self.camera_hinge]
+                    .local_transform_mut()
+                    .set_rotation(Default::default());
 
-                let mut new_position = **local_transform.position();
+                let pivot_local_transform = graph[self.pivot].local_transform_mut();
+
+                let mut new_position = **pivot_local_transform.position();
                 new_position.z = DEFAULT_Z_OFFSET;
                 new_position.x += move_vec.x;
                 new_position.y += move_vec.y;
 
-                local_transform
-                    .set_rotation(UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.0))
+                pivot_local_transform
+                    .set_rotation(Default::default())
                     .set_position(new_position);
             }
         }
@@ -651,111 +662,155 @@ impl CameraController {
         }
     }
 
-    pub fn pick(&mut self, graph: &Graph, options: PickingOptions) -> Option<CameraPickResult> {
-        let PickingOptions {
-            cursor_pos,
-            editor_only,
-            mut filter,
-            ignore_back_faces,
-            use_picking_loop,
-            only_meshes,
-        } = options;
+    fn pick_recursive(
+        &self,
+        handle: Handle<Node>,
+        ray: &Ray,
+        camera: &Camera,
+        graph: &Graph,
+        picked_meshes: &mut Vec<CameraPickResult>,
+        picked_non_meshes: &mut Vec<CameraPickResult>,
+        mut toi_limit: f32,
+        options: &mut PickingOptions,
+    ) {
+        if handle == self.grid
+            || handle == self.camera
+            || handle == self.camera_hinge
+            || handle == self.pivot
+        {
+            return;
+        }
 
-        if let Some(camera) = graph[self.camera].cast::<Camera>() {
-            let ray = camera.make_ray(cursor_pos, self.screen_size);
+        // Ignore editor nodes if we picking scene stuff only.
+        if !options.editor_only && handle == self.editor_objects_root {
+            return;
+        }
 
-            self.stack.clear();
-            let context = if editor_only {
-                // In case if we want to pick stuff from editor scene only, we have to
-                // start traversing graph from editor root.
-                self.stack.push(self.editor_objects_root);
-                &mut self.editor_context
+        let node = &graph[handle];
+
+        if node.global_visibility()
+            && handle != self.scene_content_root
+            && options
+                .filter
+                .as_mut()
+                .is_none_or(|func| func(handle, node))
+        {
+            if node.is_resource_instance_root() {
+                // Special case for prefab roots.
+                if let Some(prefab_pick_result) =
+                    probe_hierarchy_precise(handle, graph, camera, ray, options.ignore_back_faces)
+                {
+                    if let Some(position) = prefab_pick_result.pick_position {
+                        picked_meshes.push(CameraPickResult {
+                            position: position.closest_point,
+                            node: handle,
+                            toi: position.closest_distance.max(toi_limit),
+                        });
+                        // Limit selection toi for descendants to always prefer the
+                        // prefab root in selection.
+                        toi_limit = toi_limit.max(position.closest_distance) + f32::EPSILON;
+                    }
+                }
             } else {
-                self.stack.push(self.scene_content_root);
-                &mut self.scene_context
-            };
+                let aabb = node
+                    .local_bounding_box()
+                    .transform(&node.global_transform());
 
-            context.pick_list.clear();
-
-            while let Some(handle) = self.stack.pop() {
-                if handle == self.grid
-                    || handle == self.camera
-                    || handle == self.camera_hinge
-                    || handle == self.pivot
-                {
-                    continue;
-                }
-
-                // Ignore editor nodes if we picking scene stuff only.
-                if !editor_only && handle == self.editor_objects_root {
-                    continue;
-                }
-
-                let node = &graph[handle];
-
-                self.stack.extend_from_slice(node.children());
-
-                if !node.global_visibility()
-                    || !filter.as_mut().map_or(true, |func| func(handle, node))
-                {
-                    continue;
-                }
-
-                if handle != self.scene_content_root {
-                    let aabb = if node.is_resource_instance_root() {
-                        let mut aabb = graph.aabb_of_descendants(handle, |_, _| true).unwrap();
-                        // Inflate the bounding box by a tiny amount to ensure that it will be
-                        // larger than any inner bounding boxes all the times.
-                        aabb.inflate(Vector3::repeat(10.0 * f32::EPSILON));
-                        aabb
-                    } else {
-                        node.local_bounding_box()
-                            .transform(&node.global_transform())
-                    };
-                    // Do coarse, but fast, intersection test with bounding box first.
-                    if let Some(points) = ray.aabb_intersection_points(&aabb) {
-                        if has_hull(node) {
-                            if let Some((closest_distance, position)) =
-                                precise_ray_test(node, &ray, ignore_back_faces)
-                            {
-                                context.pick_list.push(CameraPickResult {
-                                    position,
-                                    node: handle,
-                                    toi: closest_distance,
-                                });
-                            }
-                        } else if !only_meshes {
-                            // Hull-less objects (light sources, cameras, etc.) can still be selected
-                            // by coarse intersection test results.
+                if ray.aabb_intersection_points(&aabb).is_some() {
+                    let result =
+                        precise_ray_test(node, camera, graph, ray, options.ignore_back_faces);
+                    if result.has_hull() {
+                        if let Some(position) = result.pick_position {
+                            picked_meshes.push(CameraPickResult {
+                                position: position.closest_point,
+                                node: handle,
+                                toi: position.closest_distance.max(toi_limit),
+                            });
+                        }
+                    } else if !options.only_meshes && !options.editor_only {
+                        // Hull-less objects (light sources, cameras, etc.) can still be selected
+                        // by coarse intersection test with a simplified bounding box.
+                        let simple_aabb = AxisAlignedBoundingBox::from_radius(
+                            options.settings.hull_less_object_selection_radius,
+                        )
+                        .transform(&node.global_transform());
+                        if let Some(points) = ray.aabb_intersection_points(&simple_aabb) {
                             let da = points[0].metric_distance(&ray.origin);
                             let db = points[1].metric_distance(&ray.origin);
                             let closest_distance = da.min(db);
-                            context.pick_list.push(CameraPickResult {
-                                position: transform_vertex(
-                                    if da < db { points[0] } else { points[1] },
-                                    &node.global_transform(),
-                                ),
+                            picked_non_meshes.push(CameraPickResult {
+                                position: if da < db { points[0] } else { points[1] },
                                 node: handle,
-                                toi: closest_distance,
+                                toi: closest_distance.max(toi_limit),
                             });
                         }
                     }
                 }
             }
+        }
 
-            // Make sure closest will be selected first.
-            context
-                .pick_list
-                .sort_by(|a, b| a.toi.partial_cmp(&b.toi).unwrap());
+        for child in node.children() {
+            self.pick_recursive(
+                *child,
+                ray,
+                camera,
+                graph,
+                picked_meshes,
+                picked_non_meshes,
+                toi_limit,
+                options,
+            )
+        }
+    }
 
-            if use_picking_loop {
+    pub fn pick(&mut self, graph: &Graph, mut options: PickingOptions) -> Option<CameraPickResult> {
+        if let Some(camera) = graph[self.camera].cast::<Camera>() {
+            let ray = camera.make_ray(options.cursor_pos, self.screen_size);
+
+            let root = if options.editor_only {
+                // In case if we want to pick stuff from editor scene only, we have to
+                // start traversing graph from editor root.
+                self.editor_objects_root
+            } else {
+                self.scene_content_root
+            };
+
+            let mut picked_meshes = Vec::new();
+            let mut picked_non_meshes = Vec::new();
+            self.pick_recursive(
+                root,
+                &ray,
+                camera,
+                graph,
+                &mut picked_meshes,
+                &mut picked_non_meshes,
+                0.0,
+                &mut options,
+            );
+
+            fn sort_by_toi(list: &mut [CameraPickResult]) {
+                list.sort_by(|a, b| a.toi.partial_cmp(&b.toi).unwrap());
+            }
+            sort_by_toi(&mut picked_meshes);
+            sort_by_toi(&mut picked_non_meshes);
+
+            let context = if options.editor_only {
+                &mut self.editor_context
+            } else {
+                &mut self.scene_context
+            };
+            context.pick_list.clear();
+            context.pick_list.append(&mut picked_meshes);
+            context.pick_list.append(&mut picked_non_meshes);
+
+            if options.use_picking_loop {
                 let mut hasher = DefaultHasher::new();
                 for result in context.pick_list.iter() {
                     result.node.hash(&mut hasher);
                 }
                 let selection_hash = hasher.finish();
                 if selection_hash == context.old_selection_hash
-                    && cursor_pos == context.old_cursor_pos
+                    && options.cursor_pos == context.old_cursor_pos
                 {
                     context.pick_index += 1;
 
@@ -771,7 +826,7 @@ impl CameraController {
             } else {
                 context.pick_index = 0;
             }
-            context.old_cursor_pos = cursor_pos;
+            context.old_cursor_pos = options.cursor_pos;
 
             if !context.pick_list.is_empty() {
                 if let Some(result) = context.pick_list.get(context.pick_index) {
@@ -820,33 +875,87 @@ fn read_triangle(
     Some([a, b, c])
 }
 
-fn has_hull(node: &Node) -> bool {
-    node.component_ref::<Mesh>().is_some()
+#[derive(Clone, Debug)]
+struct PickPosition {
+    closest_distance: f32,
+    closest_point: Vector3<f32>,
+}
+
+#[derive(Clone, Debug)]
+struct PreciseRayTestResult {
+    pick_position: Option<PickPosition>,
+    // Total number of the instances checked with ray test. This number will be zero for objects
+    // without a "hull".
+    instance_count: usize,
+}
+
+impl PreciseRayTestResult {
+    fn has_hull(&self) -> bool {
+        self.instance_count > 0
+    }
+}
+
+fn probe_hierarchy_precise(
+    handle: Handle<Node>,
+    graph: &Graph,
+    camera: &Camera,
+    ray: &Ray,
+    ignore_back_faces: bool,
+) -> Option<PreciseRayTestResult> {
+    let mut closest_result: Option<PreciseRayTestResult> = None;
+    for (_, descendant) in graph.traverse_iter(handle) {
+        let result = precise_ray_test(descendant, camera, graph, ray, ignore_back_faces);
+        if let Some(ref pick_position) = result.pick_position {
+            let closest_result = closest_result.get_or_insert(result.clone());
+            let closest_distance = closest_result
+                .pick_position
+                .as_ref()
+                .unwrap()
+                .closest_distance;
+            if pick_position.closest_distance < closest_distance {
+                *closest_result = result;
+            }
+        }
+    }
+    closest_result
 }
 
 fn precise_ray_test(
     node: &Node,
+    camera: &Camera,
+    graph: &Graph,
     ray: &Ray,
     ignore_back_faces: bool,
-) -> Option<(f32, Vector3<f32>)> {
+) -> PreciseRayTestResult {
+    let mut cache = DynamicSurfaceCache::new();
+    let observer_position = ObserverPosition::from_camera(camera);
+    let mut bundle_storage = RenderDataBundleStorage::new_empty(observer_position.clone());
+    node.collect_render_data(&mut RenderContext {
+        render_mask: BitMask::all(),
+        elapsed_time: 0.0,
+        observer_position: &observer_position,
+        frustum: Some(&camera.frustum()),
+        storage: &mut bundle_storage,
+        graph,
+        render_pass_name: &Default::default(),
+        dynamic_surface_cache: &mut cache,
+    });
     let mut closest_distance = f32::MAX;
     let mut closest_point = None;
+    let mut instance_count = 0;
+    for bundle in bundle_storage.bundles {
+        let data = bundle.data.data_ref();
 
-    if let Some(mesh) = node.component_ref::<Mesh>() {
-        let transform = mesh.global_transform();
-
-        for surface in mesh.surfaces().iter() {
-            let data = surface.data();
-            let data = data.data_ref();
-
+        for instance in bundle.instances {
+            instance_count += 1;
             for triangle in data
                 .geometry_buffer
                 .iter()
-                .filter_map(|t| read_triangle(&data, t, &transform))
+                .filter_map(|t| read_triangle(&data, t, &instance.world_transform))
             {
                 if ignore_back_faces {
                     // If normal of the triangle is facing in the same direction as ray's direction,
-                    // then we skip such triangle.
+                    // then we skip such a triangle.
                     let normal = (triangle[1] - triangle[0]).cross(&(triangle[2] - triangle[0]));
                     if normal.dot(&ray.dir) >= 0.0 {
                         continue;
@@ -864,6 +973,11 @@ fn precise_ray_test(
             }
         }
     }
-
-    closest_point.map(|pt| (closest_distance, pt))
+    PreciseRayTestResult {
+        pick_position: closest_point.map(|pt| PickPosition {
+            closest_distance,
+            closest_point: pt,
+        }),
+        instance_count,
+    }
 }

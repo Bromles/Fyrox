@@ -61,18 +61,16 @@ impl StatisticsWindow {
             .with_title(WindowTitle::text("Rendering Statistics"))
             .build(ctx);
 
-        ctx.sender()
-            .send(WindowMessage::open_and_align(
-                window,
-                MessageDirection::ToWidget,
-                anchor,
-                HorizontalAlignment::Right,
-                VerticalAlignment::Top,
-                Thickness::uniform(2.0),
-                false,
-                false,
-            ))
-            .unwrap();
+        ctx.send_message(WindowMessage::open_and_align(
+            window,
+            MessageDirection::ToWidget,
+            anchor,
+            HorizontalAlignment::Right,
+            VerticalAlignment::Top,
+            Thickness::uniform(2.0),
+            false,
+            false,
+        ));
 
         Self { window, text }
     }
@@ -100,8 +98,11 @@ impl StatisticsWindow {
             if let Some(stats) = graphics_context.renderer.scene_data_map.get(&current_scene) {
                 let global_stats = graphics_context.renderer.get_statistics();
                 let statistics = format!(
-                    "FPS: {}\nFrame Time:{}\n{}",
-                    global_stats.frames_per_second, global_stats.pure_frame_time, stats.statistics
+                    "FPS: {}\nFrame Time:{}\n{}\nMemory Usage:\n{}",
+                    global_stats.frames_per_second,
+                    global_stats.pure_frame_time,
+                    stats.scene_data.statistics,
+                    graphics_context.renderer.server.memory_usage()
                 );
                 engine
                     .user_interfaces

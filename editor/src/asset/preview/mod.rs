@@ -21,6 +21,7 @@
 pub mod cache;
 
 use crate::{
+    asset,
     fyrox::{
         asset::{manager::ResourceManager, untyped::ResourceKind, untyped::UntypedResource},
         core::{
@@ -62,6 +63,7 @@ use crate::{
     },
     load_image,
 };
+use fyrox::renderer::framework::framebuffer::ReadTarget;
 use image::{ColorType, GenericImage, Rgba};
 
 #[derive(Default)]
@@ -112,7 +114,7 @@ pub trait AssetPreviewGenerator: Send + Sync + 'static {
 
     /// Generates a preview image for an asset. For example, in case of prefabs, it will be the
     /// entire prefab content rendered to an image. In case of sounds it will be its waveform, and
-    /// so on.  
+    /// so on.
     fn generate_preview(
         &mut self,
         resource: &UntypedResource,
@@ -124,7 +126,7 @@ pub trait AssetPreviewGenerator: Send + Sync + 'static {
         &self,
         resource: &UntypedResource,
         resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource>;
+    ) -> Option<TextureResource>;
 }
 
 pub struct TexturePreview;
@@ -146,11 +148,10 @@ impl AssetPreviewGenerator for TexturePreview {
 
             let mut material = Material::standard_two_sides();
             material.bind("diffuseTexture", texture);
-            let material = MaterialResource::new_ok(Default::default(), material);
+            let material = MaterialResource::new_embedded(material);
 
             MeshBuilder::new(BaseBuilder::new())
-                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                    ResourceKind::Embedded,
+                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                     SurfaceData::make_quad(
                         &(UnitQuaternion::from_axis_angle(
                             &Vector3::z_axis(),
@@ -186,8 +187,8 @@ impl AssetPreviewGenerator for TexturePreview {
         &self,
         resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
-        resource.try_cast::<Texture>().map(Into::into)
+    ) -> Option<TextureResource> {
+        resource.try_cast::<Texture>()
     }
 }
 
@@ -217,9 +218,9 @@ impl AssetPreviewGenerator for SoundPreview {
     ) -> Option<AssetPreviewTexture> {
         if let Some(buffer) = resource.try_cast::<SoundBuffer>() {
             if let Some(data) = buffer.state().data() {
-                let height = 60.0;
+                let height = asset::item::DEFAULT_SIZE;
                 let half_height = height / 2.0;
-                let width = 60.0;
+                let width = asset::item::DEFAULT_SIZE;
                 let mut image =
                     image::DynamicImage::new(width as u32, height as u32, ColorType::Rgba8);
 
@@ -263,6 +264,7 @@ impl AssetPreviewGenerator for SoundPreview {
                 }
 
                 return TextureResource::from_bytes(
+                    Uuid::new_v4(),
                     TextureKind::Rectangle {
                         width: width as u32,
                         height: height as u32,
@@ -284,7 +286,7 @@ impl AssetPreviewGenerator for SoundPreview {
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/sound.png")
     }
 }
@@ -294,6 +296,7 @@ fn render_scene_to_texture(
     scene: &mut Scene,
     rt_size: Vector2<f32>,
 ) -> Option<AssetPreviewTexture> {
+    let elapsed_time = engine.elapsed_time();
     let GraphicsContext::Initialized(ref mut graphics_context) = engine.graphics_context else {
         Log::warn("Cannot render an asset preview when the renderer is not initialized!");
         return None;
@@ -332,24 +335,24 @@ fn render_scene_to_texture(
     scene.update(rt_size, 0.016, Default::default());
 
     let temp_handle = Handle::new(u32::MAX, u32::MAX);
-    if let Some(ldr_texture) = graphics_context
-        .renderer
-        .render_scene(temp_handle, scene, 0.0)
-        .ok()
-        .and_then(|data| {
-            data.ldr_scene_framebuffer
-                .color_attachments()
-                .first()
-                .map(|a| a.texture.clone())
-        })
-    {
-        let ldr_texture = ldr_texture.borrow_mut();
+    if let Ok(scene_data) = graphics_context.renderer.render_scene(
+        temp_handle,
+        scene,
+        elapsed_time,
+        0.0,
+        &engine.resource_manager,
+    ) {
+        let ldr_texture = scene_data.scene_data.ldr_scene_frame_texture();
+
         let (width, height) = match ldr_texture.kind() {
             GpuTextureKind::Rectangle { width, height } => (width, height),
             _ => unreachable!(),
         };
 
-        let pixels = ldr_texture.read_pixels();
+        let pixels = scene_data
+            .scene_data
+            .ldr_scene_framebuffer
+            .read_pixels(ReadTarget::Color(0))?;
 
         // TODO: This is a hack, refactor `render_scene` method to accept render data from
         // outside, instead of messing around with these temporary handles.
@@ -359,6 +362,7 @@ fn render_scene_to_texture(
             .remove(&temp_handle);
 
         TextureResource::from_bytes(
+            Uuid::new_v4(),
             TextureKind::Rectangle {
                 width: width as u32,
                 height: height as u32,
@@ -402,14 +406,14 @@ impl AssetPreviewGenerator for ModelPreview {
         let mut scene = Scene::new();
         scene.rendering_options.ambient_lighting_color = Color::opaque(180, 180, 180);
         model.instantiate(&mut scene);
-        render_scene_to_texture(engine, &mut scene, Vector2::new(128.0, 128.0))
+        render_scene_to_texture(engine, &mut scene, asset::item::DEFAULT_VEC_SIZE)
     }
 
     fn simple_icon(
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/model.png")
     }
 }
@@ -443,14 +447,14 @@ impl AssetPreviewGenerator for SurfaceDataPreview {
         MeshBuilder::new(BaseBuilder::new())
             .with_surfaces(vec![SurfaceBuilder::new(surface.clone()).build()])
             .build(&mut scene.graph);
-        render_scene_to_texture(engine, &mut scene, Vector2::new(128.0, 128.0))
+        render_scene_to_texture(engine, &mut scene, asset::item::DEFAULT_VEC_SIZE)
     }
 
     fn simple_icon(
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/model.png")
     }
 }
@@ -465,12 +469,10 @@ impl AssetPreviewGenerator for ShaderPreview {
         scene: &mut Scene,
     ) -> Handle<Node> {
         if let Some(shader) = resource.try_cast::<Shader>() {
-            let material =
-                MaterialResource::new_ok(Default::default(), Material::from_shader(shader));
+            let material = MaterialResource::new_embedded(Material::from_shader(shader));
 
             MeshBuilder::new(BaseBuilder::new())
-                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                    ResourceKind::Embedded,
+                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                     SurfaceData::make_sphere(32, 32, 1.0, &Matrix4::identity()),
                 ))
                 .with_material(material)
@@ -494,7 +496,7 @@ impl AssetPreviewGenerator for ShaderPreview {
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/shader.png")
     }
 }
@@ -510,8 +512,7 @@ impl AssetPreviewGenerator for MaterialPreview {
     ) -> Handle<Node> {
         if let Some(material) = resource.try_cast::<Material>() {
             MeshBuilder::new(BaseBuilder::new())
-                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                    ResourceKind::Embedded,
+                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                     SurfaceData::make_sphere(32, 32, 1.0, &Matrix4::identity()),
                 ))
                 .with_material(material)
@@ -531,14 +532,14 @@ impl AssetPreviewGenerator for MaterialPreview {
         self.generate_scene(resource, &engine.resource_manager, &mut scene);
         DirectionalLightBuilder::new(BaseLightBuilder::new(BaseBuilder::new()))
             .build(&mut scene.graph);
-        render_scene_to_texture(engine, &mut scene, Vector2::new(128.0, 128.0))
+        render_scene_to_texture(engine, &mut scene, asset::item::DEFAULT_VEC_SIZE)
     }
 
     fn simple_icon(
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/material.png")
     }
 }
@@ -569,7 +570,7 @@ impl AssetPreviewGenerator for HrirPreview {
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/hrir.png")
     }
 }
@@ -599,7 +600,7 @@ impl AssetPreviewGenerator for CurvePreview {
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/curve.png")
     }
 }
@@ -619,7 +620,10 @@ pub fn render_ui_to_texture(
     ui.update(screen_size, 0.016, &Default::default());
     while ui.poll_message().is_some() {}
     ui.update(screen_size, 0.016, &Default::default());
-    let render_target = TextureResource::new_render_target(256, 256);
+    let render_target = TextureResource::new_render_target(
+        asset::item::DEFAULT_SIZE as u32,
+        asset::item::DEFAULT_SIZE as u32,
+    );
     graphics_context
         .renderer
         .render_ui_to_texture(
@@ -628,8 +632,15 @@ pub fn render_ui_to_texture(
             ui.draw(),
             Color::opaque(100, 100, 100),
             PixelKind::RGBA8,
+            &engine.resource_manager,
         )
         .ok()?;
+
+    assert!(graphics_context
+        .renderer
+        .ui_frame_buffers
+        .remove(&render_target.key())
+        .is_some());
 
     Some(AssetPreviewTexture {
         texture: render_target,
@@ -653,7 +664,7 @@ impl AssetPreviewGenerator for FontPreview {
         engine: &mut Engine,
     ) -> Option<AssetPreviewTexture> {
         if let Some(font) = resource.try_cast::<Font>() {
-            let mut ui = UserInterface::new(Vector2::new(60.0, 60.0));
+            let mut ui = UserInterface::new(asset::item::DEFAULT_VEC_SIZE);
             ScreenBuilder::new(
                 WidgetBuilder::new().with_child(
                     TextBuilder::new(WidgetBuilder::new())
@@ -677,7 +688,7 @@ impl AssetPreviewGenerator for FontPreview {
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/font.png")
     }
 }
@@ -701,7 +712,7 @@ impl AssetPreviewGenerator for UserInterfacePreview {
     ) -> Option<AssetPreviewTexture> {
         if let Some(ui_resource) = resource.try_cast::<UserInterface>() {
             let mut ui = ui_resource.data_ref().clone();
-            ui.set_screen_size(Vector2::new(256.0, 256.0));
+            ui.set_screen_size(asset::item::DEFAULT_VEC_SIZE);
             render_ui_to_texture(&mut ui, engine)
         } else {
             None
@@ -712,7 +723,7 @@ impl AssetPreviewGenerator for UserInterfacePreview {
         &self,
         _resource: &UntypedResource,
         _resource_manager: &ResourceManager,
-    ) -> Option<UntypedResource> {
+    ) -> Option<TextureResource> {
         load_image!("../../../resources/ui.png")
     }
 }

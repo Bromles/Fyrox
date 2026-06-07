@@ -102,6 +102,7 @@ use std::ops::{Deref, DerefMut};
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "6aba3dc5-831d-481a-bc83-ec10b2b2bf12")]
+#[reflect(derived_type = "UiNode")]
 pub struct Border {
     /// Base widget of the border. See [`Widget`] docs for more info.
     pub widget: Widget,
@@ -229,6 +230,7 @@ impl Control for Border {
                 self.clip_bounds(),
                 self.widget.background(),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
 
@@ -237,12 +239,16 @@ impl Control for Border {
                 self.clip_bounds(),
                 self.widget.foreground(),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         } else {
+            let thickness = self.stroke_thickness.left;
+            let half_thickness = thickness / 2.0;
+
             DrawingContext::push_rounded_rect_filled(
                 drawing_context,
-                &bounds,
+                &bounds.deflate(half_thickness, half_thickness),
                 **self.corner_radius,
                 16,
             );
@@ -250,19 +256,16 @@ impl Control for Border {
                 self.clip_bounds(),
                 self.widget.background(),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
 
-            drawing_context.push_rounded_rect(
-                &bounds,
-                self.stroke_thickness.left,
-                **self.corner_radius,
-                16,
-            );
+            drawing_context.push_rounded_rect(&bounds, thickness, **self.corner_radius, 16);
             drawing_context.commit(
                 self.clip_bounds(),
                 self.widget.foreground(),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         }

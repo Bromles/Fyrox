@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::plugins::inspector::editors::make_property_editors_container;
 use crate::{
     command::make_command,
     fyrox::{
@@ -35,9 +34,8 @@ use crate::{
             scroll_viewer::ScrollViewerBuilder,
             widget::WidgetBuilder,
             window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, UiNode, UserInterface,
+            BuildContext, UiNode,
         },
-        resource::texture::TextureResource,
         scene::{
             dim2,
             graph::{
@@ -49,10 +47,15 @@ use crate::{
         utils::lightmap::Lightmap,
     },
     message::MessageSender,
+    plugins::inspector::{editors::make_property_editors_container, EditorEnvironment},
     scene::commands::GameSceneContext,
     GameScene, Message, MessageDirection, MSG_SYNC_FLAG,
 };
-use fyrox::{graph::SceneGraph, gui::window::Window};
+use fyrox::{
+    asset::manager::ResourceManager,
+    graph::SceneGraph,
+    gui::{inspector::InspectorContextArgs, window::Window},
+};
 use std::sync::Arc;
 
 pub struct SceneSettingsWindow {
@@ -62,23 +65,32 @@ pub struct SceneSettingsWindow {
 }
 
 impl SceneSettingsWindow {
-    pub fn new(ctx: &mut BuildContext, sender: MessageSender) -> Self {
+    pub fn new(
+        ctx: &mut BuildContext,
+        sender: MessageSender,
+        resource_manager: ResourceManager,
+    ) -> Self {
         let inspector;
-        let window = WindowBuilder::new(WidgetBuilder::new().with_width(400.0).with_height(500.0))
-            .with_content(
-                ScrollViewerBuilder::new(WidgetBuilder::new())
-                    .with_content({
-                        inspector = InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
-                        inspector
-                    })
-                    .build(ctx),
-            )
-            .open(false)
-            .can_minimize(false)
-            .with_title(WindowTitle::text("Scene Settings"))
-            .build(ctx);
+        let window = WindowBuilder::new(
+            WidgetBuilder::new()
+                .with_width(400.0)
+                .with_height(500.0)
+                .with_name("SceneSettingsWindow"),
+        )
+        .with_content(
+            ScrollViewerBuilder::new(WidgetBuilder::new())
+                .with_content({
+                    inspector = InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
+                    inspector
+                })
+                .build(ctx),
+        )
+        .open(false)
+        .can_minimize(false)
+        .with_title(WindowTitle::text("Scene Settings"))
+        .build(ctx);
 
-        let container = make_property_editors_container(sender);
+        let container = make_property_editors_container(sender, resource_manager);
 
         container.register_inheritable_inspectable::<Graph>();
         container.register_inheritable_inspectable::<IntegrationParameters>();
@@ -94,45 +106,55 @@ impl SceneSettingsWindow {
         }
     }
 
-    pub fn open(&self, ui: &UserInterface) {
+    pub fn open(&self, game_scene: &GameScene, engine: &mut Engine, sender: MessageSender) {
+        let ui = engine.user_interfaces.first();
         ui.send_message(WindowMessage::open(
             self.window,
             MessageDirection::ToWidget,
             true,
             true,
         ));
+        self.sync_to_model(true, game_scene, engine, sender);
     }
 
-    pub fn sync_to_model(&self, game_scene: &GameScene, engine: &mut Engine) {
+    pub fn sync_to_model(
+        &self,
+        force: bool,
+        game_scene: &GameScene,
+        engine: &mut Engine,
+        sender: MessageSender,
+    ) {
         let ui = engine.user_interfaces.first_mut();
-        if !ui
-            .try_get_of_type::<Window>(self.window)
-            .unwrap()
-            .is_globally_visible()
+        if !force
+            && !ui
+                .try_get_of_type::<Window>(self.window)
+                .unwrap()
+                .is_globally_visible()
         {
             return;
         }
 
         let scene = &engine.scenes[game_scene.scene];
 
-        let context = InspectorContext::from_object(
-            scene,
-            &mut ui.build_ctx(),
-            self.property_definitions.clone(),
-            None,
-            MSG_SYNC_FLAG,
-            0,
-            false,
-            PropertyFilter::new(|property| {
+        let environment = Arc::new(EditorEnvironment {
+            resource_manager: engine.resource_manager.clone(),
+            serialization_context: engine.serialization_context.clone(),
+            available_animations: Default::default(),
+            sender,
+        });
+
+        let context = InspectorContext::from_object(InspectorContextArgs {
+            object: scene,
+            ctx: &mut ui.build_ctx(),
+            definition_container: self.property_definitions.clone(),
+            environment: Some(environment),
+            sync_flag: MSG_SYNC_FLAG,
+            layer_index: 0,
+            generate_property_string_values: false,
+            filter: PropertyFilter::new(|property| {
                 let mut pass = true;
 
                 property.downcast_ref::<NodePool>(&mut |v| {
-                    if v.is_some() {
-                        pass = false;
-                    }
-                });
-
-                property.downcast_ref::<Option<TextureResource>>(&mut |v| {
                     if v.is_some() {
                         pass = false;
                     }
@@ -146,8 +168,9 @@ impl SceneSettingsWindow {
 
                 pass
             }),
-            150.0,
-        );
+            name_column_width: 150.0,
+            base_path: Default::default(),
+        });
 
         ui.send_message(InspectorMessage::context(
             self.inspector,

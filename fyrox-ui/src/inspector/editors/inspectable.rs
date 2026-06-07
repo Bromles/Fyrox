@@ -20,6 +20,7 @@
 
 //! A general-purpose property editor definition that creates
 //! a nested inspector within an [Expander](crate::expander::Expander) widget.
+use crate::inspector::InspectorContextArgs;
 use crate::{
     core::reflect::prelude::*,
     inspector::{
@@ -44,11 +45,11 @@ use std::{
 /// A general-purpose property editor definition that creates
 /// a nested inspector within an [Expander](crate::expander::Expander) widget to allow the user
 /// to edited properties of type T.
-/// The expander is labeled with [FieldInfo::display_name].
+/// The expander is labeled with [FieldMetadata::display_name].
 /// The layer_index for the inner inspector is increased by 1.
 pub struct InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     #[allow(dead_code)]
     phantom: PhantomDataSendSync<T>,
@@ -56,7 +57,7 @@ where
 
 impl<T> InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     pub fn new() -> Self {
         Self {
@@ -67,7 +68,7 @@ where
 
 impl<T> Debug for InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "InspectablePropertyEditorDefinition")
@@ -76,7 +77,7 @@ where
 
 impl<T> PropertyEditorDefinition for InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     fn value_type_id(&self) -> TypeId {
         TypeId::of::<T>()
@@ -88,17 +89,18 @@ where
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<T>()?;
 
-        let inspector_context = InspectorContext::from_object(
-            value,
-            ctx.build_context,
-            ctx.definition_container.clone(),
-            ctx.environment.clone(),
-            ctx.sync_flag,
-            ctx.layer_index + 1,
-            ctx.generate_property_string_values,
-            ctx.filter,
-            ctx.name_column_width,
-        );
+        let inspector_context = InspectorContext::from_object(InspectorContextArgs {
+            object: value,
+            ctx: ctx.build_context,
+            definition_container: ctx.definition_container.clone(),
+            environment: ctx.environment.clone(),
+            sync_flag: ctx.sync_flag,
+            layer_index: ctx.layer_index + 1,
+            generate_property_string_values: ctx.generate_property_string_values,
+            filter: ctx.filter,
+            name_column_width: ctx.name_column_width,
+            base_path: ctx.base_path.clone(),
+        });
 
         let editor;
         let container = make_expander_container(
@@ -143,6 +145,7 @@ where
             ctx.layer_index + 1,
             ctx.generate_property_string_values,
             ctx.filter,
+            ctx.base_path.clone(),
         ) {
             error_group.extend(e)
         }
@@ -160,7 +163,7 @@ where
             if ctx.message.direction() == MessageDirection::FromWidget {
                 return Some(PropertyChanged {
                     name: ctx.name.to_owned(),
-                    owner_type_id: ctx.owner_type_id,
+
                     value: FieldKind::Inspectable(Box::new(msg.clone())),
                 });
             }

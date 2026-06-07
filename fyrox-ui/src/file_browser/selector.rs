@@ -37,6 +37,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+
 use fyrox_core::uuid_provider;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
@@ -50,6 +51,7 @@ pub enum FileSelectorMessage {
     Root(Option<PathBuf>),
     Path(PathBuf),
     Commit(PathBuf),
+    FocusCurrentPath,
     Cancel,
     Filter(Option<Filter>),
 }
@@ -59,12 +61,14 @@ impl FileSelectorMessage {
     define_constructor!(FileSelectorMessage:Root => fn root(Option<PathBuf>), layout: false);
     define_constructor!(FileSelectorMessage:Path => fn path(PathBuf), layout: false);
     define_constructor!(FileSelectorMessage:Cancel => fn cancel(), layout: false);
+    define_constructor!(FileSelectorMessage:FocusCurrentPath => fn focus_current_path(), layout: false);
     define_constructor!(FileSelectorMessage:Filter => fn filter(Option<Filter>), layout: false);
 }
 
 /// File selector is a modal window that allows you to select a file (or directory) and commit or
 /// cancel selection.
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct FileSelector {
     #[component(include)]
     pub window: Window,
@@ -172,6 +176,12 @@ impl Control for FileSelector {
                             filter.clone(),
                         ));
                     }
+                    FileSelectorMessage::FocusCurrentPath => {
+                        ui.send_message(FileBrowserMessage::focus_current_path(
+                            self.browser,
+                            MessageDirection::ToWidget,
+                        ));
+                    }
                 }
             }
         }
@@ -205,7 +215,7 @@ impl FileSelectorBuilder {
             window_builder,
             filter: None,
             mode: FileBrowserMode::Open,
-            path: Default::default(),
+            path: "./".into(),
             root: None,
         }
     }
@@ -322,6 +332,7 @@ impl FileSelectorFieldMessage {
 }
 
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct FileSelectorField {
     widget: Widget,
     path: PathBuf,

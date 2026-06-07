@@ -76,7 +76,8 @@ use crate::{
     settings::Settings,
     MSG_SYNC_FLAG,
 };
-use fyrox::asset::untyped::ResourceKind;
+
+use fyrox::gui::inspector::InspectorContextArgs;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 
@@ -205,12 +206,12 @@ impl TerrainInteractionMode {
         let position = match self.brush.target {
             BrushTarget::HeightMap => terrain.local_to_height_pixel(position),
             BrushTarget::LayerMask { .. } => terrain.local_to_mask_pixel(position),
-            BrushTarget::HoleMask { .. } => terrain.local_to_hole_pixel(position),
+            BrushTarget::HoleMask => terrain.local_to_hole_pixel(position),
         };
         let scale = match self.brush.target {
             BrushTarget::HeightMap => terrain.height_grid_scale(),
             BrushTarget::LayerMask { .. } => terrain.mask_grid_scale(),
-            BrushTarget::HoleMask { .. } => terrain.hole_grid_scale(),
+            BrushTarget::HoleMask => terrain.hole_grid_scale(),
         };
         if let Some(sender) = &self.brush_sender {
             if let Some(start) = self.prev_brush_position.take() {
@@ -243,8 +244,7 @@ impl BrushGizmo {
                 .with_visibility(false),
         )
         .with_render_path(RenderPath::Forward)
-        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-            ResourceKind::Embedded,
+        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
             SurfaceData::make_quad(&Matrix4::identity()),
         ))
         .with_material(make_color_material(Color::from_rgba(0, 255, 0, 130)))
@@ -295,7 +295,7 @@ impl InteractionMode for TerrainInteractionMode {
                     .map(|cam| cam.make_ray(mouse_pos, frame_size));
                 if let Some(terrain) = graph[handle].cast_mut::<Terrain>() {
                     // Pick height value at the point of interaction.
-                    if let BrushMode::Flatten { .. } = &mut self.brush.mode {
+                    if let BrushMode::Flatten = &mut self.brush.mode {
                         if let Some(ray) = ray {
                             let mut intersections = ArrayVec::<TerrainRayCastResult, 128>::new();
                             terrain.raycast(ray, &mut intersections, true);
@@ -544,7 +544,7 @@ impl InteractionMode for TerrainInteractionMode {
 
     fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
         let terrain_mode_tooltip =
-            "Edit Terrain\n\nTerrain edit mode allows you to modify selected \
+            "Edit Terrain - Shortcut: [6]\n\nTerrain edit mode allows you to modify selected \
         terrain.";
 
         make_interaction_mode_button(
@@ -577,7 +577,7 @@ fn make_brush_mode_enum_property_editor_definition() -> EnumPropertyEditorDefini
         index_generator: |v| match v {
             BrushMode::Raise { .. } => 0,
             BrushMode::Assign { .. } => 1,
-            BrushMode::Flatten { .. } => 2,
+            BrushMode::Flatten => 2,
             BrushMode::Smooth { .. } => 3,
         },
         names_generator: || {
@@ -640,17 +640,18 @@ impl BrushPanel {
         property_editors.insert(make_brush_target_enum_property_editor_definition());
         property_editors.insert(make_brush_shape_enum_property_editor_definition());
 
-        let context = InspectorContext::from_object(
-            brush,
+        let context = InspectorContext::from_object(InspectorContextArgs {
+            object: brush,
             ctx,
-            Arc::new(property_editors),
-            None,
-            MSG_SYNC_FLAG,
-            0,
-            true,
-            Default::default(),
-            150.0,
-        );
+            definition_container: Arc::new(property_editors),
+            environment: None,
+            sync_flag: MSG_SYNC_FLAG,
+            layer_index: 0,
+            generate_property_string_values: true,
+            filter: Default::default(),
+            name_column_width: 150.0,
+            base_path: Default::default(),
+        });
 
         let inspector;
         let window = WindowBuilder::new(WidgetBuilder::new().with_width(300.0).with_height(250.0))
@@ -677,7 +678,7 @@ impl BrushPanel {
             .context()
             .clone();
 
-        if let Err(e) = ctx.sync(brush, ui, 0, true, Default::default()) {
+        if let Err(e) = ctx.sync(brush, ui, 0, true, Default::default(), Default::default()) {
             Log::writeln(
                 MessageKind::Error,
                 format!("Failed to sync BrushPanel's inspector. Reason: {e:?}"),

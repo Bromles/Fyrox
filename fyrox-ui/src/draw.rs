@@ -19,12 +19,14 @@
 // SOFTWARE.
 
 use crate::font::FontHeight;
+use crate::formatted_text::{DrawValueLayer, GlyphDrawValues};
 use crate::style::resource::StyleResource;
 use crate::{
     brush::Brush,
     core::{
         algebra::{Matrix3, Point2, Vector2},
         color::Color,
+        log::Log,
         math::{self, Rect, TriangleDefinition},
     },
     font::FontResource,
@@ -33,7 +35,8 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use fyrox_core::math::round_to_step;
-use fyrox_resource::untyped::UntypedResource;
+use fyrox_material::MaterialResource;
+use fyrox_texture::TextureResource;
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -57,7 +60,7 @@ impl Vertex {
 #[derive(Clone, Debug)]
 pub enum CommandTexture {
     None,
-    Texture(UntypedResource),
+    Texture(TextureResource),
     Font {
         font: FontResource,
         height: FontHeight,
@@ -130,6 +133,7 @@ pub struct Command {
     pub brush: Brush,
     pub texture: CommandTexture,
     pub triangles: Range<usize>,
+    pub material: MaterialResource,
     pub opacity: f32,
     /// A set of triangles that defines clipping region.
     pub clipping_geometry: Option<ClippingGeometry>,
@@ -717,8 +721,8 @@ pub trait Draw {
             let k = nx as f32 / (nw) as f32;
             let x = local_left_bottom.x + k * w;
             self.push_line(
-                Vector2::new(x, local_left_bottom.y + cell_size.y),
-                Vector2::new(x, local_right_top.y - cell_size.y),
+                Vector2::new(x, local_left_bottom.y - cell_size.y),
+                Vector2::new(x, local_right_top.y + cell_size.y),
                 1.0 / zoom,
             );
         }
@@ -743,8 +747,8 @@ impl Default for TransformStack {
 impl TransformStack {
     #[inline]
     pub fn push(&mut self, matrix: Matrix3<f32>) {
-        self.transform = matrix;
-        self.stack.push(matrix);
+        self.stack
+            .push(std::mem::replace(&mut self.transform, matrix));
     }
 
     /// Returns the transformation matrix that will be used to transform vertices of drawing context.
@@ -754,9 +758,24 @@ impl TransformStack {
     }
 
     #[inline]
+    pub fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stack.is_empty()
+    }
+
+    pub fn content(&self) -> Vec<Matrix3<f32>> {
+        self.stack.clone()
+    }
+
+    #[inline]
     pub fn pop(&mut self) {
         if let Some(top) = self.stack.pop() {
             self.transform = top;
+        } else {
+            Log::err("TransformStack pop failure.")
         }
     }
 }
@@ -770,6 +789,10 @@ pub struct DrawingContext {
     opacity_stack: Vec<f32>,
     triangles_to_commit: usize,
     pub style: StyleResource,
+    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// this value is **not** guaranteed to match real time. A user can change delta time with
+    /// which the engine "ticks" and this delta time affects elapsed time.
+    pub elapsed_time: f32,
 }
 
 fn get_line_thickness_vector(a: Vector2<f32>, b: Vector2<f32>, thickness: f32) -> Vector2<f32> {
@@ -814,6 +837,7 @@ impl DrawingContext {
             opacity_stack: vec![1.0],
             transform_stack: Default::default(),
             style,
+            elapsed_time: 0.0,
         }
     }
 
@@ -897,6 +921,7 @@ impl DrawingContext {
         clip_bounds: Rect<f32>,
         brush: Brush,
         texture: CommandTexture,
+        material: &MaterialResource,
         clipping_geometry: Option<ClippingGeometry>,
     ) {
         if self.triangles_to_commit > 0 {
@@ -910,6 +935,7 @@ impl DrawingContext {
                 brush,
                 texture,
                 triangles,
+                material: material.clone(),
                 opacity,
                 clipping_geometry,
             });
@@ -921,46 +947,58 @@ impl DrawingContext {
         &mut self,
         clip_bounds: Rect<f32>,
         position: Vector2<f32>,
+        material: &MaterialResource,
         formatted_text: &FormattedText,
     ) {
-        let font = formatted_text.get_font();
-
         #[inline(always)]
         fn draw(
             formatted_text: &FormattedText,
+            layer: DrawValueLayer,
             ctx: &mut DrawingContext,
             clip_bounds: Rect<f32>,
             position: Vector2<f32>,
-            dilation: f32,
-            offset: Vector2<f32>,
-            brush: Brush,
-            font: &FontResource,
+            material: &MaterialResource,
         ) {
-            let Some(mut current_page_index) = formatted_text
-                .get_glyphs()
-                .first()
-                .map(|g| g.atlas_page_index)
-            else {
-                return;
-            };
-
+            let mut current_draw_values = None;
             for element in formatted_text.get_glyphs() {
-                // If we've switched to another atlas page, commit the text and start a new batch.
-                if current_page_index != element.atlas_page_index {
-                    ctx.commit(
-                        clip_bounds,
-                        brush.clone(),
-                        CommandTexture::Font {
-                            font: font.clone(),
-                            page_index: current_page_index,
-                            height: FontHeight::from(**formatted_text.font_size()),
-                        },
-                        None,
-                    );
-                    current_page_index = element.atlas_page_index;
+                if let DrawValueLayer::Shadow = layer {
+                    if !formatted_text.shadow_at(element.source_char_index) {
+                        continue;
+                    }
+                }
+                let draw_values = formatted_text.get_glyph_draw_values(layer, element);
+                if current_draw_values.is_none() {
+                    current_draw_values = Some(draw_values)
+                } else if current_draw_values.as_ref() != Some(&draw_values) {
+                    // If the drawing values have changed, commit the text and start a new batch.
+                    let GlyphDrawValues {
+                        atlas_page_index: page_index,
+                        font,
+                        brush,
+                        height,
+                    } = current_draw_values.unwrap();
+                    let texture = CommandTexture::Font {
+                        font,
+                        page_index,
+                        height,
+                    };
+                    ctx.commit(clip_bounds, brush, texture, material, None);
+                    current_draw_values = Some(draw_values);
                 }
 
                 let bounds = element.bounds;
+                let dilation = match layer {
+                    DrawValueLayer::Main => 0.0,
+                    DrawValueLayer::Shadow => {
+                        formatted_text.shadow_dilation_at(element.source_char_index)
+                    }
+                };
+                let offset = match layer {
+                    DrawValueLayer::Main => Vector2::default(),
+                    DrawValueLayer::Shadow => {
+                        formatted_text.shadow_offset_at(element.source_char_index)
+                    }
+                };
 
                 let final_bounds = Rect::new(
                     position.x + bounds.x() + offset.x,
@@ -973,42 +1011,42 @@ impl DrawingContext {
                 ctx.push_rect_filled(&final_bounds, Some(&element.tex_coords));
             }
 
-            // Commit the rest.
-            ctx.commit(
-                clip_bounds,
+            if let Some(GlyphDrawValues {
+                atlas_page_index: page_index,
+                font,
                 brush,
-                CommandTexture::Font {
-                    font: font.clone(),
-                    page_index: current_page_index,
-                    height: FontHeight::from(**formatted_text.font_size()),
-                },
-                None,
-            );
+                height,
+            }) = current_draw_values
+            {
+                let texture = CommandTexture::Font {
+                    font,
+                    page_index,
+                    height,
+                };
+                // Commit the rest.
+                ctx.commit(clip_bounds, brush, texture, material, None);
+            }
         }
 
         // Draw shadow, if any.
-        if *formatted_text.shadow {
+        if *formatted_text.shadow || !formatted_text.runs.is_empty() {
             draw(
                 formatted_text,
+                DrawValueLayer::Shadow,
                 self,
                 clip_bounds,
                 position,
-                *formatted_text.shadow_dilation,
-                *formatted_text.shadow_offset,
-                (*formatted_text.shadow_brush).clone(),
-                &font,
+                material,
             );
         }
 
         draw(
             formatted_text,
+            DrawValueLayer::Main,
             self,
             clip_bounds,
             position,
-            0.0,
-            Default::default(),
-            formatted_text.brush(),
-            &font,
+            material,
         );
     }
 }

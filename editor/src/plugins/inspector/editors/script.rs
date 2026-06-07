@@ -54,6 +54,8 @@ use crate::{
     settings::{general::ScriptEditor, SettingsData},
     DropdownListBuilder, MSG_SYNC_FLAG,
 };
+
+use fyrox::gui::inspector::InspectorContextArgs;
 use fyrox::gui::utils::make_dropdown_list_option;
 use std::{
     any::TypeId,
@@ -74,6 +76,7 @@ impl ScriptPropertyEditorMessage {
 }
 
 #[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ScriptPropertyEditor {
     widget: Widget,
     inspector: Handle<UiNode>,
@@ -244,8 +247,8 @@ impl ScriptPropertyEditorBuilder {
         ctx: &mut BuildContext,
     ) -> Handle<UiNode> {
         let context = script.as_ref().map(|script| {
-            InspectorContext::from_object(
-                script,
+            InspectorContext::from_object(InspectorContextArgs {
+                object: script,
                 ctx,
                 definition_container,
                 environment,
@@ -254,7 +257,8 @@ impl ScriptPropertyEditorBuilder {
                 generate_property_string_values,
                 filter,
                 name_column_width,
-            )
+                base_path: Default::default(),
+            })
         });
 
         let inspector = InspectorBuilder::new(WidgetBuilder::new())
@@ -324,28 +328,6 @@ fn selected_script(
         })
 }
 
-fn fetch_script_definitions(
-    instance: Handle<UiNode>,
-    ui: &mut UserInterface,
-) -> Option<Vec<Handle<UiNode>>> {
-    let instance_ref = ui
-        .node(instance)
-        .cast::<ScriptPropertyEditor>()
-        .expect("Must be ScriptPropertyEditor!");
-
-    let environment = ui
-        .node(instance_ref.inspector)
-        .cast::<Inspector>()
-        .expect("Must be Inspector!")
-        .context()
-        .environment
-        .clone();
-
-    let editor_environment = EditorEnvironment::try_get_from(&environment);
-
-    editor_environment.map(|e| create_items(e.serialization_context.clone(), &mut ui.build_ctx()))
-}
-
 #[derive(Debug)]
 pub struct ScriptPropertyEditorDefinition {}
 
@@ -359,9 +341,7 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = ctx.property_info.cast_value::<Option<Script>>()?;
-
-        let environment = EditorEnvironment::try_get_from(&ctx.environment)
-            .expect("Must have editor environment!");
+        let environment = EditorEnvironment::try_get_from(&ctx.environment)?;
 
         let items = create_items(environment.serialization_context.clone(), ctx.build_context);
 
@@ -430,22 +410,24 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
     ) -> Result<Option<UiMessage>, InspectorError> {
         let value = ctx.property_info.cast_value::<Option<Script>>()?;
 
-        let new_script_definitions_items = fetch_script_definitions(ctx.instance, ctx.ui);
+        let editor_environment = EditorEnvironment::try_get_from(&ctx.environment)?;
+
+        let new_script_definitions_items = create_items(
+            editor_environment.serialization_context.clone(),
+            &mut ctx.ui.build_ctx(),
+        );
 
         let instance_ref = ctx
             .ui
             .node(ctx.instance)
             .cast::<ScriptPropertyEditor>()
-            .expect("Must be EnumPropertyEditor!");
-
-        let editor_environment =
-            EditorEnvironment::try_get_from(&ctx.environment).expect("Environment must be set!");
+            .ok_or(InspectorError::Custom("Must be EnumPropertyEditor!".into()))?;
 
         let variant_selector_ref = ctx
             .ui
             .node(instance_ref.variant_selector)
             .cast::<DropdownList>()
-            .expect("Must be a DropDownList");
+            .ok_or(InspectorError::Custom("Must be a DropDownList".into()))?;
 
         // Script list might change over time if some plugins were reloaded.
         if variant_selector_ref.items.len()
@@ -456,24 +438,22 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                 .values()
                 .count()
         {
-            if let Some(items) = new_script_definitions_items {
-                send_sync_message(
-                    ctx.ui,
-                    DropdownListMessage::items(
-                        instance_ref.variant_selector,
-                        MessageDirection::ToWidget,
-                        items,
-                    ),
-                );
-                send_sync_message(
-                    ctx.ui,
-                    ScriptPropertyEditorMessage::value(
-                        ctx.instance,
-                        MessageDirection::ToWidget,
-                        value.as_ref().map(|s| s.id()),
-                    ),
-                );
-            }
+            send_sync_message(
+                ctx.ui,
+                DropdownListMessage::items(
+                    instance_ref.variant_selector,
+                    MessageDirection::ToWidget,
+                    new_script_definitions_items,
+                ),
+            );
+            send_sync_message(
+                ctx.ui,
+                ScriptPropertyEditorMessage::value(
+                    ctx.instance,
+                    MessageDirection::ToWidget,
+                    value.as_ref().map(|s| s.id()),
+                ),
+            );
         }
 
         if instance_ref.selected_script_uuid != value.as_ref().map(|s| s.id())
@@ -495,17 +475,18 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
             let context = value
                 .as_ref()
                 .map(|script| {
-                    InspectorContext::from_object(
-                        script,
-                        &mut ctx.ui.build_ctx(),
-                        ctx.definition_container.clone(),
-                        ctx.environment.clone(),
-                        ctx.sync_flag,
-                        ctx.layer_index + 1,
-                        ctx.generate_property_string_values,
-                        ctx.filter,
-                        ctx.name_column_width,
-                    )
+                    InspectorContext::from_object(InspectorContextArgs {
+                        object: script,
+                        ctx: &mut ctx.ui.build_ctx(),
+                        definition_container: ctx.definition_container.clone(),
+                        environment: ctx.environment.clone(),
+                        sync_flag: ctx.sync_flag,
+                        layer_index: ctx.layer_index + 1,
+                        generate_property_string_values: ctx.generate_property_string_values,
+                        filter: ctx.filter,
+                        name_column_width: ctx.name_column_width,
+                        base_path: Default::default(),
+                    })
                 })
                 .unwrap_or_default();
 
@@ -529,6 +510,7 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                     layer_index + 1,
                     ctx.generate_property_string_values,
                     ctx.filter,
+                    ctx.base_path.clone(),
                 ) {
                     Err(InspectorError::Group(e))
                 } else {
@@ -546,7 +528,7 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
             if let Some(message) = ctx.message.data::<ScriptPropertyEditorMessage>() {
                 match message {
                     ScriptPropertyEditorMessage::Value(value) => {
-                        if let Some(env) = EditorEnvironment::try_get_from(&ctx.environment) {
+                        if let Ok(env) = EditorEnvironment::try_get_from(&ctx.environment) {
                             let script = value.and_then(|uuid| {
                                 env.serialization_context
                                     .script_constructors
@@ -554,7 +536,6 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                             });
 
                             return Some(PropertyChanged {
-                                owner_type_id: ctx.owner_type_id,
                                 name: ctx.name.to_string(),
                                 value: FieldKind::object(script),
                             });
@@ -565,7 +546,7 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                             // Mimic Option<Script> path by adding `.Some@0` suffix to property path.
                             // It is needed because we're editing compound type in this editor.
                             name: ctx.name.to_string() + ".Some@0",
-                            owner_type_id: ctx.owner_type_id,
+
                             value: FieldKind::Inspectable(Box::new(property_changed.clone())),
                         });
                     }

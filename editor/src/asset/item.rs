@@ -18,6 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use fyrox::core::log::Log;
+
 use crate::{
     asset::open_in_explorer,
     fyrox::{
@@ -41,32 +43,39 @@ use crate::{
             UserInterface,
         },
         material::Material,
-        scene::tilemap::tileset::TileSet,
+        scene::tilemap::{brush::TileMapBrush, tileset::TileSet},
     },
     message::MessageSender,
     Message,
 };
+
+use fyrox::gui::message::MouseButton;
+use fyrox::resource::texture::TextureResource;
 use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
 };
 
+pub const DEFAULT_SIZE: f32 = 60.0;
+pub const DEFAULT_VEC_SIZE: Vector2<f32> = Vector2::new(DEFAULT_SIZE, DEFAULT_SIZE);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetItemMessage {
     Select(bool),
     Icon {
-        texture: Option<UntypedResource>,
+        texture: Option<TextureResource>,
         flip_y: bool,
     },
 }
 
 impl AssetItemMessage {
     define_constructor!(AssetItemMessage:Select => fn select(bool), layout: false);
-    define_constructor!(AssetItemMessage:Icon => fn icon(texture: Option<UntypedResource>, flip_y: bool), layout: false);
+    define_constructor!(AssetItemMessage:Icon => fn icon(texture: Option<TextureResource>, flip_y: bool), layout: false);
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct AssetItem {
     widget: Widget,
     pub path: PathBuf,
@@ -87,10 +96,7 @@ impl AssetItem {
 
     pub fn relative_path(&self) -> Result<PathBuf, std::io::Error> {
         let Some(resource_manager) = self.resource_manager.as_ref() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No resource manager".to_string(),
-            ));
+            return Err(std::io::Error::other("No resource manager".to_string()));
         };
 
         if resource_manager
@@ -133,19 +139,31 @@ impl AssetItem {
         if self
             .path
             .extension()
-            .map_or(false, |ext| ext == "rgs" || ext == "ui")
+            .is_some_and(|ext| ext == "rgs" || ext == "ui")
         {
             sender.send(Message::LoadScene(self.path.clone()));
-        } else if self.path.extension().map_or(false, |ext| ext == "material") {
+        } else if self.path.extension().is_some_and(|ext| ext == "material") {
             if let Ok(path) = make_relative_path(&self.path) {
                 if let Ok(material) = block_on(resource_manager.request::<Material>(path)) {
                     sender.send(Message::OpenMaterialEditor(material));
                 }
             }
-        } else if self.path.extension().map_or(false, |ext| ext == "tileset") {
+        } else if self.path.extension().is_some_and(|ext| ext == "tileset") {
             if let Ok(path) = make_relative_path(&self.path) {
-                if let Ok(tile_set) = block_on(resource_manager.request::<TileSet>(path)) {
-                    sender.send(Message::OpenTileSetEditor(tile_set));
+                match block_on(resource_manager.request::<TileSet>(path)) {
+                    Ok(tile_set) => sender.send(Message::OpenTileSetEditor(tile_set)),
+                    Err(err) => Log::err(format!("Open tileset error: {err:?}")),
+                }
+            }
+        } else if self
+            .path
+            .extension()
+            .is_some_and(|ext| ext == "tile_map_brush")
+        {
+            if let Ok(path) = make_relative_path(&self.path) {
+                match block_on(resource_manager.request::<TileMapBrush>(path)) {
+                    Ok(brush) => sender.send(Message::OpenTileMapBrushEditor(brush)),
+                    Err(err) => Log::err(format!("Open tile_map_brush error: {err:?}")),
                 }
             }
         } else if self.path.is_dir() {
@@ -180,6 +198,7 @@ impl Control for AssetItem {
             self.clip_bounds(),
             self.background(),
             CommandTexture::None,
+            &self.material,
             None,
         );
         drawing_context.push_rect(&bounds, 1.0);
@@ -187,6 +206,7 @@ impl Control for AssetItem {
             self.clip_bounds(),
             self.foreground(),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -194,9 +214,11 @@ impl Control for AssetItem {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
 
-        if let Some(WidgetMessage::MouseDown { .. }) = message.data::<WidgetMessage>() {
+        if let Some(WidgetMessage::MouseDown { button, .. }) = message.data::<WidgetMessage>() {
             if !message.handled() {
-                message.set_handled(true);
+                if *button == MouseButton::Left {
+                    message.set_handled(true);
+                }
                 ui.send_message(AssetItemMessage::select(
                     self.handle(),
                     MessageDirection::ToWidget,
@@ -250,7 +272,7 @@ impl Control for AssetItem {
 pub struct AssetItemBuilder {
     widget_builder: WidgetBuilder,
     path: Option<PathBuf>,
-    icon: Option<UntypedResource>,
+    icon: Option<TextureResource>,
 }
 
 fn make_tooltip(ctx: &mut BuildContext, text: &str) -> RcUiNodeHandle {
@@ -289,7 +311,7 @@ impl AssetItemBuilder {
         self
     }
 
-    pub fn with_icon(mut self, icon: Option<UntypedResource>) -> Self {
+    pub fn with_icon(mut self, icon: Option<TextureResource>) -> Self {
         self.icon = icon;
         self
     }
@@ -305,8 +327,8 @@ impl AssetItemBuilder {
         let preview = ImageBuilder::new(
             WidgetBuilder::new()
                 .with_margin(Thickness::uniform(2.0))
-                .with_width(60.0)
-                .with_height(60.0),
+                .with_width(DEFAULT_SIZE)
+                .with_height(DEFAULT_SIZE),
         )
         .with_opt_texture(self.icon)
         .build(ctx);
@@ -354,12 +376,14 @@ impl AssetItemBuilder {
 #[cfg(test)]
 mod test {
     use crate::asset::item::AssetItemBuilder;
+    use fyrox::asset::io::FsResourceIo;
     use fyrox::asset::manager::ResourceManager;
     use fyrox::{gui::test::test_widget_deletion, gui::widget::WidgetBuilder};
+    use std::sync::Arc;
 
     #[test]
     fn test_deletion() {
-        let rm = ResourceManager::new(Default::default());
+        let rm = ResourceManager::new(Arc::new(FsResourceIo), Default::default());
         test_widget_deletion(|ctx| {
             AssetItemBuilder::new(WidgetBuilder::new()).build(rm, Default::default(), ctx)
         });

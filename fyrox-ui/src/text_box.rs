@@ -47,6 +47,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, UiNode, UserInterface, VerticalAlignment,
 };
 use copypasta::ClipboardProvider;
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::{
     cell::RefCell,
@@ -414,6 +415,7 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 /// You can change brush of caret by using [`TextBoxBuilder::with_caret_brush`] and also selection brush by using
 /// [`TextBoxBuilder::with_selection_brush`], it could be useful if you don't like default colors.
 #[derive(Default, Clone, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct TextBox {
     /// Base widget of the text box.
     pub widget: Widget,
@@ -841,7 +843,7 @@ impl TextBox {
             .borrow()
             .get_lines()
             .get(position.line)
-            .map_or(false, |line| position.offset < line.len())
+            .is_some_and(|line| position.offset < line.len())
     }
 
     fn set_caret_position(&mut self, position: Position) {
@@ -944,8 +946,16 @@ impl Control for TextBox {
     fn measure_override(&self, _: &UserInterface, available_size: Vector2<f32>) -> Vector2<f32> {
         self.formatted_text
             .borrow_mut()
+            .set_super_sampling_scale(self.visual_max_scaling())
             .set_constraint(available_size)
             .build()
+    }
+
+    fn on_visual_transform_changed(&self) {
+        self.formatted_text
+            .borrow_mut()
+            .set_super_sampling_scale(self.visual_max_scaling())
+            .build();
     }
 
     fn draw(&self, drawing_context: &mut DrawingContext) {
@@ -955,6 +965,7 @@ impl Control for TextBox {
             self.clip_bounds(),
             self.widget.background(),
             CommandTexture::None,
+            &self.material,
             None,
         );
 
@@ -1029,6 +1040,7 @@ impl Control for TextBox {
             self.clip_bounds(),
             (*self.selection_brush).clone(),
             CommandTexture::None,
+            &self.material,
             None,
         );
 
@@ -1036,6 +1048,7 @@ impl Control for TextBox {
         drawing_context.draw_text(
             self.clip_bounds(),
             local_position,
+            &self.material,
             &self.formatted_text.borrow(),
         );
 
@@ -1052,6 +1065,7 @@ impl Control for TextBox {
                 self.clip_bounds(),
                 (*self.caret_brush).clone(),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         }
@@ -1340,6 +1354,7 @@ impl Control for TextBox {
                                     true
                                 }
                             }
+                            self.selection_range.set_value_and_mark_modified(None);
                             if !text_equals(&text, new_text) {
                                 text.set_text(new_text);
                                 drop(text);

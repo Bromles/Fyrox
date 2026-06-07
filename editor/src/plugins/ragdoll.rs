@@ -62,12 +62,14 @@ use crate::{
         commands::{graph::AddModelCommand, ChangeSelectionCommand},
         GameScene, Selection,
     },
-    world::graph::selection::GraphSelection,
+    world::selection::GraphSelection,
     Editor, MSG_SYNC_FLAG,
 };
+use fyrox::asset::manager::ResourceManager;
+use fyrox::gui::inspector::{Inspector, InspectorContextArgs};
 use std::{ops::Range, sync::Arc};
 
-#[derive(Reflect, Debug)]
+#[derive(Reflect, Clone, Debug)]
 pub struct RagdollPreset {
     #[reflect(description = "A handle of a hips (pelvis) bone.")]
     hips: Handle<Node>,
@@ -247,8 +249,8 @@ fn try_make_ball_joint(
             ),
         )
         .with_params(JointParams::BallJoint(joint))
-        .with_body1(body1)
-        .with_body2(body2)
+        .with_body1(body1.transmute())
+        .with_body2(body2.transmute())
         .with_auto_rebinding_enabled(false)
         .with_contacts_enabled(false)
         .build(graph);
@@ -291,8 +293,8 @@ fn try_make_hinge_joint(
             ),
         )
         .with_params(JointParams::RevoluteJoint(joint))
-        .with_body1(body1)
-        .with_body2(body2)
+        .with_body1(body1.transmute())
+        .with_body2(body2.transmute())
         .with_auto_rebinding_enabled(false)
         .with_contacts_enabled(false)
         .build(graph);
@@ -1018,12 +1020,17 @@ pub struct RagdollWizard {
     ok: Handle<UiNode>,
     cancel: Handle<UiNode>,
     autofill: Handle<UiNode>,
+    clipboard: Option<Box<dyn Reflect>>,
 }
 
 impl RagdollWizard {
-    pub fn new(ctx: &mut BuildContext, sender: MessageSender) -> Self {
+    pub fn new(
+        ctx: &mut BuildContext,
+        sender: MessageSender,
+        resource_manager: ResourceManager,
+    ) -> Self {
         let preset = RagdollPreset::default();
-        let container = Arc::new(make_property_editors_container(sender));
+        let container = Arc::new(make_property_editors_container(sender, resource_manager));
 
         let inspector;
         let ok;
@@ -1048,17 +1055,18 @@ impl RagdollWizard {
                             inspector = InspectorBuilder::new(
                                 WidgetBuilder::new().with_margin(Thickness::uniform(1.0)),
                             )
-                            .with_context(InspectorContext::from_object(
-                                &preset,
+                            .with_context(InspectorContext::from_object(InspectorContextArgs {
+                                object: &preset,
                                 ctx,
-                                container,
-                                None,
-                                MSG_SYNC_FLAG,
-                                0,
-                                true,
-                                Default::default(),
-                                150.0,
-                            ))
+                                definition_container: container,
+                                environment: None,
+                                sync_flag: MSG_SYNC_FLAG,
+                                layer_index: 0,
+                                generate_property_string_values: true,
+                                filter: Default::default(),
+                                name_column_width: 150.0,
+                                base_path: Default::default(),
+                            }))
                             .build(ctx);
                             inspector
                         })
@@ -1125,6 +1133,7 @@ impl RagdollWizard {
             ok,
             cancel,
             autofill,
+            clipboard: None,
         }
     }
 
@@ -1145,6 +1154,14 @@ impl RagdollWizard {
         game_scene: &GameScene,
         sender: &MessageSender,
     ) {
+        Inspector::handle_context_menu_message(
+            self.inspector,
+            message,
+            ui,
+            &mut self.preset,
+            &mut self.clipboard,
+        );
+
         if let Some(InspectorMessage::PropertyChanged(args)) = message.data() {
             if message.destination() == self.inspector
                 && message.direction() == MessageDirection::FromWidget
@@ -1213,7 +1230,14 @@ impl RagdollWizard {
                     .context()
                     .clone();
 
-                if let Err(sync_errors) = ctx.sync(&self.preset, ui, 0, true, Default::default()) {
+                if let Err(sync_errors) = ctx.sync(
+                    &self.preset,
+                    ui,
+                    0,
+                    true,
+                    Default::default(),
+                    Default::default(),
+                ) {
                     for error in sync_errors {
                         Log::err(format!("Failed to sync property. Reason: {error:?}"))
                     }
@@ -1233,9 +1257,13 @@ impl RagdollPlugin {
     fn on_open_ragdoll_wizard_clicked(&mut self, editor: &mut Editor) {
         let ui = editor.engine.user_interfaces.first_mut();
         let ctx = &mut ui.build_ctx();
-        let wizard = self
-            .ragdoll_wizard
-            .get_or_insert_with(|| RagdollWizard::new(ctx, editor.message_sender.clone()));
+        let wizard = self.ragdoll_wizard.get_or_insert_with(|| {
+            RagdollWizard::new(
+                ctx,
+                editor.message_sender.clone(),
+                editor.engine.resource_manager.clone(),
+            )
+        });
         wizard.open(ui);
     }
 }

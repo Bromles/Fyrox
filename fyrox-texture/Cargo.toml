@@ -1,0 +1,26 @@
+[package]
+name = "fyrox-texture"
+version = "1.0.0-rc.1"
+edition = "2021"
+license = "MIT"
+description = "Texture utilities for Fyrox Engine"
+keywords = ["graphics"]
+categories = ["game-development"]
+include = ["/src/**/*", "/Cargo.toml", "/LICENSE", "/README.md"]
+homepage = "https://fyrox.rs"
+documentation = "https://docs.rs/fyrox-texture"
+repository = "https://github.com/FyroxEngine/Fyrox"
+rust-version = "1.86"
+
+[dependencies]
+fyrox-core = { path = "../fyrox-core", version = "1.0.0-rc.1" }
+fyrox-resource = { path = "../fyrox-resource", version = "1.0.0-rc.1" }
+ddsfile = "0.5.0"
+fast_image_resize = "5.0.0"
+serde = { version = "1", features = ["derive"] }
+lazy_static = "1.4.0"
+fxhash = "0.2.1"
+strum = "0.26.1"
+strum_macros = "0.26.1"
+tbc = "0.3.0"
+image = { version = "0.25.1", default-features = false, features = ["gif", "jpeg", "png", "tga", "tiff", "bmp"] }

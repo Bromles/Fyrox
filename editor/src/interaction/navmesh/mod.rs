@@ -96,6 +96,7 @@ impl NavmeshPanel {
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("NavmeshPanel"))
             .open(false)
             .with_title(WindowTitle::text("Navmesh"))
+            .with_tab_label("Navmesh")
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new().with_child(
@@ -269,6 +270,7 @@ impl InteractionMode for EditNavmeshMode {
                     ignore_back_faces: false,
                     use_picking_loop: true,
                     only_meshes: false,
+                    settings: &settings.selection,
                 },
             )
             .map(|r| r.node)
@@ -413,7 +415,7 @@ impl InteractionMode for EditNavmeshMode {
         controller: &mut dyn SceneController,
         engine: &mut Engine,
         frame_size: Vector2<f32>,
-        _settings: &Settings,
+        settings: &Settings,
     ) {
         let Some(game_scene) = controller.downcast_mut::<GameScene>() else {
             return;
@@ -434,6 +436,7 @@ impl InteractionMode for EditNavmeshMode {
                         ignore_back_faces: false,
                         use_picking_loop: true,
                         only_meshes: false,
+                        settings: &settings.selection,
                     },
                 )
                 .map(|r| r.node)
@@ -680,7 +683,7 @@ impl InteractionMode for EditNavmeshMode {
 
     fn make_button(&mut self, ctx: &mut BuildContext, selected: bool) -> Handle<UiNode> {
         let navmesh_mode_tooltip =
-            "Edit Navmesh\n\nNavmesh edit mode allows you to modify selected \
+            "Edit Navmesh - Shortcut: [5]\n\nNavmesh edit mode allows you to modify selected \
         navigational mesh.";
 
         make_interaction_mode_button(

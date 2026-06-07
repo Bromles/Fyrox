@@ -25,6 +25,7 @@ use crate::fyrox::{
     },
     gui::inspector::{PropertyAction, PropertyChanged},
 };
+use fyrox::core::reflect::SetFieldError;
 use std::{
     any::{type_name, TypeId},
     fmt::{Debug, Formatter},
@@ -77,17 +78,35 @@ impl dyn CommandContext + '_ {
     }
 }
 
+/// An object that can be added to the editors [`CommandStack`] so the user
+/// can execute it and revert it.
 pub trait CommandTrait: Debug + 'static {
+    /// Returns `true` if the command does significant actions, that should be saved into a file
+    /// (pretty much any command that changes some scene data is significant). Otherwise, returns
+    /// `false` (for example, selection change is insignificant, because this command does not
+    /// really modify anything in the scene, only editor's runtime data).
+    fn is_significant(&self) -> bool {
+        true
+    }
+    /// The name that the user should see in the command stack.
     fn name(&mut self, context: &dyn CommandContext) -> String;
+    /// Perform the operation that this object represents.
+    /// This happens when the object is first added to the command stack,
+    /// and when the object is redone after being undone.
     fn execute(&mut self, context: &mut dyn CommandContext);
+    /// Undo the consequences of calling [`CommandTrait::execute`].
     fn revert(&mut self, context: &mut dyn CommandContext);
+    /// This object is leaving the command stack, so it will never
+    /// be executed or reverted again.
     fn finalize(&mut self, _: &mut dyn CommandContext) {}
 }
 
+/// An untyped command for the editor to execute or revert.
 #[derive(Debug)]
 pub struct Command(pub Box<dyn CommandTrait>);
 
 impl Command {
+    /// Create a command from the given `CommandTrait` object.
     pub fn new<C: CommandTrait>(cmd: C) -> Self {
         Self(Box::new(cmd))
     }
@@ -107,6 +126,11 @@ impl DerefMut for Command {
     }
 }
 
+/// A list of commands to execute in order as a single command.
+/// The commands are reverted in reverse order.
+/// Use [`CommandGroup::with_custom_name`] to give the command a
+/// name. Otherwise, a name is automatically constructed by listing
+/// the names of the commands in the group.
 #[derive(Debug, Default)]
 pub struct CommandGroup {
     commands: Vec<Command>,
@@ -123,25 +147,38 @@ impl From<Vec<Command>> for CommandGroup {
 }
 
 impl CommandGroup {
+    /// Add an object of the `CommandTriat` to the group.
     pub fn push<C: CommandTrait>(&mut self, command: C) {
         self.commands.push(Command::new(command))
     }
 
+    /// Add a `Command` to the group.
+    pub fn push_command(&mut self, command: Command) {
+        self.commands.push(command)
+    }
+
+    /// Replace the automatically constructed name.
     pub fn with_custom_name<S: AsRef<str>>(mut self, name: S) -> Self {
         self.custom_name = name.as_ref().to_string();
         self
     }
 
+    /// True if this group contains no commands.
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
 
+    /// The number of commands in the group.
     pub fn len(&self) -> usize {
         self.commands.len()
     }
 }
 
 impl CommandTrait for CommandGroup {
+    fn is_significant(&self) -> bool {
+        self.commands.iter().any(|c| c.is_significant())
+    }
+
     fn name(&mut self, context: &dyn CommandContext) -> String {
         if self.custom_name.is_empty() {
             let mut name = String::from("Command group: ");
@@ -241,6 +278,12 @@ impl CommandStack {
         command.execute(context);
 
         self.commands.push(command);
+    }
+
+    pub fn top_command(&self) -> Option<&dyn CommandTrait> {
+        self.top
+            .and_then(|top| self.commands.get(top))
+            .map(|v| &**v)
     }
 
     pub fn undo(&mut self, context: &mut dyn CommandContext) {
@@ -380,8 +423,10 @@ where
                     }
                     Err(current_value) => {
                         fyrox::core::log::Log::err(format!(
-                            "Failed to set property {}! Incompatible types {}!",
+                            "Failed to set property {}! Incompatible types. \
+                            Target property: {}. Value: {}!",
                             self.path,
+                            property.type_name(),
                             current_value.type_name()
                         ));
                         self.value = Some(current_value);
@@ -406,15 +451,44 @@ where
 
                                 value
                             }
-                            SetFieldByPathError::InvalidValue(value) => {
+                            SetFieldByPathError::InvalidValue {
+                                field_type_name,
+                                value,
+                            } => {
                                 fyrox::core::log::Log::err(format!(
-                                    "Failed to set property {}! Incompatible types {}!",
+                                    "Failed to set property {}! Incompatible types. \
+                                    Target property: {}. Value: {}!",
                                     self.path,
+                                    field_type_name,
                                     value.type_name()
                                 ));
 
                                 value
                             }
+                            SetFieldByPathError::SetFieldError(err) => match err {
+                                SetFieldError::NoSuchField { value, .. } => {
+                                    fyrox::core::log::Log::err(format!(
+                                        "Failed to set property {}, because it does not exist!",
+                                        self.path,
+                                    ));
+
+                                    value
+                                }
+                                SetFieldError::InvalidValue {
+                                    field_type_name,
+                                    value,
+                                } => {
+                                    fyrox::core::log::Log::err(format!(
+                                        "Failed to set property {}! Incompatible types. \
+                                    Target property: {}. Value: {}!",
+                                        self.path,
+                                        field_type_name,
+                                        value.type_name()
+                                    ));
+
+                                    value
+                                }
+                            },
                         };
                         self.value = Some(value);
                     }

@@ -36,6 +36,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, UiNode, UserInterface,
 };
+
 use fyrox_core::uuid_provider;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
@@ -177,6 +178,7 @@ impl HotKeyEditorMessage {
 ///
 /// Use [`HotKeyEditorMessage`] message to alternate the state of a hot key widget, or to listen to its changes.
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct HotKeyEditor {
     widget: Widget,
     text: InheritableVariable<Handle<UiNode>>,
@@ -223,6 +225,7 @@ impl Control for HotKeyEditor {
             self.clip_bounds(),
             Brush::Solid(Color::TRANSPARENT),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -406,6 +409,7 @@ impl KeyBindingEditorMessage {
 ///
 /// Use [`KeyBindingEditorMessage`] message to alternate the state of a key binding widget, or to listen to its changes.
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct KeyBindingEditor {
     widget: Widget,
     text: InheritableVariable<Handle<UiNode>>,
@@ -452,6 +456,7 @@ impl Control for KeyBindingEditor {
             self.clip_bounds(),
             Brush::Solid(Color::TRANSPARENT),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }

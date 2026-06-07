@@ -21,51 +21,36 @@
 //! Resource loader. It manages resource loading.
 
 use crate::{
-    core::uuid::Uuid, io::ResourceIo, options::BaseImportOptions, state::LoadError, ResourceData,
+    core::{uuid::Uuid, TypeUuidProvider},
+    io::ResourceIo,
+    options::BaseImportOptions,
+    state::LoadError,
+    ResourceData, TypedResourceData,
 };
-use std::{any::Any, future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use fyrox_core::io::FileError;
+use fyrox_core::platform::TargetPlatform;
+use std::{
+    any::Any,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+};
 
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
-pub trait BaseResourceLoader: 'static {}
+pub trait BaseResourceLoader: Any {}
+#[cfg(target_arch = "wasm32")]
+impl<T: Any> BaseResourceLoader for T {}
 
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
-pub trait BaseResourceLoader: Send + 'static {}
-
-impl<T> BaseResourceLoader for T where T: ResourceLoader {}
-
-/// A simple type-casting trait that has auto-impl.
-pub trait ResourceLoaderTypeTrait: BaseResourceLoader {
-    /// Converts `self` into boxed `Any`.
-    fn into_any(self: Box<Self>) -> Box<dyn Any>;
-
-    /// Returns `self` as `&dyn Any`. It is useful for downcasting to a particular type.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Returns `self` as `&mut dyn Any`. It is useful for downcasting to a particular type.
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-impl<T> ResourceLoaderTypeTrait for T
-where
-    T: ResourceLoader,
-{
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+pub trait BaseResourceLoader: Any + Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Any + Send> BaseResourceLoader for T {}
 
 /// Trait for resource loading.
-pub trait ResourceLoader: ResourceLoaderTypeTrait {
+pub trait ResourceLoader: BaseResourceLoader {
     /// Returns a list of file extensions supported by the loader. Resource manager will use this list
     /// to pick the correct resource loader when the user requests a resource.
     fn extensions(&self) -> &[&str];
@@ -83,6 +68,21 @@ pub trait ResourceLoader: ResourceLoaderTypeTrait {
     /// Loads or reloads a resource.
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture;
 
+    /// Loads a resource from the given path and converts it to a format, that is the most efficient
+    /// fot the given platform. This method is usually used to convert resources for production builds;
+    /// to make the resources as efficient as possible for the given platform. This method saves the
+    /// converted resource to the given `dest_path`. If the resource is already in its final form,
+    /// then this method should just copy the file from `src_path` to `dest_path`.
+    fn convert(
+        &self,
+        src_path: PathBuf,
+        dest_path: PathBuf,
+        #[allow(unused_variables)] platform: TargetPlatform,
+        io: Arc<dyn ResourceIo>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FileError>>>> {
+        Box::pin(async move { io.copy_file(&src_path, &dest_path).await })
+    }
+
     /// Tries to load import settings for a resource.
     fn try_load_import_settings(
         &self,
@@ -98,9 +98,11 @@ pub trait ResourceLoader: ResourceLoaderTypeTrait {
     }
 }
 
+/// A result of executing a resource loader.
 pub struct LoaderPayload(pub(crate) Box<dyn ResourceData>);
 
 impl LoaderPayload {
+    /// Creates a new resource loader payload.
     pub fn new<T: ResourceData>(data: T) -> Self {
         Self(Box::new(data))
     }
@@ -139,7 +141,7 @@ impl ResourceLoadersContainer {
         if let Some(existing_loader) = self
             .loaders
             .iter_mut()
-            .find_map(|l| (**l).as_any_mut().downcast_mut::<T>())
+            .find_map(|l| (&mut **l as &mut dyn Any).downcast_mut::<T>())
         {
             Some(std::mem::replace(existing_loader, loader))
         } else {
@@ -158,11 +160,10 @@ impl ResourceLoadersContainer {
         if let Some(pos) = self
             .loaders
             .iter()
-            .position(|l| (**l).as_any().is::<Prev>())
+            .position(|l| (&**l as &dyn Any).is::<Prev>())
         {
             let prev_untyped = std::mem::replace(&mut self.loaders[pos], Box::new(new_loader));
-            prev_untyped
-                .into_any()
+            (prev_untyped as Box<dyn Any>)
                 .downcast::<Prev>()
                 .ok()
                 .map(|boxed| *boxed)
@@ -178,7 +179,7 @@ impl ResourceLoadersContainer {
     {
         self.loaders
             .iter()
-            .find_map(|loader| (**loader).as_any().downcast_ref())
+            .find_map(|loader| (&**loader as &dyn Any).downcast_ref())
     }
 
     /// Tries to find an instance of a resource loader of the given type `T.
@@ -188,7 +189,7 @@ impl ResourceLoadersContainer {
     {
         self.loaders
             .iter_mut()
-            .find_map(|loader| (**loader).as_any_mut().downcast_mut())
+            .find_map(|loader| (&mut **loader as &mut dyn Any).downcast_mut())
     }
 
     /// Returns total amount of resource loaders in the container.
@@ -209,6 +210,44 @@ impl ResourceLoadersContainer {
     /// Returns an iterator yielding mutable references to "untyped" resource loaders.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut dyn ResourceLoader> {
         self.loaders.iter_mut().map(|boxed| &mut **boxed)
+    }
+
+    /// Returns `true` if there's at least one resource loader, that supports the extension of the
+    /// file at the given path.
+    pub fn is_supported_resource(&self, path: &Path) -> bool {
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+            self.loaders
+                .iter()
+                .any(|loader| loader.supports_extension(extension))
+        } else {
+            false
+        }
+    }
+
+    /// Checks if there's a resource loader for the given path and the data type produced by the
+    /// loader matches the given type `T`.
+    pub fn is_extension_matches_type<T>(&self, path: &Path) -> bool
+    where
+        T: TypedResourceData,
+    {
+        path.extension().is_some_and(|extension| {
+            self.loaders
+                .iter()
+                .find(|loader| loader.supports_extension(&extension.to_string_lossy()))
+                .is_some_and(|loader| {
+                    loader.data_type_uuid() == <T as TypeUuidProvider>::type_uuid()
+                })
+        })
+    }
+
+    /// Checks if there's a loader for the given path.
+    pub fn loader_for(&self, path: &Path) -> Option<&dyn ResourceLoader> {
+        path.extension().and_then(|extension| {
+            self.loaders
+                .iter()
+                .find(|loader| loader.supports_extension(&extension.to_string_lossy()))
+                .map(|l| &**l)
+        })
     }
 }
 

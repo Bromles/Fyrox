@@ -31,7 +31,7 @@ use crate::{
         reflect::prelude::*,
         type_traits::prelude::*,
         variable::InheritableVariable,
-        visitor::{Visit, VisitError, VisitResult, Visitor},
+        visitor::{Visit, VisitResult, Visitor},
         ImmutableString,
     },
     engine::SerializationContext,
@@ -41,6 +41,7 @@ use crate::{
     script::{Script, ScriptTrait},
 };
 use fyrox_core::algebra::UnitQuaternion;
+use fyrox_core::visitor::error::VisitError;
 use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
@@ -49,6 +50,8 @@ use std::{
     sync::mpsc::Sender,
 };
 use strum_macros::{AsRefStr, EnumString, VariantNames};
+
+use super::collider::BitMask;
 
 /// Level of detail is a collection of objects for given normalized distance range.
 /// Objects will be rendered **only** if they're in specified range.
@@ -462,6 +465,14 @@ pub struct Base {
     #[reflect(deref)]
     enabled: TrackedProperty<InheritableVariable<bool>>,
 
+    /// Control whether this node should be rendered. A node should be rendered only if its render mask shares
+    /// some set bits in common with the render mask of the camera.
+    #[reflect(
+        description = "Control whether this node should be rendered. A node should be rendered only if its render mask shares\
+        some set bits in common with the render mask of the camera."
+    )]
+    pub render_mask: InheritableVariable<BitMask>,
+
     #[reflect(
         description = "Maximum amount of Some(time) that node will \"live\" or None if the node has unlimited lifetime."
     )]
@@ -605,14 +616,16 @@ impl Base {
         Log::verify(sender.send(NodeMessage::new(node, kind)));
     }
 
-    /// Returns mutable reference to local transform of a node, can be used to set
-    /// some local spatial properties, such as position, rotation, scale, etc.
+    /// Returns mutable reference to local transform of a node, can be used to set some local spatial
+    /// properties, such as position, rotation, scale, etc. To set global position and rotation, use
+    /// [`super::Graph::set_global_position`] and [`super::Graph::set_global_rotation`] methods respectively.
     #[inline]
     pub fn local_transform_mut(&mut self) -> &mut Transform {
         &mut self.local_transform
     }
 
-    /// Sets new local transform of a node.
+    /// Sets new local transform of a node. If you need to modify existing local transformation,
+    /// use [`Self::local_transform_mut`].
     #[inline]
     pub fn set_local_transform(&mut self, transform: Transform) {
         self.local_transform.property = transform;
@@ -729,7 +742,7 @@ impl Base {
     /// a placeholder, because there is not information to calculate actual bounding box.
     #[inline]
     pub fn local_bounding_box(&self) -> AxisAlignedBoundingBox {
-        AxisAlignedBoundingBox::default()
+        AxisAlignedBoundingBox::unit()
     }
 
     /// Returns current **world-space** bounding box.
@@ -1204,6 +1217,7 @@ impl Visit for Base {
         let _ = self.cast_shadows.visit("CastShadows", &mut region);
         let _ = self.instance_id.visit("InstanceId", &mut region);
         let _ = self.enabled.visit("Enabled", &mut region);
+        let _ = self.render_mask.visit("RenderMask", &mut region);
 
         // Script visiting may fail for various reasons:
         //
@@ -1403,6 +1417,7 @@ impl BaseBuilder {
                 self.enabled.into(),
                 NodeMessageKind::EnabledFlagChanged,
             ),
+            render_mask: BitMask::all().into(),
             global_visibility: Cell::new(true),
             parent: Handle::NONE,
             global_transform: Cell::new(Matrix4::identity()),

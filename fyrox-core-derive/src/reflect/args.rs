@@ -23,6 +23,7 @@
 use darling::*;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::__private::bool;
 use syn::*;
 
 pub type Fields = ast::Fields<FieldArgs>;
@@ -55,6 +56,12 @@ pub struct TypeArgs {
 
     #[darling(default, rename = "ReflectList")]
     pub impl_as_list: bool,
+
+    #[darling(multiple)]
+    pub derived_type: Vec<Path>,
+
+    #[darling(default)]
+    pub non_cloneable: bool,
 }
 
 impl TypeArgs {
@@ -187,6 +194,13 @@ pub struct FieldArgs {
     /// A human-readable name.
     #[darling(default)]
     pub display_name: Option<String>,
+
+    /// #[reflect(tag = "<tag>")]
+    ///
+    /// Tag of the property. Could be used to group properties by a certain criteria or to find a
+    /// specific property by its tag.
+    #[darling(default)]
+    pub tag: Option<String>,
 
     /// `#[reflect(read_only)]`
     ///

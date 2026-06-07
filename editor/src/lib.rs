@@ -32,7 +32,6 @@ extern crate lazy_static;
 
 pub mod asset;
 pub mod audio;
-pub mod build;
 pub mod camera;
 pub mod command;
 pub mod configurator;
@@ -57,22 +56,18 @@ pub mod utils;
 pub mod world;
 
 pub use fyrox;
+use fyrox::core::make_relative_path;
 
-use crate::asset::item::AssetItem;
-use crate::plugins::absm::AbsmEditor;
+use crate::plugins::probe::ReflectionProbePlugin;
 use crate::{
-    asset::AssetBrowser,
+    asset::{item::AssetItem, AssetBrowser},
     audio::{preview::AudioPreviewPanel, AudioPanel},
-    build::BuildWindow,
     camera::panel::CameraPreviewControlPanel,
     command::{panel::CommandStackViewer, Command, CommandTrait},
     configurator::Configurator,
     export::ExportWindow,
     fyrox::{
-        asset::{
-            io::FsResourceIo, manager::ResourceManager, untyped::ResourceKind,
-            untyped::UntypedResource,
-        },
+        asset::{io::FsResourceIo, manager::ResourceManager},
         core::{
             algebra::{Matrix3, Vector2},
             color::Color,
@@ -105,6 +100,7 @@ use crate::{
             formatted_text::WrapMode,
             grid::{Column, GridBuilder, Row},
             key::HotKey,
+            log::LogPanel,
             message::{MessageDirection, UiMessage},
             messagebox::{
                 MessageBoxBuilder, MessageBoxButtons, MessageBoxMessage, MessageBoxResult,
@@ -145,8 +141,8 @@ use crate::{
     particle::ParticleSystemPreviewControlPanel,
     plugin::{EditorPlugin, EditorPluginsContainer},
     plugins::{
-        absm::AbsmEditorPlugin, animation::AnimationEditorPlugin, collider::ColliderPlugin,
-        curve_editor::CurveEditorPlugin, material::MaterialPlugin, path_fixer::PathFixerPlugin,
+        absm::AbsmEditor, absm::AbsmEditorPlugin, animation::AnimationEditorPlugin,
+        collider::ColliderPlugin, curve_editor::CurveEditorPlugin, material::MaterialPlugin,
         ragdoll::RagdollPlugin, settings::SettingsPlugin, stats::UiStatisticsPlugin,
         tilemap::TileMapEditorPlugin,
     },
@@ -167,33 +163,59 @@ use crate::{
         utils::UiSceneWorldViewerDataProvider, UiScene,
     },
     utils::doc::DocWindow,
-    world::{graph::menu::SceneNodeContextMenu, graph::EditorSceneWrapper, WorldViewer},
+    world::{graph::EditorSceneWrapper, menu::SceneNodeContextMenu, WorldViewer},
 };
-use fyrox::gui::log::LogPanel;
-use fyrox_build_tools::BuildCommand;
+use fyrox::asset::untyped::ResourceKind;
+use fyrox::engine::ApplicationLoopController;
+use fyrox_build_tools::{build::BuildWindow, CommandDescriptor};
 pub use message::Message;
 use plugins::inspector::InspectorPlugin;
-use std::process::Stdio;
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Cursor, Read},
     path::{Path, PathBuf},
+    process::Stdio,
     rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, channel, Receiver},
-        Arc,
+        Arc, LazyLock,
     },
     time::{Duration, Instant},
 };
+use toml_edit::DocumentMut;
 
 pub const FIXED_TIMESTEP: f32 = 1.0 / 60.0;
 pub const MSG_SYNC_FLAG: u64 = 1;
 
+static EDITOR_VERSION: LazyLock<String> = LazyLock::new(|| {
+    let manifest = include_bytes!("../Cargo.toml");
+    let mut file = Cursor::new(&manifest);
+    let mut toml = String::new();
+    if file.read_to_string(&mut toml).is_ok() {
+        if let Ok(document) = toml.parse::<DocumentMut>() {
+            if let Some(package) = document.get("package").and_then(|i| i.as_table()) {
+                if let Some(version) = package.get("version") {
+                    return version.to_string().replace('\"', "");
+                }
+            }
+        }
+    }
+
+    "<unknown>".to_string()
+});
+
 pub fn send_sync_message(ui: &UserInterface, mut msg: UiMessage) {
     msg.flags = MSG_SYNC_FLAG;
     ui.send_message(msg);
+}
+
+pub fn send_sync_messages<const N: usize>(ui: &UserInterface, mut messages: [UiMessage; N]) {
+    for message in &mut messages {
+        message.flags = MSG_SYNC_FLAG;
+    }
+    ui.send_messages(messages);
 }
 
 lazy_static! {
@@ -212,11 +234,13 @@ pub fn load_texture_internal(data: &[u8]) -> Option<TextureResource> {
         Some(existing.clone())
     } else {
         let texture = TextureResource::load_from_memory(
-            Default::default(),
+            Uuid::new_v4(),
+            ResourceKind::Embedded,
             data,
             TextureImportOptions::default()
                 .with_compression(CompressionOptions::NoCompression)
-                .with_minification_filter(TextureMinificationFilter::Linear),
+                .with_minification_filter(TextureMinificationFilter::LinearMipMapLinear)
+                .with_lod_bias(-1.0),
         )
         .ok()?;
 
@@ -226,8 +250,8 @@ pub fn load_texture_internal(data: &[u8]) -> Option<TextureResource> {
     }
 }
 
-pub fn load_image_internal(data: &[u8]) -> Option<UntypedResource> {
-    Some(load_texture_internal(data)?.into())
+pub fn load_image_internal(data: &[u8]) -> Option<TextureResource> {
+    load_texture_internal(data)
 }
 
 #[macro_export]
@@ -247,6 +271,7 @@ macro_rules! load_image {
 lazy_static! {
     static ref GIZMO_SHADER: ShaderResource = {
         ShaderResource::from_str(
+            Uuid::new_v4(),
             include_str!("../resources/shaders/gizmo.shader",),
             Default::default(),
         )
@@ -257,7 +282,7 @@ lazy_static! {
 pub fn make_color_material(color: Color) -> MaterialResource {
     let mut material = Material::from_shader(GIZMO_SHADER.clone());
     material.set_property("diffuseColor", color);
-    MaterialResource::new_ok(Default::default(), material)
+    MaterialResource::new_embedded(material)
 }
 
 pub fn set_mesh_diffuse_color(mesh: &mut Mesh, color: Color) {
@@ -272,15 +297,14 @@ pub fn set_mesh_diffuse_color(mesh: &mut Mesh, color: Color) {
 pub fn create_terrain_layer_material() -> MaterialResource {
     let mut material = Material::standard_terrain();
     material.set_property("texCoordScale", Vector2::new(10.0, 10.0));
-    MaterialResource::new_ok(Default::default(), material)
+    MaterialResource::new_embedded(material)
 }
 
 pub fn make_scene_file_filter() -> Filter {
     Filter::new(|p: &Path| {
         p.is_dir()
-            || p.extension().map_or(false, |ext| {
-                matches!(ext.to_string_lossy().as_ref(), "rgs" | "ui")
-            })
+            || p.extension()
+                .is_some_and(|ext| matches!(ext.to_string_lossy().as_ref(), "rgs" | "ui"))
     })
 }
 
@@ -303,8 +327,9 @@ pub fn make_save_file_selector(
 pub enum Mode {
     Edit,
     Build {
-        queue: VecDeque<BuildCommand>,
+        queue: VecDeque<CommandDescriptor>,
         process: Option<std::process::Child>,
+        play_after_build: bool,
     },
     Play {
         process: std::process::Child,
@@ -314,7 +339,7 @@ pub enum Mode {
 
 impl Mode {
     pub fn is_edit(&self) -> bool {
-        matches!(self, Mode::Edit { .. })
+        matches!(self, Mode::Edit)
     }
 }
 
@@ -539,7 +564,7 @@ pub struct Editor {
     pub settings: Settings,
     pub audio_panel: AudioPanel,
     pub mode: Mode,
-    pub build_window: BuildWindow,
+    pub build_window: Option<BuildWindow>,
     pub scene_settings: SceneSettingsWindow,
     pub particle_system_control_panel: ParticleSystemPreviewControlPanel,
     pub camera_control_panel: CameraPreviewControlPanel,
@@ -562,10 +587,22 @@ pub struct Editor {
     pub surface_data_viewer: Option<SurfaceDataViewer>,
     pub processed_ui_messages: usize,
     pub styles: FxHashMap<EditorStyle, StyleResource>,
+    pub running_game_process: Option<(std::process::Child, Arc<AtomicBool>)>,
+    pub user_project_icon: Option<Vec<u8>>,
+    pub user_project_name: String,
+    pub user_project_version: String,
 }
 
 impl Editor {
     pub fn new(startup_data: Option<StartupData>) -> Self {
+        Self::new_with_settings(startup_data, Default::default())
+    }
+
+    pub fn new_with_settings(startup_data: Option<StartupData>, settings: Settings) -> Self {
+        // Useful for debugging purposes when users don't bother to mention editor version
+        // they're using.
+        Log::info(format!("Editor version: {}", &*EDITOR_VERSION));
+
         let (log_message_sender, log_message_receiver) = channel();
 
         Log::add_listener(log_message_sender);
@@ -598,12 +635,12 @@ impl Editor {
                 Brush::Solid(Color::opaque(60, 100, 0)),
             );
 
-        let dark_style = StyleResource::new_ok(ResourceKind::Embedded, dark_style);
+        let dark_style = StyleResource::new_embedded(dark_style);
         let mut light_style = Style::light_style();
         light_style
             .set(
                 WorldViewer::INSTANCE_BRUSH,
-                Brush::Solid(Color::opaque(160, 160, 200)),
+                Brush::Solid(Color::opaque(70, 70, 120)),
             )
             .set(
                 AssetItem::SELECTED_FOREGROUND,
@@ -627,7 +664,7 @@ impl Editor {
                 Brush::Solid(Color::opaque(60, 100, 0)),
             );
 
-        let light_style = StyleResource::new_ok(ResourceKind::Embedded, light_style);
+        let light_style = StyleResource::new_embedded(light_style);
         let styles = [
             (EditorStyle::Dark, dark_style),
             (EditorStyle::Light, light_style),
@@ -635,7 +672,7 @@ impl Editor {
         .into_iter()
         .collect::<FxHashMap<_, _>>();
 
-        let mut settings = Settings::default();
+        let mut settings = settings;
 
         match Settings::load() {
             Ok(s) => {
@@ -669,13 +706,14 @@ impl Editor {
             window_attributes,
             vsync: true,
             msaa_sample_count: Some(4),
+            graphics_server_constructor: Default::default(),
         };
 
         let serialization_context = Arc::new(SerializationContext::new());
         let task_pool = Arc::new(TaskPool::new());
         let mut engine = Engine::new(EngineInitParams {
             graphics_context_params,
-            resource_manager: ResourceManager::new(task_pool.clone()),
+            resource_manager: ResourceManager::new(Arc::new(FsResourceIo), task_pool.clone()),
             serialization_context,
             task_pool,
             widget_constructors: Arc::new(new_widget_constructor_container()),
@@ -688,9 +726,11 @@ impl Editor {
         {
             let mut font_state = engine.user_interfaces.first_mut().default_font.state();
             let font_state_data = font_state.data().unwrap();
-            *font_state_data =
-                Font::from_memory(include_bytes!("../resources/arial.ttf").as_slice(), 1024)
-                    .unwrap();
+            *font_state_data = Font::from_memory(
+                include_bytes!("../resources/Roboto-Regular.ttf").as_slice(),
+                1024,
+            )
+            .unwrap();
         }
 
         let ui = engine.user_interfaces.first_mut();
@@ -724,15 +764,17 @@ impl Editor {
             load_image!("../resources/clear.png"),
             true,
         );
-        let inspector_plugin = InspectorPlugin::new(ctx, message_sender.clone());
+        let inspector_plugin =
+            InspectorPlugin::new(ctx, message_sender.clone(), engine.resource_manager.clone());
         let particle_system_control_panel =
-            ParticleSystemPreviewControlPanel::new(scene_viewer.frame(), ctx);
+            ParticleSystemPreviewControlPanel::new(inspector_plugin.head, ctx);
         let camera_control_panel = CameraPreviewControlPanel::new(scene_viewer.frame(), ctx);
-        let mesh_control_panel = MeshControlPanel::new(scene_viewer.frame(), ctx);
-        let audio_preview_panel = AudioPreviewPanel::new(scene_viewer.frame(), ctx);
+        let mesh_control_panel = MeshControlPanel::new(inspector_plugin.head, ctx);
+        let audio_preview_panel = AudioPreviewPanel::new(inspector_plugin.head, ctx);
         let doc_window = DocWindow::new(ctx);
         let node_removal_dialog = NodeRemovalDialog::new(ctx);
-        let scene_settings = SceneSettingsWindow::new(ctx, message_sender.clone());
+        let scene_settings =
+            SceneSettingsWindow::new(ctx, message_sender.clone(), engine.resource_manager.clone());
 
         let docking_manager;
         let root_grid = GridBuilder::new(
@@ -853,10 +895,7 @@ impl Editor {
                                 .build(ctx)
                         }))
                         .with_floating_windows(vec![
-                            particle_system_control_panel.window,
                             camera_control_panel.window,
-                            mesh_control_panel.window,
-                            audio_preview_panel.window,
                             navmesh_panel.window,
                             doc_window.window,
                             light_panel.window,
@@ -892,7 +931,6 @@ impl Editor {
         .build(ctx);
 
         let save_scene_dialog = SaveSceneConfirmationDialog::new(ctx);
-        let build_window = BuildWindow::new(ctx);
         if let Some(layout) = settings.windows.layout.as_ref() {
             engine
                 .user_interfaces
@@ -931,7 +969,7 @@ impl Editor {
                 clock: Instant::now(),
                 lag: 0.0,
             },
-            build_window,
+            build_window: None,
             scene_settings,
             particle_system_control_panel,
             camera_control_panel,
@@ -949,7 +987,7 @@ impl Editor {
                 .with(AbsmEditorPlugin::default())
                 .with(UiStatisticsPlugin::default())
                 .with(CurveEditorPlugin::default())
-                .with(PathFixerPlugin::default())
+                .with(ReflectionProbePlugin::default())
                 .with(inspector_plugin),
             // Apparently, some window managers (like Wayland), does not send `Focused` event after the window
             // was created. So we must assume that the editor is focused by default, otherwise editor's thread
@@ -966,6 +1004,10 @@ impl Editor {
             surface_data_viewer: None,
             processed_ui_messages: 0,
             styles,
+            running_game_process: None,
+            user_project_icon: None,
+            user_project_name: Default::default(),
+            user_project_version: Default::default(),
         };
 
         if let Some(data) = startup_data {
@@ -1122,7 +1164,9 @@ impl Editor {
                 } else if hot_key == key_bindings.load_scene {
                     sender.send(Message::OpenLoadSceneDialog);
                 } else if hot_key == key_bindings.run_game {
-                    sender.send(Message::SwitchToBuildMode);
+                    sender.send(Message::SwitchToBuildMode {
+                        play_after_build: true,
+                    });
                 } else if hot_key == key_bindings.save_scene {
                     if let Some(entry) = self.scenes.current_scene_entry_ref() {
                         if let Some(path) = entry.path.as_ref() {
@@ -1294,10 +1338,23 @@ impl Editor {
         }
 
         let ui = engine.user_interfaces.first_mut();
-        self.build_window
-            .handle_ui_message(message, &self.message_sender, ui);
+        if let Some(build_window) = self.build_window.take() {
+            self.build_window = build_window.handle_ui_message(message, ui, || {
+                self.message_sender.send(Message::SwitchToEditMode)
+            });
+            if self.build_window.is_none() {
+                if let Some((process, active)) = self.running_game_process.take() {
+                    self.mode = Mode::Play { process, active };
+                }
+            }
+        }
         if let Some(export_window) = self.export_window.as_mut() {
-            export_window.handle_ui_message(message, ui, &self.message_sender);
+            export_window.handle_ui_message(
+                message,
+                ui,
+                &self.message_sender,
+                engine.resource_manager.clone(),
+            );
         }
         if let Some(stats) = self.statistics_window.as_ref() {
             if let StatisticsWindowAction::Remove = stats.handle_ui_message(message, ui) {
@@ -1467,6 +1524,10 @@ impl Editor {
     }
 
     fn set_play_mode(&mut self) {
+        if let Some(build_window) = self.build_window.take() {
+            build_window.destroy(self.engine.user_interfaces.first());
+        }
+
         let Some(entry) = self.scenes.current_scene_entry_ref() else {
             Log::err("Cannot enter build mode when there is no scene!");
             return;
@@ -1496,11 +1557,11 @@ impl Editor {
 
         let mut command = build_profile.run_command.make_command();
 
-        command
-            .stdout(Stdio::piped())
-            .arg("--")
-            .arg("--override-scene")
-            .arg(path);
+        let command = command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        if !build_profile.run_command.skip_passthrough_marker {
+            command.arg("--");
+        }
+        command.arg("--override-scene").arg(path);
 
         match command.spawn() {
             Ok(mut process) => {
@@ -1508,11 +1569,20 @@ impl Editor {
 
                 // Capture output from child process.
                 let mut stdout = process.stdout.take().unwrap();
+                let mut stderr = process.stderr.take().unwrap();
                 let reader_active = active.clone();
                 std::thread::spawn(move || {
                     while reader_active.load(Ordering::SeqCst) {
                         for line in BufReader::new(&mut stdout).lines().take(10).flatten() {
                             Log::info(line);
+                        }
+                    }
+                });
+                let reader_active = active.clone();
+                std::thread::spawn(move || {
+                    while reader_active.load(Ordering::SeqCst) {
+                        for line in BufReader::new(&mut stderr).lines().take(10).flatten() {
+                            Log::err(line);
                         }
                     }
                 });
@@ -1525,20 +1595,17 @@ impl Editor {
         }
     }
 
-    fn set_build_mode(&mut self) {
-        if !matches!(self.mode, Mode::Edit) {
-            Log::err("Cannot enter build mode when from non-Edit mode!");
+    fn set_build_mode(&mut self, play_after_build: bool) {
+        if matches!(self.mode, Mode::Build { .. }) {
+            Log::err("Cannot enter build mode when another build mode is active!");
             return;
         }
 
-        let Some(entry) = self.scenes.current_scene_entry_ref() else {
-            Log::err("Cannot enter build mode when there is no scene!");
-            return;
-        };
-
-        if entry.path.is_none() {
-            Log::err("Save you scene first!");
-            return;
+        if let Some(entry) = self.scenes.current_scene_entry_ref() {
+            if entry.path.is_none() {
+                Log::err("Save you scene first!");
+                return;
+            }
         }
 
         let Some(build_profile) = self
@@ -1557,10 +1624,27 @@ impl Editor {
             .cloned()
             .collect::<VecDeque<_>>();
 
-        self.mode = Mode::Build {
-            queue,
-            process: None,
-        };
+        let old_mode = std::mem::replace(
+            &mut self.mode,
+            Mode::Build {
+                queue,
+                process: None,
+                play_after_build,
+            },
+        );
+
+        match old_mode {
+            Mode::Edit => {}
+            Mode::Build { .. } => {
+                unreachable!();
+            }
+            Mode::Play { process, active } => {
+                self.running_game_process = Some((process, active));
+            }
+        }
+
+        let ui = self.engine.user_interfaces.first_mut();
+        self.build_window = Some(BuildWindow::new("your game", &mut ui.build_ctx()));
 
         self.on_mode_changed();
     }
@@ -1622,7 +1706,12 @@ impl Editor {
             );
 
             if let Some(game_scene) = current_scene_entry.controller.downcast_mut::<GameScene>() {
-                self.scene_settings.sync_to_model(game_scene, engine);
+                self.scene_settings.sync_to_model(
+                    false,
+                    game_scene,
+                    engine,
+                    self.message_sender.clone(),
+                );
                 let sender = &self.message_sender;
                 self.world_viewer.sync_to_model(
                     &EditorSceneWrapper {
@@ -1701,14 +1790,14 @@ impl Editor {
     fn do_current_scene_command(&mut self, command: Command) -> bool {
         let engine = &mut self.engine;
         if let Some(current_scene_entry) = self.scenes.current_scene_entry_mut() {
+            current_scene_entry.has_unsaved_changes |= command.is_significant();
+
             current_scene_entry.controller.do_command(
                 &mut current_scene_entry.command_stack,
                 command,
                 &mut current_scene_entry.selection,
                 engine,
             );
-
-            current_scene_entry.has_unsaved_changes = true;
 
             true
         } else {
@@ -1719,12 +1808,16 @@ impl Editor {
     fn undo_current_scene_command(&mut self) -> bool {
         let engine = &mut self.engine;
         if let Some(current_scene_entry) = self.scenes.current_scene_entry_mut() {
+            if let Some(command) = current_scene_entry.command_stack.top_command() {
+                current_scene_entry.has_unsaved_changes |= command.is_significant();
+            }
+
             current_scene_entry.controller.undo(
                 &mut current_scene_entry.command_stack,
                 &mut current_scene_entry.selection,
                 engine,
             );
-            current_scene_entry.has_unsaved_changes = true;
+
             true
         } else {
             false
@@ -1739,7 +1832,11 @@ impl Editor {
                 &mut current_scene_entry.selection,
                 engine,
             );
-            current_scene_entry.has_unsaved_changes = true;
+
+            if let Some(command) = current_scene_entry.command_stack.top_command() {
+                current_scene_entry.has_unsaved_changes |= command.is_significant();
+            }
+
             true
         } else {
             false
@@ -1806,11 +1903,30 @@ impl Editor {
             || self
                 .scenes
                 .current_scene_controller_ref()
-                .map_or(false, |s| s.is_interacting())
+                .is_some_and(|s| s.is_interacting())
             || stays_active
     }
 
     fn save_scene(&mut self, id: Uuid, path: PathBuf) {
+        let path = match make_relative_path(path.clone()) {
+            Ok(path) => path,
+            Err(err) => {
+                Log::err(format!(
+                    "Failed to create relative path for {}. Reason: {err}",
+                    path.display()
+                ));
+                return;
+            }
+        };
+
+        // If there is some other open scene with the same name, then close it.
+        for entry in self.scenes.entries.iter() {
+            if entry.id != id && entry.path.as_ref() == Some(&path) {
+                self.close_scene(entry.id);
+                break;
+            }
+        }
+
         self.try_leave_preview_mode();
 
         let engine = &mut self.engine;
@@ -1851,8 +1967,16 @@ impl Editor {
     }
 
     fn load_scene(&mut self, scene_path: PathBuf) {
+        let scene_path = match make_relative_path(scene_path) {
+            Ok(path) => path,
+            Err(err) => {
+                Log::err(err.to_string());
+                return;
+            }
+        };
+
         for entry in self.scenes.entries.iter() {
-            if entry.path.as_ref().map_or(false, |p| p == &scene_path) {
+            if entry.path.as_ref() == Some(&scene_path) {
                 self.set_current_scene(entry.id);
                 return;
             }
@@ -1942,7 +2066,15 @@ impl Editor {
     }
 
     fn close_scene(&mut self, id: Uuid) -> bool {
-        self.try_leave_preview_mode();
+        let closing_current_scene = self
+            .scenes
+            .current_scene_entry_ref()
+            .map(|s| s.id == id)
+            .unwrap_or_default();
+
+        if closing_current_scene {
+            self.try_leave_preview_mode();
+        }
 
         let engine = &mut self.engine;
         if let Some(mut entry) = self.scenes.take_scene(id) {
@@ -1950,17 +2082,21 @@ impl Editor {
                 .controller
                 .on_destroy(&mut entry.command_stack, engine, &mut entry.selection);
 
-            // Preview frame has scene frame texture assigned, it must be cleared explicitly,
-            // otherwise it will show last rendered frame in preview which is not what we want.
-            self.scene_viewer
-                .set_render_target(engine.user_interfaces.first(), None);
-            // Set default title scene
-            self.scene_viewer
-                .set_title(engine.user_interfaces.first(), "Scene Preview".to_string());
+            if closing_current_scene {
+                // Preview frame has scene frame texture assigned, it must be cleared explicitly,
+                // otherwise it will show last rendered frame in preview which is not what we want.
+                self.scene_viewer
+                    .set_render_target(engine.user_interfaces.first(), None);
+                // Set default title scene
+                self.scene_viewer
+                    .set_title(engine.user_interfaces.first(), "Scene Preview".to_string());
+            }
 
             entry.before_drop(engine);
 
-            self.on_scene_changed();
+            if closing_current_scene {
+                self.on_scene_changed();
+            }
 
             true
         } else {
@@ -2049,20 +2185,25 @@ impl Editor {
 
         self.asset_browser.clear_preview(&mut self.engine);
 
-        std::env::set_current_dir(working_directory.clone()).unwrap();
-
-        // We must re-read settings, because each project have its own unique settings.
-        self.reload_settings();
-
-        self.load_layout();
+        let current_working_directory = std::env::current_dir().unwrap();
+        if current_working_directory != working_directory {
+            std::env::set_current_dir(working_directory.clone()).unwrap();
+            self.engine.resource_manager.update_or_load_registry();
+            self.reload_settings();
+            self.load_layout();
+        }
 
         let engine = &mut self.engine;
 
         let graphics_context = engine.graphics_context.as_initialized_mut();
 
-        graphics_context
-            .window
-            .set_title(&format!("Fyroxed: {}", working_directory.to_string_lossy()));
+        graphics_context.window.set_title(&format!(
+            "FyroxEd{} {}{}: {}",
+            self.user_project_name,
+            *EDITOR_VERSION,
+            self.user_project_version,
+            working_directory.to_string_lossy()
+        ));
 
         match FileSystemWatcher::new(&working_directory, Duration::from_secs(1)) {
             Ok(watcher) => {
@@ -2103,7 +2244,7 @@ impl Editor {
         processed
     }
 
-    fn handle_modes(&mut self) {
+    fn handle_modes(&mut self, dt: f32) {
         match self.mode {
             Mode::Play {
                 ref mut process,
@@ -2127,17 +2268,28 @@ impl Editor {
             Mode::Build {
                 ref mut process,
                 ref mut queue,
+                play_after_build,
             } => {
                 if process.is_none() {
                     if let Some(build_command) = queue.pop_front() {
                         Log::info(format!("Trying to run build command: {build_command}"));
 
-                        match build_command.make_command().stderr(Stdio::piped()).spawn() {
+                        match build_command
+                            .make_command()
+                            .stderr(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .spawn()
+                        {
                             Ok(mut new_process) => {
-                                self.build_window.listen(
-                                    new_process.stderr.take().unwrap(),
-                                    self.engine.user_interfaces.first(),
-                                );
+                                if let Some(build_window) = self.build_window.as_mut() {
+                                    build_window.listen(
+                                        (
+                                            new_process.stderr.take().unwrap(),
+                                            new_process.stdout.take().unwrap(),
+                                        ),
+                                        self.engine.user_interfaces.first(),
+                                    );
+                                }
 
                                 *process = Some(new_process);
                             }
@@ -2152,27 +2304,44 @@ impl Editor {
                 }
 
                 if let Some(process_ref) = process {
-                    self.build_window
-                        .update(self.engine.user_interfaces.first());
+                    if let Some(build_window) = self.build_window.as_mut() {
+                        build_window.update(self.engine.user_interfaces.first(), dt);
+                    }
 
                     match process_ref.try_wait() {
                         Ok(status) => {
                             if let Some(status) = status {
-                                // https://doc.rust-lang.org/cargo/commands/cargo-build.html#exit-status
-                                let err_code = 101;
-                                let code = status.code().unwrap_or(err_code);
-                                if code == err_code {
+                                let success_code = 0;
+                                let wtf_code = 12345;
+                                let code = status.code().unwrap_or(wtf_code);
+                                if code != success_code {
                                     Log::err("Failed to build the game!");
                                     self.mode = Mode::Edit;
                                     self.on_mode_changed();
-                                } else if queue.is_empty() {
+                                } else if queue.is_empty() && play_after_build {
                                     self.set_play_mode();
-                                    self.build_window.reset(self.engine.user_interfaces.first());
-                                    self.build_window.close(self.engine.user_interfaces.first());
                                 } else {
-                                    self.build_window.reset(self.engine.user_interfaces.first());
-                                    // Continue on next command.
-                                    *process = None;
+                                    let ui = self.engine.user_interfaces.first();
+                                    if queue.is_empty() {
+                                        if let Some(build_window) = self.build_window.take() {
+                                            build_window.destroy(ui);
+                                        }
+                                        if let Some((process, active)) =
+                                            self.running_game_process.take()
+                                        {
+                                            self.mode = Mode::Play { process, active };
+                                            self.on_mode_changed();
+                                        } else {
+                                            self.mode = Mode::Edit;
+                                            self.on_mode_changed();
+                                        }
+                                    } else {
+                                        if let Some(build_window) = self.build_window.as_mut() {
+                                            build_window.reset(ui);
+                                        }
+                                        // Continue on next command.
+                                        *process = None;
+                                    }
                                 }
                             }
                         }
@@ -2187,7 +2356,7 @@ impl Editor {
     fn update(&mut self, dt: f32) {
         for_each_plugin!(self.plugins => on_update(self));
 
-        self.handle_modes();
+        self.handle_modes(dt);
 
         let ui = self.engine.user_interfaces.first_mut();
 
@@ -2352,10 +2521,12 @@ impl Editor {
                         .world_viewer
                         .try_locate_object(handle, self.engine.user_interfaces.first()),
                     Message::SwitchMode => match self.mode {
-                        Mode::Edit => self.set_build_mode(),
+                        Mode::Edit => self.set_build_mode(true),
                         _ => self.set_editor_mode(),
                     },
-                    Message::SwitchToBuildMode => self.set_build_mode(),
+                    Message::SwitchToBuildMode { play_after_build } => {
+                        self.set_build_mode(play_after_build)
+                    }
                     Message::SwitchToEditMode => self.set_editor_mode(),
                     Message::OpenLoadSceneDialog => {
                         self.menu
@@ -2565,7 +2736,11 @@ impl Editor {
 
         let graphics_context = engine.graphics_context.as_initialized_mut();
 
-        graphics_context.set_window_icon_from_memory(include_bytes!("../resources/icon.png"));
+        graphics_context.set_window_icon_from_memory(
+            self.user_project_icon
+                .as_deref()
+                .unwrap_or(include_bytes!("../resources/icon.png")),
+        );
 
         // High-DPI screen support
         Log::info(format!(
@@ -2814,7 +2989,7 @@ fn update(editor: &mut Editor, window_target: &EventLoopWindowTarget<()>) {
 
         editor.engine.pre_update(
             FIXED_TIMESTEP,
-            window_target,
+            ApplicationLoopController::WindowTarget(window_target),
             &mut editor.game_loop_data.lag,
             switches,
         );
@@ -2873,7 +3048,7 @@ fn update(editor: &mut Editor, window_target: &EventLoopWindowTarget<()>) {
             FIXED_TIMESTEP,
             &Default::default(),
             &mut editor.game_loop_data.lag,
-            window_target,
+            ApplicationLoopController::WindowTarget(window_target),
         );
 
         if need_reload_plugins {
@@ -2887,7 +3062,7 @@ fn update(editor: &mut Editor, window_target: &EventLoopWindowTarget<()>) {
 
             editor.engine.handle_plugins_hot_reloading(
                 FIXED_TIMESTEP,
-                window_target,
+                ApplicationLoopController::WindowTarget(window_target),
                 &mut editor.game_loop_data.lag,
                 on_plugin_reloaded,
             );

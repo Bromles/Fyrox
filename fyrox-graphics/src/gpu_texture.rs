@@ -18,78 +18,136 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::error::FrameworkError;
-use bytemuck::Pod;
-use fyrox_core::color::Color;
-use std::any::Any;
+//! Texture is an image that used to fill faces to add details to them. It could also be used as a
+//! generic and mostly unlimited capacity storage for arbitrary data.
 
+#![warn(missing_docs)]
+
+use crate::{define_shared_wrapper, error::FrameworkError};
+use fyrox_core::define_as_any_trait;
+
+/// A kind of GPU texture.
 #[derive(Copy, Clone)]
 pub enum GpuTextureKind {
+    /// 1D texture.
     Line {
+        /// Length of the texture.
         length: usize,
     },
+    /// 2D texture.
     Rectangle {
+        /// Width of the texture.
         width: usize,
+        /// Height of the texture.
         height: usize,
     },
+    /// Six 2D textures forming a cube.
     Cube {
-        width: usize,
-        height: usize,
+        /// Size of the texture.
+        size: usize,
     },
+    /// Volumetric texture that consists of `depth` textures with `width x height` size.
     Volume {
+        /// Width of the texture.
         width: usize,
+        /// Height of the texture.
         height: usize,
+        /// Depth of the texture.
         depth: usize,
     },
 }
 
+/// Pixel kind of GPU texture.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum PixelKind {
+    /// Floating point 32-bit pixel.
     R32F,
+    /// Unsigned integer 32-bit pixel.
     R32UI,
+    /// Floating point 16-bit pixel.
     R16F,
+    /// Floating point 32-bit depth pixel.
     D32F,
+    /// Integer 16-bit depth pixel.
     D16,
+    /// Integer 24-bit depth pixel + 8-bit stencil.
     D24S8,
+    /// Red, Green, Blue, Alpha; all by 8-bit.
     RGBA8,
+    /// Red, Green, Blue, Alpha in sRGB color space; all by 8-bit.
     SRGBA8,
+    /// Red, Green, Blue; all by 8-bit.
     RGB8,
+    /// Red, Green, Blue in sRGB color space; all by 8-bit.
     SRGB8,
+    /// Blue, Green, Red, Alpha; all by 8-bit.
     BGRA8,
+    /// Blue, Green, Red; all by 8-bit.
     BGR8,
+    /// Red, Green; all by 8-bit.
     RG8,
+    /// Luminance, Alpha; all by 8-bit.
     LA8,
+    /// Luminance, Alpha; all by 16-bit.
     LA16,
+    /// Red, Green; all by 16-bit.
     RG16,
+    /// Red, Green; all by 16-bit floating point.
+    RG16F,
+    /// Red, Green; 16-bit.
     R8,
+    /// Luminance; 8-bit.
     L8,
+    /// Luminance; 16-bit.
     L16,
+    /// Red, unsigned integer; 8-bit.
     R8UI,
+    /// Red, signed integer; 16-bit.
     R16,
+    /// Red, Green, Blue; all by 16-bit.
     RGB16,
+    /// Red, Green, Blue, Alpha; all by 8-bit.
     RGBA16,
+    /// Compressed S3TC DXT1 RGB.
     DXT1RGB,
+    /// Compressed S3TC DXT1 RGBA.
     DXT1RGBA,
+    /// Compressed S3TC DXT3 RGBA.
     DXT3RGBA,
+    /// Compressed S3TC DXT5 RGBA.
     DXT5RGBA,
+    /// Floating-point RGB texture with 32-bit depth.
     RGB32F,
+    /// Floating-point RGBA texture with 32-bit depth.
     RGBA32F,
+    /// Floating-point RGB texture with 16-bit depth.
     RGB16F,
+    /// Floating-point RGBA texture with 16-bit depth.
     RGBA16F,
+    /// Compressed R8 texture (RGTC).
     R8RGTC,
+    /// Compressed RG8 texture (RGTC).
     RG8RGTC,
+    /// Floating-point RGB texture with 11-bit for Red and Green channels, 10-bit for Blue channel.
     R11G11B10F,
+    /// Red, Green, Blue (8-bit) + Alpha (2-bit).
     RGB10A2,
 }
 
+/// Element kind of pixel.
 pub enum PixelElementKind {
+    /// Floating-point pixel.
     Float,
+    /// Normalized unsigned integer.
     NormalizedUnsignedInteger,
+    /// Integer.
     Integer,
+    /// Unsigned integer.
     UnsignedInteger,
 }
 
 impl PixelKind {
+    #[doc(hidden)]
     pub fn unpack_alignment(self) -> Option<i32> {
         match self {
             Self::RGBA16
@@ -102,6 +160,7 @@ impl PixelKind {
             | Self::SRGBA8
             | Self::BGRA8
             | Self::RG16
+            | Self::RG16F
             | Self::LA16
             | Self::D24S8
             | Self::D32F
@@ -125,6 +184,7 @@ impl PixelKind {
         }
     }
 
+    /// Returns `true` if the pixel kind is compressed, `false` - otherwise.
     pub fn is_compressed(self) -> bool {
         match self {
             Self::DXT1RGB
@@ -146,6 +206,7 @@ impl PixelKind {
             | Self::BGRA8
             | Self::BGR8
             | Self::RG16
+            | Self::RG16F
             | Self::R16
             | Self::D24S8
             | Self::D32F
@@ -167,10 +228,12 @@ impl PixelKind {
         }
     }
 
+    /// Returns element kind of the pixel.
     pub fn element_kind(self) -> PixelElementKind {
         match self {
             Self::R32F
             | Self::R16F
+            | Self::RG16F
             | Self::RGB32F
             | Self::RGBA32F
             | Self::RGBA16F
@@ -208,9 +271,11 @@ impl PixelKind {
 }
 
 fn ceil_div_4(x: usize) -> usize {
-    (x + 3) / 4
+    x.div_ceil(4)
 }
 
+/// Calculates size in bytes of a volume texture using the given size of the texture and its pixel
+/// kind.
 pub fn image_3d_size_bytes(
     pixel_kind: PixelKind,
     width: usize,
@@ -227,6 +292,7 @@ pub fn image_3d_size_bytes(
         | PixelKind::SRGBA8
         | PixelKind::BGRA8
         | PixelKind::RG16
+        | PixelKind::RG16F
         | PixelKind::LA16
         | PixelKind::D24S8
         | PixelKind::D32F
@@ -253,6 +319,8 @@ pub fn image_3d_size_bytes(
     }
 }
 
+/// Calculates size in bytes of a rectangular texture using the given size of the texture and its pixel
+/// kind.
 pub fn image_2d_size_bytes(pixel_kind: PixelKind, width: usize, height: usize) -> usize {
     let pixel_count = width * height;
     match pixel_kind {
@@ -264,6 +332,7 @@ pub fn image_2d_size_bytes(pixel_kind: PixelKind, width: usize, height: usize) -
         | PixelKind::SRGBA8
         | PixelKind::BGRA8
         | PixelKind::RG16
+        | PixelKind::RG16F
         | PixelKind::LA16
         | PixelKind::D24S8
         | PixelKind::D32F
@@ -290,6 +359,8 @@ pub fn image_2d_size_bytes(pixel_kind: PixelKind, width: usize, height: usize) -
     }
 }
 
+/// Calculates size in bytes of a linear texture using the given size of the texture and its pixel
+/// kind.
 pub fn image_1d_size_bytes(pixel_kind: PixelKind, length: usize) -> usize {
     match pixel_kind {
         PixelKind::RGBA32F => 16 * length,
@@ -300,6 +371,7 @@ pub fn image_1d_size_bytes(pixel_kind: PixelKind, length: usize) -> usize {
         | PixelKind::SRGBA8
         | PixelKind::BGRA8
         | PixelKind::RG16
+        | PixelKind::RG16F
         | PixelKind::LA16
         | PixelKind::D24S8
         | PixelKind::D32F
@@ -326,120 +398,120 @@ pub fn image_1d_size_bytes(pixel_kind: PixelKind, length: usize) -> usize {
     }
 }
 
-#[derive(Default, Copy, Clone, PartialOrd, PartialEq, Eq, Hash, Debug)]
-#[repr(u32)]
-pub enum MagnificationFilter {
-    Nearest,
-    #[default]
-    Linear,
-}
-
-#[derive(Default, Copy, Clone, PartialOrd, PartialEq, Eq, Hash, Debug)]
-pub enum MinificationFilter {
-    Nearest,
-    NearestMipMapNearest,
-    NearestMipMapLinear,
-    #[default]
-    Linear,
-    LinearMipMapNearest,
-    LinearMipMapLinear,
-}
-
-#[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
-pub enum WrapMode {
-    #[default]
-    Repeat,
-    ClampToEdge,
-    ClampToBorder,
-    MirroredRepeat,
-    MirrorClampToEdge,
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum Coordinate {
-    S,
-    T,
-    R,
-}
-
+/// Face of a cube map.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum CubeMapFace {
+    /// +X face.
     PositiveX,
+    /// -X face.
     NegativeX,
+    /// +Y face.
     PositiveY,
+    /// -Y face.
     NegativeY,
+    /// +Z face.
     PositiveZ,
+    /// -Z face.
     NegativeZ,
 }
 
+/// Descriptor of a texture that is used to request textures from a graphics server.
 pub struct GpuTextureDescriptor<'a> {
+    /// Name of the texture. This name is used only for debug purposes.
+    pub name: &'a str,
+    /// Kind of the texture. See [`GpuTextureKind`] docs for more info.
     pub kind: GpuTextureKind,
+    /// Pixel kind of the texture. See [`PixelKind`] docs for more info.
     pub pixel_kind: PixelKind,
-    pub min_filter: MinificationFilter,
-    pub mag_filter: MagnificationFilter,
+    /// Total number of mips in the texture. Texture data must contain at least this number of
+    /// mips.
     pub mip_count: usize,
-    pub s_wrap_mode: WrapMode,
-    pub t_wrap_mode: WrapMode,
-    pub r_wrap_mode: WrapMode,
-    pub anisotropy: f32,
+    /// Optional data of the texture. If present, then the total number of bytes must match the
+    /// required number of bytes defined by the texture kind, pixel kind, mip count.
     pub data: Option<&'a [u8]>,
+    /// Specifies the index of the lowest defined mipmap level. Keep in mind, that the texture data
+    /// should provide the actual mip map level defined by the provided value, otherwise the
+    /// rendering will be incorrect (probably just black on majority of implementations) and glitchy.
+    pub base_level: usize,
+    /// Sets the index of the highest defined mipmap level. Keep in mind, that the texture data
+    /// should provide the actual mip map level defined by the provided value, otherwise the
+    /// rendering will be incorrect (probably just black on majority of implementations) and glitchy.
+    pub max_level: usize,
 }
 
-pub trait GpuTexture: Any {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn set_anisotropy(&mut self, anisotropy: f32);
-    fn anisotropy(&self) -> f32;
-    fn set_minification_filter(&mut self, min_filter: MinificationFilter);
-    fn minification_filter(&self) -> MinificationFilter;
-    fn set_magnification_filter(&mut self, mag_filter: MagnificationFilter);
-    fn magnification_filter(&self) -> MagnificationFilter;
-    fn set_wrap(&mut self, coordinate: Coordinate, wrap: WrapMode);
-    fn wrap_mode(&self, coordinate: Coordinate) -> WrapMode;
-    fn set_border_color(&mut self, color: Color);
+impl Default for GpuTextureDescriptor<'_> {
+    // WARNING: Do NOT change these default values. This will affect a lot of places in the engine
+    // and may potentially lead to weird behavior!
+    fn default() -> Self {
+        Self {
+            name: "",
+            kind: GpuTextureKind::Rectangle {
+                width: 1,
+                height: 1,
+            },
+            pixel_kind: PixelKind::RGBA8,
+            mip_count: 1,
+            data: None,
+            base_level: 0,
+            max_level: 1000,
+        }
+    }
+}
+
+define_as_any_trait!(GpuTextureAsAny => GpuTextureTrait);
+
+/// Texture is an image that used to fill faces to add details to them. It could also be used as a
+/// generic and mostly unlimited capacity storage for arbitrary data.
+///
+/// In most cases textures are just 2D images, however there are some exclusions to that - for example
+/// cube maps, that may be used for environment mapping. Fyrox supports 1D, 2D, 3D and Cube textures.
+///
+/// ## Example
+///
+/// ```rust
+/// use fyrox_graphics::{
+///     error::FrameworkError,
+///     gpu_texture::{
+///         GpuTexture, GpuTextureDescriptor, GpuTextureKind, PixelKind,
+///     },
+///     server::GraphicsServer,
+/// };
+/// use std::{cell::RefCell, rc::Rc};
+///
+/// fn create_texture(
+///     server: &dyn GraphicsServer,
+/// ) -> Result<GpuTexture, FrameworkError> {
+///     server.create_texture(GpuTextureDescriptor {
+///         kind: GpuTextureKind::Rectangle {
+///             width: 1,
+///             height: 1,
+///         },
+///         pixel_kind: PixelKind::RGBA8,
+///         mip_count: 1,
+///         // Opaque red pixel.
+///         data: Some(&[255, 0, 0, 255]),
+///         // Take the defaults for the rest of parameters.
+///         ..Default::default()
+///     })
+/// }
+/// ```
+pub trait GpuTextureTrait: GpuTextureAsAny {
+    /// Sets the new data of the texture. This method is also able to change the kind of the texture
+    /// and its pixel kind. Returns the number of bytes occupied by the texture in the video memory.
+    /// If there's no data specified, the texture will still take the space defined by its metrics.
     fn set_data(
-        &mut self,
+        &self,
         kind: GpuTextureKind,
         pixel_kind: PixelKind,
         mip_count: usize,
         data: Option<&[u8]>,
-    ) -> Result<(), FrameworkError>;
-    fn get_image(&self, level: usize) -> Vec<u8>;
-    fn read_pixels(&self) -> Vec<u8>;
+    ) -> Result<usize, FrameworkError>;
+
+    /// Returns kind of the texture.
     fn kind(&self) -> GpuTextureKind;
+
+    /// Returns pixel kind of the texture.
     fn pixel_kind(&self) -> PixelKind;
 }
 
-impl dyn GpuTexture {
-    pub fn get_image_of_type<T: Pod>(&self, level: usize) -> Vec<T> {
-        let mut bytes = self.get_image(level);
-
-        let typed = unsafe {
-            Vec::<T>::from_raw_parts(
-                bytes.as_mut_ptr() as *mut T,
-                bytes.len() / size_of::<T>(),
-                bytes.capacity() / size_of::<T>(),
-            )
-        };
-
-        std::mem::forget(bytes);
-
-        typed
-    }
-
-    pub fn read_pixels_of_type<T>(&self) -> Vec<T>
-    where
-        T: Pod,
-    {
-        let mut bytes = self.read_pixels();
-        let typed = unsafe {
-            Vec::<T>::from_raw_parts(
-                bytes.as_mut_ptr() as *mut T,
-                bytes.len() / size_of::<T>(),
-                bytes.capacity() / size_of::<T>(),
-            )
-        };
-        std::mem::forget(bytes);
-        typed
-    }
-}
+define_shared_wrapper!(GpuTexture<dyn GpuTextureTrait>);

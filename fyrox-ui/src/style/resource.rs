@@ -21,21 +21,22 @@
 //! Contains all types related to shared style resource.
 
 use crate::style::{IntoPrimitive, Style, StyleProperty, StyledProperty};
+use fyrox_core::visitor::error::VisitError;
 use fyrox_core::{
-    io::FileLoadError,
+    io::FileError,
     log::Log,
     type_traits::prelude::*,
-    visitor::{prelude::*, VisitError, Visitor},
+    visitor::{prelude::*, Visitor},
     ImmutableString, Uuid,
 };
 use fyrox_resource::{
     io::ResourceIo,
     loader::{BoxedLoaderFuture, LoaderPayload, ResourceLoader},
+    manager::ResourceManager,
     state::LoadError,
     Resource, ResourceData,
 };
 use std::{
-    any::Any,
     error::Error,
     fmt::{Display, Formatter},
     path::{Path, PathBuf},
@@ -46,7 +47,7 @@ use std::{
 #[derive(Debug)]
 pub enum StyleResourceError {
     /// An i/o error has occurred.
-    Io(FileLoadError),
+    Io(FileError),
 
     /// An error that may occur due to version incompatibilities.
     Visit(VisitError),
@@ -68,8 +69,8 @@ impl Display for StyleResourceError {
     }
 }
 
-impl From<FileLoadError> for StyleResourceError {
-    fn from(e: FileLoadError) -> Self {
+impl From<FileError> for StyleResourceError {
+    fn from(e: FileError) -> Self {
         Self::Io(e)
     }
 }
@@ -81,14 +82,6 @@ impl From<VisitError> for StyleResourceError {
 }
 
 impl ResourceData for Style {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -96,17 +89,24 @@ impl ResourceData for Style {
     fn save(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
         let mut visitor = Visitor::new();
         self.visit("Style", &mut visitor)?;
-        visitor.save_binary(path)?;
+        visitor.save_ascii_to_file(path)?;
         Ok(())
     }
 
     fn can_be_saved(&self) -> bool {
         true
     }
+
+    fn try_clone_box(&self) -> Option<Box<dyn ResourceData>> {
+        Some(Box::new(self.clone()))
+    }
 }
 
 /// A loader for style resource.
-pub struct StyleLoader;
+pub struct StyleLoader {
+    /// Resource manager handle.
+    pub resource_manager: ResourceManager,
+}
 
 impl ResourceLoader for StyleLoader {
     fn extensions(&self) -> &[&str] {
@@ -118,8 +118,9 @@ impl ResourceLoader for StyleLoader {
     }
 
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
+        let resource_manager = self.resource_manager.clone();
         Box::pin(async move {
-            let tile_set = Style::from_file(&path, io.as_ref())
+            let tile_set = Style::from_file(&path, io.as_ref(), resource_manager)
                 .await
                 .map_err(LoadError::new)?;
             Ok(LoaderPayload::new(tile_set))

@@ -39,9 +39,8 @@ use crate::fyrox::{
 };
 use crate::{
     make_color_material, scene::GameScene, set_mesh_diffuse_color,
-    world::graph::selection::GraphSelection, Engine,
+    world::selection::GraphSelection, Engine,
 };
-use fyrox::asset::untyped::ResourceKind;
 
 pub enum ScaleGizmoMode {
     None,
@@ -68,6 +67,9 @@ fn make_scale_axis(
     color: Color,
     name_prefix: &str,
 ) -> (Handle<Node>, Handle<Node>) {
+    const ARROW_LENGTH: f32 = 0.5;
+    const ARROW_THICKNESS: f32 = 0.015;
+
     let arrow;
     let axis = MeshBuilder::new(
         BaseBuilder::new()
@@ -79,13 +81,12 @@ fn make_scale_axis(
                         .with_name(name_prefix.to_owned() + "Arrow")
                         .with_local_transform(
                             TransformBuilder::new()
-                                .with_local_position(Vector3::new(0.0, 1.0, 0.0))
+                                .with_local_position(Vector3::new(0.0, ARROW_LENGTH, 0.0))
                                 .build(),
                         ),
                 )
                 .with_render_path(RenderPath::Forward)
-                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                    ResourceKind::Embedded,
+                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                     SurfaceData::make_cube(Matrix4::new_nonuniform_scaling(&Vector3::new(
                         0.1, 0.1, 0.1,
                     ))),
@@ -103,9 +104,14 @@ fn make_scale_axis(
             ),
     )
     .with_render_path(RenderPath::Forward)
-    .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-        ResourceKind::Embedded,
-        SurfaceData::make_cylinder(10, 0.015, 1.0, true, &Matrix4::identity()),
+    .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
+        SurfaceData::make_cylinder(
+            10,
+            ARROW_THICKNESS,
+            ARROW_LENGTH,
+            true,
+            &Matrix4::identity(),
+        ),
     ))
     .with_material(make_color_material(color))
     .build()])
@@ -126,8 +132,7 @@ impl ScaleGizmo {
                 .with_visibility(false),
         )
         .with_render_path(RenderPath::Forward)
-        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-            ResourceKind::Embedded,
+        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
             SurfaceData::make_cube(Matrix4::new_nonuniform_scaling(&Vector3::new(
                 0.1, 0.1, 0.1,
             ))),

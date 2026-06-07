@@ -18,9 +18,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::graph::BaseSceneGraph;
 use crate::fyrox::{
     core::{algebra::Vector2, pool::ErasedHandle, pool::Handle, visitor::Visitor},
+    graph::BaseSceneGraph,
     gui::{
         file_browser::{FileBrowserMode, FileSelectorBuilder, Filter},
         message::MessageDirection,
@@ -29,7 +29,7 @@ use crate::fyrox::{
         BuildContext, UiNode, UserInterface,
     },
 };
-use std::{fs::File, io::Read, path::Path};
+use std::{fs::File, path::Path};
 
 pub mod doc;
 
@@ -83,7 +83,7 @@ pub fn create_file_selector(
         path.is_dir()
             || path
                 .extension()
-                .map_or(false, |ext| ext.to_string_lossy().as_ref() == extension)
+                .is_some_and(|ext| ext.to_string_lossy().as_ref() == extension)
     }))
     .with_mode(mode)
     .build(ctx)
@@ -144,12 +144,10 @@ where
 
 pub fn is_native_scene(path: &Path) -> bool {
     if let Ok(mut file) = File::open(path) {
-        let mut magic: [u8; 4] = Default::default();
-        if file.read_exact(&mut magic).is_ok() {
-            return magic.eq(Visitor::MAGIC.as_bytes());
-        }
+        Visitor::is_supported(&mut file)
+    } else {
+        false
     }
-    false
 }
 
 #[cfg(test)]

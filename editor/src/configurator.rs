@@ -109,9 +109,9 @@ impl Configurator {
         // Load history.
         let mut history: Vec<HistoryEntry> = Vec::new();
         if let Ok(mut visitor) =
-            fyrox::core::futures::executor::block_on(Visitor::load_binary(HISTORY_PATH))
+            fyrox::core::futures::executor::block_on(Visitor::load_from_file(HISTORY_PATH))
         {
-            history.visit("History", &mut visitor).unwrap();
+            let _ = history.visit("History", &mut visitor);
         }
 
         // Remove entries with invalid paths.
@@ -284,7 +284,7 @@ impl Configurator {
                 // Save history for next editor runs.
                 let mut visitor = Visitor::new();
                 self.history.visit("History", &mut visitor).unwrap();
-                visitor.save_binary(HISTORY_PATH).unwrap();
+                visitor.save_binary_to_file(HISTORY_PATH).unwrap();
             }
         } else if let Some(ListViewMessage::SelectionChanged(selected_indices)) =
             message.data::<ListViewMessage>()

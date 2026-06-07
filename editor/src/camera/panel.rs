@@ -25,35 +25,40 @@ use crate::{
         graph::SceneGraph,
         gui::{
             check_box::{CheckBoxBuilder, CheckBoxMessage},
+            image::{ImageBuilder, ImageMessage},
             message::{MessageDirection, UiMessage},
             stack_panel::StackPanelBuilder,
             text::TextBuilder,
             widget::WidgetBuilder,
             window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, Orientation, UiNode, VerticalAlignment,
+            BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, VerticalAlignment,
         },
-        gui::{HorizontalAlignment, Thickness},
+        resource::texture::{TextureResource, TextureResourceExtension},
         scene::{camera::Camera, node::Node},
     },
     scene::{GameScene, Selection},
-    send_sync_message, Message,
+    send_sync_message, send_sync_messages, Message,
 };
+use fyrox::core::algebra::Vector2;
+use fyrox::gui::widget::WidgetMessage;
+use fyrox::scene::collider::BitMask;
 
 pub struct CameraPreviewControlPanel {
     pub window: Handle<UiNode>,
     preview: Handle<UiNode>,
-    cameras_state: Vec<(Handle<Node>, Node)>,
+    camera_state: Option<(Handle<Node>, Node)>,
     scene_viewer_frame: Handle<UiNode>,
+    preview_frame: Handle<UiNode>,
 }
 
 impl CameraPreviewControlPanel {
     pub fn new(scene_viewer_frame: Handle<UiNode>, ctx: &mut BuildContext) -> Self {
         let preview;
+        let preview_frame;
         let window = WindowBuilder::new(
             WidgetBuilder::new()
-                .with_width(200.0)
-                .with_height(50.0)
-                .with_name("CameraPanel"),
+                .with_name("CameraPanel")
+                .with_min_size(Vector2::new(180.0, 45.0)),
         )
         .with_title(WindowTitle::text("Camera Preview"))
         .with_content(
@@ -72,6 +77,14 @@ impl CameraPreviewControlPanel {
                             )
                             .build(ctx);
                         preview
+                    })
+                    .with_child({
+                        preview_frame = ImageBuilder::new(
+                            WidgetBuilder::new().with_width(200.0).with_height(200.0),
+                        )
+                        .with_flip(true)
+                        .build(ctx);
+                        preview_frame
                     }),
             )
             .with_orientation(Orientation::Vertical)
@@ -82,9 +95,10 @@ impl CameraPreviewControlPanel {
 
         Self {
             window,
-            cameras_state: Default::default(),
+            camera_state: Default::default(),
             preview,
             scene_viewer_frame,
+            preview_frame,
         }
     }
 
@@ -142,21 +156,44 @@ impl CameraPreviewControlPanel {
         game_scene: &mut GameScene,
         engine: &mut Engine,
     ) {
-        assert!(self.cameras_state.is_empty());
+        assert!(self.camera_state.is_none());
 
-        let scene = &engine.scenes[game_scene.scene];
+        let scene = &mut engine.scenes[game_scene.scene];
         let node_overrides = game_scene.graph_switches.node_overrides.as_mut().unwrap();
 
         if let Some(new_graph_selection) = editor_selection.as_graph() {
-            // Enable cameras from new selection.
+            // Enable the first camera from the new selection.
             for &node_handle in &new_graph_selection.nodes {
-                if scene.graph.try_get_of_type::<Camera>(node_handle).is_some() {
-                    self.cameras_state
-                        .push((node_handle, scene.graph[node_handle].clone_box()));
-
+                if let Some(camera) = scene.graph.try_get_mut_of_type::<Camera>(node_handle) {
                     assert!(node_overrides.insert(node_handle));
 
+                    let rt = Some(TextureResource::new_render_target(200, 200));
+                    send_sync_message(
+                        engine.user_interfaces.first(),
+                        ImageMessage::texture(
+                            self.preview_frame,
+                            MessageDirection::ToWidget,
+                            rt.clone(),
+                        ),
+                    );
+                    camera.set_render_target(rt);
+                    camera
+                        .render_mask
+                        .set_value_and_mark_modified(BitMask(!GameScene::EDITOR_OBJECTS_MASK.0));
+
                     game_scene.preview_camera = node_handle;
+
+                    send_sync_message(
+                        engine.user_interfaces.first(),
+                        WidgetMessage::visibility(
+                            self.preview_frame,
+                            MessageDirection::ToWidget,
+                            true,
+                        ),
+                    );
+
+                    self.camera_state = Some((node_handle, scene.graph[node_handle].clone_box()));
+                    break;
                 }
             }
         }
@@ -166,7 +203,7 @@ impl CameraPreviewControlPanel {
         let scene = &mut engine.scenes[game_scene.scene];
         let node_overrides = game_scene.graph_switches.node_overrides.as_mut().unwrap();
 
-        for (camera_handle, original) in self.cameras_state.drain(..) {
+        if let Some((camera_handle, original)) = self.camera_state.take() {
             scene.graph[camera_handle] = original;
 
             assert!(node_overrides.remove(&camera_handle));
@@ -174,14 +211,20 @@ impl CameraPreviewControlPanel {
 
         game_scene.preview_camera = Handle::NONE;
 
-        send_sync_message(
-            engine.user_interfaces.first(),
-            CheckBoxMessage::checked(self.preview, MessageDirection::ToWidget, Some(false)),
+        let ui = engine.user_interfaces.first();
+        send_sync_messages(
+            ui,
+            [
+                // Don't keep the render target alive after the preview mode is off.
+                ImageMessage::texture(self.preview_frame, MessageDirection::ToWidget, None),
+                CheckBoxMessage::checked(self.preview, MessageDirection::ToWidget, Some(false)),
+                WidgetMessage::visibility(self.preview_frame, MessageDirection::ToWidget, false),
+            ],
         );
     }
 
     pub fn is_in_preview_mode(&self) -> bool {
-        !self.cameras_state.is_empty()
+        self.camera_state.is_some()
     }
 
     pub fn handle_ui_message(

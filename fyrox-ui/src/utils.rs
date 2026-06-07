@@ -18,22 +18,25 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::button::ButtonBuilder;
-use crate::decorator::DecoratorBuilder;
-use crate::image::ImageBuilder;
-use crate::style::resource::StyleResourceExt;
-use crate::style::Style;
 use crate::{
     border::BorderBuilder,
-    core::{algebra::Vector2, color::Color, pool::Handle},
+    button::ButtonBuilder,
+    core::{algebra::Vector2, color::Color, parking_lot::Mutex, pool::Handle},
+    decorator::DecoratorBuilder,
     formatted_text::WrapMode,
+    grid::{Column, GridBuilder, Row},
+    image::ImageBuilder,
+    style::{resource::StyleResourceExt, Style},
     text::TextBuilder,
     vector_image::{Primitive, VectorImageBuilder},
     widget::WidgetBuilder,
     Brush, BuildContext, HorizontalAlignment, RcUiNodeHandle, Thickness, UiNode, VerticalAlignment,
 };
-use fyrox_core::parking_lot::Mutex;
-use fyrox_resource::untyped::UntypedResource;
+use fyrox_core::Uuid;
+use fyrox_texture::{
+    CompressionOptions, TextureImportOptions, TextureMinificationFilter, TextureResource,
+    TextureResourceExtension,
+};
 use std::sync::Arc;
 
 pub enum ArrowDirection {
@@ -149,7 +152,7 @@ pub fn make_simple_tooltip(ctx: &mut BuildContext, text: &str) -> RcUiNodeHandle
             .with_hit_test_visibility(false)
             .with_foreground(ctx.style.property(Style::BRUSH_DARKEST))
             .with_background(Brush::Solid(Color::opaque(230, 230, 230)).into())
-            .with_max_size(Vector2::new(300.0, f32::INFINITY))
+            .with_width(300.0)
             .with_child(
                 TextBuilder::new(
                     WidgetBuilder::new()
@@ -232,7 +235,7 @@ pub fn make_image_button_with_tooltip(
     ctx: &mut BuildContext,
     width: f32,
     height: f32,
-    image: Option<UntypedResource>,
+    image: Option<TextureResource>,
     tooltip: &str,
     tab_index: Option<usize>,
 ) -> Handle<UiNode> {
@@ -254,4 +257,87 @@ pub fn make_image_button_with_tooltip(
         .build(ctx),
     )
     .build(ctx)
+}
+
+pub fn make_text_and_image_button_with_tooltip(
+    ctx: &mut BuildContext,
+    text: &str,
+    image_width: f32,
+    image_height: f32,
+    image: Option<TextureResource>,
+    tooltip: &str,
+    row: usize,
+    column: usize,
+    tab_index: Option<usize>,
+    color: Color,
+    font_size: f32,
+) -> Handle<UiNode> {
+    let margin = 2.0;
+    ButtonBuilder::new(
+        WidgetBuilder::new()
+            .on_row(row)
+            .on_column(column)
+            .with_tab_index(tab_index)
+            .with_tooltip(make_simple_tooltip(ctx, tooltip))
+            .with_margin(Thickness::uniform(1.0)),
+    )
+    .with_content(
+        GridBuilder::new(
+            WidgetBuilder::new()
+                .with_child(
+                    ImageBuilder::new(
+                        WidgetBuilder::new()
+                            .on_row(0)
+                            .on_column(0)
+                            .with_background(Brush::Solid(color).into())
+                            .with_margin(Thickness {
+                                left: 2.0 * margin,
+                                top: margin,
+                                right: margin,
+                                bottom: margin,
+                            })
+                            .with_width(image_width - 2.0 * margin)
+                            .with_height(image_height - 2.0 * margin),
+                    )
+                    .with_opt_texture(image)
+                    .build(ctx),
+                )
+                .with_child(
+                    TextBuilder::new(
+                        WidgetBuilder::new()
+                            .on_row(0)
+                            .on_column(1)
+                            .with_vertical_alignment(VerticalAlignment::Center)
+                            .with_horizontal_alignment(HorizontalAlignment::Center)
+                            .with_margin(Thickness {
+                                left: 4.0,
+                                top: margin,
+                                right: 8.0,
+                                bottom: margin,
+                            }),
+                    )
+                    .with_font_size(font_size.into())
+                    .with_text(text)
+                    .build(ctx),
+                ),
+        )
+        .add_column(Column::auto())
+        .add_column(Column::stretch())
+        .add_row(Row::stretch())
+        .build(ctx),
+    )
+    .build(ctx)
+}
+
+pub fn load_image(data: &[u8]) -> Option<TextureResource> {
+    TextureResource::load_from_memory(
+        Uuid::new_v4(),
+        Default::default(),
+        data,
+        TextureImportOptions::default()
+            .with_compression(CompressionOptions::NoCompression)
+            .with_minification_filter(TextureMinificationFilter::LinearMipMapLinear)
+            .with_lod_bias(-1.0),
+    )
+    .ok()
 }

@@ -22,44 +22,43 @@
 
 #![allow(missing_docs)] // TODO
 
+use crate::renderer::resources::RendererResources;
 use crate::{
-    asset::untyped::ResourceKind,
     core::{
-        algebra::{Matrix4, Vector3, Vector4},
+        algebra::{Matrix4, Point3, Vector2, Vector3, Vector4},
         arrayvec::ArrayVec,
-        color,
-        color::Color,
+        color::{self, Color},
+        err_once,
         log::Log,
-        math::{frustum::Frustum, Rect},
+        math::{frustum::Frustum, Matrix4Ext, Rect},
         pool::Handle,
         sstorage::ImmutableString,
     },
     graph::BaseSceneGraph,
-    material::{
-        self, shader::ShaderDefinition, MaterialProperty, MaterialPropertyGroup, MaterialResource,
-    },
+    material::{self, shader::ShaderDefinition, Material, MaterialPropertyRef, MaterialResource},
     renderer::{
         cache::{
             geometry::GeometryCache,
             shader::ShaderCache,
             texture::TextureCache,
             uniform::{UniformBlockLocation, UniformMemoryAllocator},
-            TimeToLive,
+            DynamicSurfaceCache, TimeToLive,
         },
         framework::{
             error::FrameworkError,
-            framebuffer::{BufferLocation, FrameBuffer, ResourceBindGroup, ResourceBinding},
+            framebuffer::{GpuFrameBuffer, ResourceBindGroup, ResourceBinding},
             gpu_program::{ShaderProperty, ShaderPropertyKind, ShaderResourceKind},
             gpu_texture::GpuTexture,
             server::GraphicsServer,
-            uniform::StaticUniformBuffer,
-            uniform::{ByteStorage, UniformBuffer},
+            uniform::{ByteStorage, StaticUniformBuffer, UniformBuffer},
             ElementRange,
         },
-        FallbackResources, LightData, RenderPassStatistics,
+        observer::ObserverPosition,
+        RenderPassStatistics,
     },
     resource::texture::TextureResource,
     scene::{
+        collider::BitMask,
         graph::Graph,
         light::{
             directional::{CsmOptions, DirectionalLight},
@@ -68,46 +67,34 @@ use crate::{
             BaseLight,
         },
         mesh::{
-            buffer::{
-                BytesStorage, TriangleBuffer, TriangleBufferRefMut, VertexAttributeDescriptor,
-                VertexBuffer, VertexBufferRefMut,
-            },
-            surface::{SurfaceData, SurfaceResource},
+            buffer::{TriangleBufferRefMut, VertexAttributeDescriptor, VertexBufferRefMut},
+            surface::SurfaceResource,
             RenderPath,
         },
-        node::{Node, RdcControlFlow},
+        node::{Node, NodeTrait, RdcControlFlow},
+        probe::ReflectionProbe,
     },
 };
 use fxhash::{FxBuildHasher, FxHashMap, FxHasher};
-use fyrox_core::math::Matrix4Ext;
 use fyrox_graph::{SceneGraph, SceneGraphNode};
+use fyrox_graphics::gpu_program::{SamplerFallback, ShaderResourceDefinition};
+use fyrox_resource::manager::ResourceManager;
 use std::{
-    cell::RefCell,
     fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
-    rc::Rc,
 };
-
-/// Observer info contains all the data, that describes an observer. It could be a real camera, light source's
-/// "virtual camera" that is used for shadow mapping, etc.
-#[derive(Clone, Default)]
-pub struct ObserverInfo {
-    /// World-space position of the observer.
-    pub observer_position: Vector3<f32>,
-    /// Location of the near clipping plane.
-    pub z_near: f32,
-    /// Location of the far clipping plane.
-    pub z_far: f32,
-    /// View matrix of the observer.
-    pub view_matrix: Matrix4<f32>,
-    /// Projection matrix of the observer.
-    pub projection_matrix: Matrix4<f32>,
-}
 
 /// Render context is used to collect render data from the scene nodes. It provides all required information about
 /// the observer (camera, light source virtual camera, etc.), that could be used for culling.
 pub struct RenderContext<'a> {
-    pub observer_info: &'a ObserverInfo,
+    /// Mask that controls whether a node should be rendered. Only nodes that share at least
+    /// one set bit in their `render_mask` should be rendered.
+    pub render_mask: BitMask,
+    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// this value is **not** guaranteed to match real time. A user can change delta time with
+    /// which the engine "ticks" and this delta time affects elapsed time.
+    pub elapsed_time: f32,
+    pub observer_position: &'a ObserverPosition,
     /// Frustum of the observer, it is built using observer's view and projection matrix. Use the frustum to do
     /// frustum culling.
     pub frustum: Option<&'a Frustum>,
@@ -119,6 +106,7 @@ pub struct RenderContext<'a> {
     pub graph: &'a Graph,
     /// A name of the render pass for which the context was created for.
     pub render_pass_name: &'a ImmutableString,
+    pub dynamic_surface_cache: &'a mut DynamicSurfaceCache,
 }
 
 impl RenderContext<'_> {
@@ -126,14 +114,14 @@ impl RenderContext<'_> {
     /// using Z coordinate. This index could be used for back-to-front sorting to prevent blending
     /// issues.
     pub fn calculate_sorting_index(&self, global_position: Vector3<f32>) -> u64 {
-        let granularity = 1000.0;
-        u64::MAX
-            - (self
-                .observer_info
-                .view_matrix
-                .transform_point(&(global_position.into()))
-                .z
-                * granularity) as u64
+        const RANGE_CENTER: u64 = u64::MAX / 2;
+        const GRANULARITY: f32 = 1000.0;
+
+        let view_matrix = &self.observer_position.view_matrix;
+        let world_space_point = Point3::from(global_position);
+        let view_space_point = view_matrix.transform_point(&world_space_point);
+
+        RANGE_CENTER.saturating_add_signed((view_space_point.z * GRANULARITY) as i64)
     }
 }
 
@@ -141,9 +129,10 @@ impl RenderContext<'_> {
 pub struct BundleRenderContext<'a> {
     pub texture_cache: &'a mut TextureCache,
     pub render_pass_name: &'a ImmutableString,
-    pub frame_buffer: &'a mut dyn FrameBuffer,
+    pub frame_buffer: &'a GpuFrameBuffer,
     pub viewport: Rect<i32>,
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
+    pub resource_manager: &'a ResourceManager,
 
     // Built-in uniforms.
     pub use_pom: bool,
@@ -151,8 +140,8 @@ pub struct BundleRenderContext<'a> {
     pub ambient_light: Color,
     // TODO: Add depth pre-pass to remove Option here. Current architecture allows only forward
     // renderer to have access to depth buffer that is available from G-Buffer.
-    pub scene_depth: Option<&'a Rc<RefCell<dyn GpuTexture>>>,
-    pub fallback_resources: &'a FallbackResources,
+    pub scene_depth: Option<&'a GpuTexture>,
+    pub renderer_resources: &'a RendererResources,
 }
 
 /// A set of data of a surface for rendering.
@@ -168,6 +157,18 @@ pub struct SurfaceInstanceData {
     pub element_range: ElementRange,
     /// A handle of a node that emitted this surface data. Could be none, if there's no info about scene node.
     pub node_handle: Handle<Node>,
+}
+
+impl Default for SurfaceInstanceData {
+    fn default() -> Self {
+        Self {
+            world_transform: Matrix4::identity(),
+            bone_matrices: Default::default(),
+            blend_shapes_weights: Default::default(),
+            element_range: Default::default(),
+            node_handle: Default::default(),
+        }
+    }
 }
 
 /// A set of surface instances that share the same vertex/index data and a material.
@@ -226,20 +227,24 @@ pub struct GlobalUniformData {
     pub graphics_settings_block: UniformBlockLocation,
 }
 
-fn write_with_material<T: ByteStorage>(
+pub fn write_with_material<T, C, G>(
     shader_property_group: &[ShaderProperty],
-    material_property_group: &MaterialPropertyGroup,
+    material_property_group: &C,
+    getter: G,
     buf: &mut UniformBuffer<T>,
-) {
+) where
+    T: ByteStorage,
+    G: for<'a> Fn(&'a C, &ImmutableString) -> Option<MaterialPropertyRef<'a>>,
+{
     // The order of fields is strictly defined in shader, so we must iterate over shader definition
     // of a structure and look for respective values in the material.
     for shader_property in shader_property_group {
-        let material_property = material_property_group.property_ref(shader_property.name.clone());
+        let material_property = getter(material_property_group, &shader_property.name);
 
         macro_rules! push_value {
             ($variant:ident, $shader_value:ident) => {
                 if let Some(property) = material_property {
-                    if let MaterialProperty::$variant(material_value) = property {
+                    if let MaterialPropertyRef::$variant(material_value) = property {
                         buf.push(material_value);
                     } else {
                         buf.push($shader_value);
@@ -258,7 +263,7 @@ fn write_with_material<T: ByteStorage>(
         macro_rules! push_slice {
             ($variant:ident, $shader_value:ident, $max_size:ident) => {
                 if let Some(property) = material_property {
-                    if let MaterialProperty::$variant(material_value) = property {
+                    if let MaterialPropertyRef::$variant(material_value) = property {
                         buf.push_slice_with_max_size(material_value, *$max_size);
                     } else {
                         buf.push_slice_with_max_size($shader_value, *$max_size);
@@ -276,25 +281,25 @@ fn write_with_material<T: ByteStorage>(
 
         use ShaderPropertyKind::*;
         match &shader_property.kind {
-            Float(value) => push_value!(Float, value),
+            Float { value } => push_value!(Float, value),
             FloatArray { value, max_len } => push_slice!(FloatArray, value, max_len),
-            Int(value) => push_value!(Int, value),
+            Int { value } => push_value!(Int, value),
             IntArray { value, max_len } => push_slice!(IntArray, value, max_len),
-            UInt(value) => push_value!(UInt, value),
+            UInt { value } => push_value!(UInt, value),
             UIntArray { value, max_len } => push_slice!(UIntArray, value, max_len),
-            Vector2(value) => push_value!(Vector2, value),
+            Vector2 { value } => push_value!(Vector2, value),
             Vector2Array { value, max_len } => push_slice!(Vector2Array, value, max_len),
-            Vector3(value) => push_value!(Vector3, value),
+            Vector3 { value } => push_value!(Vector3, value),
             Vector3Array { value, max_len } => push_slice!(Vector3Array, value, max_len),
-            Vector4(value) => push_value!(Vector4, value),
+            Vector4 { value: default } => push_value!(Vector4, default),
             Vector4Array { value, max_len } => push_slice!(Vector4Array, value, max_len),
-            Matrix2(value) => push_value!(Matrix2, value),
+            Matrix2 { value: default } => push_value!(Matrix2, default),
             Matrix2Array { value, max_len } => push_slice!(Matrix2Array, value, max_len),
-            Matrix3(value) => push_value!(Matrix3, value),
+            Matrix3 { value: default } => push_value!(Matrix3, default),
             Matrix3Array { value, max_len } => push_slice!(Matrix3Array, value, max_len),
-            Matrix4(value) => push_value!(Matrix4, value),
+            Matrix4 { value: default } => push_value!(Matrix4, default),
             Matrix4Array { value, max_len } => push_slice!(Matrix4Array, value, max_len),
-            Bool(value) => push_value!(Bool, value),
+            Bool { value } => push_value!(Bool, value),
             Color { r, g, b, a } => {
                 let value = &color::Color::from_rgba(*r, *g, *b, *a);
                 push_value!(Color, value)
@@ -303,35 +308,79 @@ fn write_with_material<T: ByteStorage>(
     }
 }
 
-fn write_shader_values<T: ByteStorage>(
+pub fn write_shader_values<T: ByteStorage>(
     shader_property_group: &[ShaderProperty],
     buf: &mut UniformBuffer<T>,
 ) {
     for property in shader_property_group {
         use ShaderPropertyKind::*;
         match &property.kind {
-            Float(value) => buf.push(value),
+            Float { value } => buf.push(value),
             FloatArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Int(value) => buf.push(value),
+            Int { value } => buf.push(value),
             IntArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            UInt(value) => buf.push(value),
+            UInt { value } => buf.push(value),
             UIntArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Vector2(value) => buf.push(value),
+            Vector2 { value } => buf.push(value),
             Vector2Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Vector3(value) => buf.push(value),
+            Vector3 { value } => buf.push(value),
             Vector3Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Vector4(value) => buf.push(value),
+            Vector4 { value: default } => buf.push(default),
             Vector4Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Matrix2(value) => buf.push(value),
+            Matrix2 { value: default } => buf.push(default),
             Matrix2Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Matrix3(value) => buf.push(value),
+            Matrix3 { value: default } => buf.push(default),
             Matrix3Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Matrix4(value) => buf.push(value),
+            Matrix4 { value: default } => buf.push(default),
             Matrix4Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Bool(value) => buf.push(value),
+            Bool { value } => buf.push(value),
             Color { r, g, b, a } => buf.push(&color::Color::from_rgba(*r, *g, *b, *a)),
         };
     }
+}
+
+pub fn make_texture_binding(
+    server: &dyn GraphicsServer,
+    material: &Material,
+    resource_definition: &ShaderResourceDefinition,
+    renderer_resources: &RendererResources,
+    fallback: SamplerFallback,
+    resource_manager: &ResourceManager,
+    texture_cache: &mut TextureCache,
+) -> ResourceBinding {
+    let fallback = renderer_resources.sampler_fallback(fallback);
+    let fallback = (fallback, &renderer_resources.linear_wrap_sampler);
+
+    let texture_sampler_pair =
+        if let Some(binding) = material.binding_ref(resource_definition.name.clone()) {
+            if let material::MaterialResourceBinding::Texture(binding) = binding {
+                binding
+                    .value
+                    .as_ref()
+                    .and_then(|t| {
+                        texture_cache
+                            .get(server, resource_manager, t)
+                            .map(|t| (&t.gpu_texture, &t.gpu_sampler))
+                    })
+                    .unwrap_or(fallback)
+            } else {
+                Log::err(format!(
+                    "Unable to use texture binding {}, types mismatch! Expected \
+                                {:?} got {:?}",
+                    resource_definition.name, resource_definition.kind, binding
+                ));
+
+                fallback
+            }
+        } else {
+            fallback
+        };
+
+    ResourceBinding::texture(
+        texture_sampler_pair.0,
+        texture_sampler_pair.1,
+        resource_definition.binding,
+    )
 }
 
 impl RenderDataBundle {
@@ -342,12 +391,12 @@ impl RenderDataBundle {
         render_context: &mut BundleRenderContext,
     ) -> Option<BundleUniformData> {
         let mut material_state = self.material.state();
-
         let material = material_state.data()?;
 
         // Upload material property groups.
         let mut material_property_group_blocks = Vec::new();
-        let shader = material.shader().data_ref();
+        let shader_state = material.shader().state();
+        let shader = shader_state.data_ref()?;
         for resource_definition in shader.definition.resources.iter() {
             // Ignore built-in groups.
             if resource_definition.is_built_in() {
@@ -365,7 +414,12 @@ impl RenderDataBundle {
             if let Some(material_property_group) =
                 material.property_group_ref(resource_definition.name.clone())
             {
-                write_with_material(shader_property_group, material_property_group, &mut buf);
+                write_with_material(
+                    shader_property_group,
+                    material_property_group,
+                    |c, n| c.property_ref(n.clone()).map(|p| p.as_ref()),
+                    &mut buf,
+                );
             } else {
                 // No respective resource bound in the material, use shader defaults. This is very
                 // important, because some drivers will crash if uniform buffer has insufficient
@@ -387,13 +441,22 @@ impl RenderDataBundle {
         // Upload instance uniforms.
         let mut instance_blocks = Vec::with_capacity(self.instances.len());
         for instance in self.instances.iter() {
+            let mut packed_blend_shape_weights =
+                [Vector4::<f32>::default(); ShaderDefinition::MAX_BLEND_SHAPE_WEIGHT_GROUPS];
+
+            for (i, blend_shape_weight) in instance.blend_shapes_weights.iter().enumerate() {
+                let n = i / 4;
+                let c = i % 4;
+                packed_blend_shape_weights[n][c] = *blend_shape_weight;
+            }
+
             let instance_buffer = StaticUniformBuffer::<1024>::new()
                 .with(&instance.world_transform)
                 .with(&(view_projection_matrix * instance.world_transform))
                 .with(&(instance.blend_shapes_weights.len() as i32))
                 .with(&(!instance.bone_matrices.is_empty()))
                 .with_slice_with_max_size(
-                    &instance.blend_shapes_weights,
+                    &packed_blend_shape_weights,
                     ShaderDefinition::MAX_BLEND_SHAPE_WEIGHT_GROUPS,
                 );
 
@@ -414,7 +477,7 @@ impl RenderDataBundle {
 
                 let bone_matrices_block = render_context
                     .uniform_memory_allocator
-                    .allocate(StaticUniformBuffer::<SIZE>::new().with_slice(&matrices));
+                    .allocate(StaticUniformBuffer::<SIZE>::new().with(&matrices));
                 instance_uniform_data.bone_matrices_block = Some(bone_matrices_block);
             }
 
@@ -447,38 +510,76 @@ impl RenderDataBundle {
         let mut material_state = self.material.state();
 
         let Some(material) = material_state.data() else {
+            err_once!(
+                self.data.key() as usize,
+                "Unable to use material {}, because it is in invalid state \
+                (failed to load or still loading)!",
+                material_state.kind()
+            );
             return Ok(stats);
         };
 
-        let Some(geometry) = geometry_cache.get(server, &self.data, self.time_to_live) else {
+        let geometry = match geometry_cache.get(server, &self.data, self.time_to_live) {
+            Ok(geometry) => geometry,
+            Err(err) => {
+                err_once!(
+                    self.data.key() as usize,
+                    "Unable to get geometry for rendering! Reason: {err:?}"
+                );
+                return Ok(stats);
+            }
+        };
+
+        let Some(shader_set) = shader_cache.get(server, material.shader()) else {
+            err_once!(
+                self.data.key() as usize,
+                "Unable to get a compiled shader set for material {:?}!",
+                material.shader().resource_uuid()
+            );
             return Ok(stats);
         };
 
-        let Some(render_pass) =
-            shader_cache
-                .get(server, material.shader())
-                .and_then(|shader_set| {
-                    shader_set
-                        .render_passes
-                        .get(render_context.render_pass_name)
-                })
+        let Some(render_pass) = shader_set
+            .render_passes
+            .get(render_context.render_pass_name)
         else {
+            let shader_state = material.shader().state();
+            if let Some(shader_data) = shader_state.data_ref() {
+                if !shader_data
+                    .definition
+                    .disabled_passes
+                    .iter()
+                    .any(|pass_name| pass_name.as_str() == render_context.render_pass_name.as_str())
+                {
+                    err_once!(
+                        self.data.key() as usize,
+                        "There's no render pass {} in {} shader! \
+                        If it is not needed, add it to disabled passes.",
+                        render_context.render_pass_name,
+                        shader_state.kind()
+                    );
+                }
+            }
             return Ok(stats);
         };
 
         let mut material_bindings = ArrayVec::<ResourceBinding, 32>::new();
-        let shader = material.shader().data_ref();
+        let shader_state = material.shader().state();
+        let shader = shader_state
+            .data_ref()
+            .ok_or_else(|| FrameworkError::Custom("Invalid shader!".to_string()))?;
         for resource_definition in shader.definition.resources.iter() {
             let name = resource_definition.name.as_str();
 
             match name {
                 "fyrox_sceneDepth" => {
-                    material_bindings.push(ResourceBinding::texture_with_binding(
+                    material_bindings.push(ResourceBinding::texture(
                         if let Some(scene_depth) = render_context.scene_depth.as_ref() {
                             scene_depth
                         } else {
-                            &render_context.fallback_resources.black_dummy
+                            &render_context.renderer_resources.black_dummy
                         },
+                        &render_context.renderer_resources.nearest_clamp_sampler,
                         resource_definition.binding,
                     ));
                 }
@@ -516,33 +617,14 @@ impl RenderDataBundle {
                 }
                 _ => match resource_definition.kind {
                     ShaderResourceKind::Texture { fallback, .. } => {
-                        let fallback = render_context.fallback_resources.sampler_fallback(fallback);
-
-                        let texture = if let Some(binding) =
-                            material.binding_ref(resource_definition.name.clone())
-                        {
-                            if let material::MaterialResourceBinding::Texture(binding) = binding {
-                                binding
-                                    .value
-                                    .as_ref()
-                                    .and_then(|t| render_context.texture_cache.get(server, t))
-                                    .unwrap_or(fallback)
-                            } else {
-                                Log::err(format!(
-                                    "Unable to use texture binding {}, types mismatch! Expected \
-                                {:?} got {:?}",
-                                    resource_definition.name, resource_definition.kind, binding
-                                ));
-
-                                fallback
-                            }
-                        } else {
-                            fallback
-                        };
-
-                        material_bindings.push(ResourceBinding::texture_with_binding(
-                            texture,
-                            resource_definition.binding,
+                        material_bindings.push(make_texture_binding(
+                            server,
+                            material,
+                            resource_definition,
+                            render_context.renderer_resources,
+                            fallback,
+                            render_context.resource_manager,
+                            render_context.texture_cache,
                         ));
                     }
                     ShaderResourceKind::PropertyGroup(_) => {
@@ -597,12 +679,11 @@ impl RenderDataBundle {
                                 // Bind stub buffer, instead of creating and uploading 16kb with zeros per draw
                                 // call.
                                 instance_bindings.push(ResourceBinding::Buffer {
-                                    buffer: &*render_context
-                                        .fallback_resources
-                                        .bone_matrices_stub_uniform_buffer,
-                                    binding: BufferLocation::Explicit {
-                                        binding: resource_definition.binding,
-                                    },
+                                    buffer: render_context
+                                        .renderer_resources
+                                        .bone_matrices_stub_uniform_buffer
+                                        .clone(),
+                                    binding: resource_definition.binding,
                                     data_usage: Default::default(),
                                 });
                             }
@@ -615,7 +696,7 @@ impl RenderDataBundle {
             stats += render_context.frame_buffer.draw(
                 geometry,
                 render_context.viewport,
-                &*render_pass.program,
+                &render_pass.program,
                 &render_pass.draw_params,
                 &[
                     ResourceBindGroup {
@@ -657,6 +738,7 @@ pub trait RenderDataBundleStorageTrait {
     /// pre-processing them on CPU could take more time than rendering them directly on GPU one-by-one.
     fn push_triangles(
         &mut self,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
         layout: &[VertexAttributeDescriptor],
         material: &MaterialResource,
         render_path: RenderPath,
@@ -697,6 +779,27 @@ pub enum LightSourceKind {
     Unknown,
 }
 
+#[allow(missing_docs)] // TODO
+pub struct LightData<const N: usize = 16> {
+    pub count: usize,
+    pub color_radius: [Vector4<f32>; N],
+    pub position: [Vector3<f32>; N],
+    pub direction: [Vector3<f32>; N],
+    pub parameters: [Vector2<f32>; N],
+}
+
+impl<const N: usize> Default for LightData<N> {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            color_radius: [Default::default(); N],
+            position: [Default::default(); N],
+            direction: [Default::default(); N],
+            parameters: [Default::default(); N],
+        }
+    }
+}
+
 pub struct LightSource {
     pub handle: Handle<Node>,
     pub global_transform: Matrix4<f32>,
@@ -717,10 +820,12 @@ pub struct LightSource {
 /// rendering by reducing amount of state changes of OpenGL context.
 pub struct RenderDataBundleStorage {
     bundle_map: FxHashMap<u64, usize>,
-    pub observer_info: ObserverInfo,
+    /// Position of an observer for which this data bundle was created.
+    pub observer_position: ObserverPosition,
     /// A sorted list of bundles.
     pub bundles: Vec<RenderDataBundle>,
     pub light_sources: Vec<LightSource>,
+    pub environment_map: Option<TextureResource>,
 }
 
 pub struct RenderDataBundleStorageOptions {
@@ -736,12 +841,13 @@ impl Default for RenderDataBundleStorageOptions {
 }
 
 impl RenderDataBundleStorage {
-    pub fn new_empty(observer_info: ObserverInfo) -> Self {
+    pub fn new_empty(observer_position: ObserverPosition) -> Self {
         Self {
             bundle_map: Default::default(),
-            observer_info,
+            observer_position,
             bundles: Default::default(),
             light_sources: Default::default(),
+            environment_map: None,
         }
     }
 
@@ -750,21 +856,25 @@ impl RenderDataBundleStorage {
     /// Frustum culling is done on scene node side ([`crate::scene::node::NodeTrait::collect_render_data`]).
     pub fn from_graph(
         graph: &Graph,
-        observer_info: ObserverInfo,
+        render_mask: BitMask,
+        elapsed_time: f32,
+        observer_position: &ObserverPosition,
         render_pass_name: ImmutableString,
         options: RenderDataBundleStorageOptions,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
     ) -> Self {
         // Aim for the worst-case scenario when every node has unique render data.
         let capacity = graph.node_count() as usize;
         let mut storage = Self {
             bundle_map: FxHashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
-            observer_info: observer_info.clone(),
+            observer_position: observer_position.clone(),
             bundles: Vec::with_capacity(capacity),
             light_sources: Default::default(),
+            environment_map: None,
         };
 
         let frustum = Frustum::from_view_projection_matrix(
-            observer_info.projection_matrix * observer_info.view_matrix,
+            observer_position.projection_matrix * observer_position.view_matrix,
         )
         .unwrap_or_default();
 
@@ -774,16 +884,26 @@ impl RenderDataBundleStorage {
                 for level in lod_group.levels.iter() {
                     for &object in level.objects.iter() {
                         if let Some(object_ref) = graph.try_get(object) {
-                            let distance = observer_info
-                                .observer_position
+                            let distance = observer_position
+                                .translation
                                 .metric_distance(&object_ref.global_position());
-                            let z_range = observer_info.z_far - observer_info.z_near;
-                            let normalized_distance = (distance - observer_info.z_near) / z_range;
+                            let z_range = observer_position.z_far - observer_position.z_near;
+                            let normalized_distance =
+                                (distance - observer_position.z_near) / z_range;
                             let visible = normalized_distance >= level.begin()
                                 && normalized_distance <= level.end();
                             lod_filter[object.index() as usize] = visible;
                         }
                     }
+                }
+            }
+
+            if let Some(reflection_probe) = node.component_ref::<ReflectionProbe>() {
+                if (reflection_probe as &dyn NodeTrait)
+                    .world_bounding_box()
+                    .is_contains_point(observer_position.translation)
+                {
+                    storage.environment_map = Some(reflection_probe.render_target().clone());
                 }
             }
 
@@ -837,11 +957,14 @@ impl RenderDataBundleStorage {
         }
 
         let mut ctx = RenderContext {
-            observer_info: &observer_info,
+            render_mask,
+            elapsed_time,
+            observer_position,
             frustum: Some(&frustum),
             storage: &mut storage,
             graph,
             render_pass_name: &render_pass_name,
+            dynamic_surface_cache,
         };
 
         #[inline(always)]
@@ -920,31 +1043,32 @@ impl RenderDataBundleStorage {
 
         let lights_data = StaticUniformBuffer::<2048>::new()
             .with(&(light_data.count as i32))
-            .with_slice(&light_data.color_radius)
-            .with_slice(&light_data.parameters)
-            .with_slice(&light_data.position)
-            .with_slice(&light_data.direction);
+            .with(&light_data.color_radius)
+            .with(&light_data.parameters)
+            .with(&light_data.position)
+            .with(&light_data.direction);
         let lights_block = render_context
             .uniform_memory_allocator
             .allocate(lights_data);
 
         // Upload camera uniforms.
         let inv_view = self
-            .observer_info
+            .observer_position
             .view_matrix
             .try_inverse()
             .unwrap_or_default();
-        let view_projection = self.observer_info.projection_matrix * self.observer_info.view_matrix;
+        let view_projection =
+            self.observer_position.projection_matrix * self.observer_position.view_matrix;
         let camera_up = inv_view.up();
         let camera_side = inv_view.side();
         let camera_uniforms = StaticUniformBuffer::<512>::new()
             .with(&view_projection)
-            .with(&self.observer_info.observer_position)
+            .with(&self.observer_position.translation)
             .with(&camera_up)
             .with(&camera_side)
-            .with(&self.observer_info.z_near)
-            .with(&self.observer_info.z_far)
-            .with(&(self.observer_info.z_far - self.observer_info.z_near));
+            .with(&self.observer_position.z_near)
+            .with(&self.observer_position.z_far)
+            .with(&(self.observer_position.z_far - self.observer_position.z_near));
         let camera_block = render_context
             .uniform_memory_allocator
             .allocate(camera_uniforms);
@@ -977,7 +1101,8 @@ impl RenderDataBundleStorage {
     {
         let global_uniforms = self.write_global_uniform_blocks(&mut render_context);
 
-        let view_projection = self.observer_info.projection_matrix * self.observer_info.view_matrix;
+        let view_projection =
+            self.observer_position.projection_matrix * self.observer_position.view_matrix;
         let mut bundle_uniform_data_set = Vec::with_capacity(self.bundles.len());
         for bundle in self.bundles.iter() {
             if !bundle_filter(bundle) {
@@ -1034,6 +1159,7 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
     /// pre-processing them on CPU could take more time than rendering them directly on GPU one-by-one.
     fn push_triangles(
         &mut self,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
         layout: &[VertexAttributeDescriptor],
         material: &MaterialResource,
         render_path: RenderPath,
@@ -1050,43 +1176,20 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
         let bundle = if let Some(&bundle_index) = self.bundle_map.get(&key) {
             self.bundles.get_mut(bundle_index).unwrap()
         } else {
-            let default_capacity = 4096;
-
-            // Initialize empty vertex buffer.
-            let vertex_buffer = VertexBuffer::new_with_layout(
-                layout,
-                0,
-                BytesStorage::with_capacity(default_capacity),
-            )
-            .unwrap();
-
-            // Initialize empty triangle buffer.
-            let triangle_buffer = TriangleBuffer::new(Vec::with_capacity(default_capacity * 3));
-
-            // Create temporary surface data (valid for one frame).
-            let data = SurfaceResource::new_ok(
-                ResourceKind::Embedded,
-                SurfaceData::new(vertex_buffer, triangle_buffer),
-            );
-
             self.bundle_map.insert(key, self.bundles.len());
             self.bundles.push(RenderDataBundle {
-                data,
+                data: dynamic_surface_cache.get_or_create(key, layout),
                 sort_index,
                 instances: vec![
                     // Each bundle must have at least one instance to be rendered.
                     SurfaceInstanceData {
-                        world_transform: Matrix4::identity(),
-                        bone_matrices: Default::default(),
-                        blend_shapes_weights: Default::default(),
-                        element_range: Default::default(),
                         node_handle,
+                        ..Default::default()
                     },
                 ],
                 material: material.clone(),
                 render_path,
-                // Temporary buffer lives one frame.
-                time_to_live: TimeToLive(0.0),
+                time_to_live: Default::default(),
             });
             self.bundles.last_mut().unwrap()
         };
@@ -1133,5 +1236,58 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
         };
 
         bundle.instances.push(instance_data)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::renderer::bundle::{RenderContext, RenderDataBundleStorage};
+    use crate::renderer::observer::ObserverPosition;
+    use fyrox_core::algebra::{Matrix4, Vector3};
+
+    //noinspection ALL
+    #[test]
+    fn test_calculate_sorting_index() {
+        let observer_position = ObserverPosition {
+            translation: Default::default(),
+            z_near: 0.0,
+            z_far: 0.0,
+            view_matrix: Matrix4::identity(),
+            projection_matrix: Matrix4::identity(),
+            view_projection_matrix: Matrix4::identity(),
+        };
+
+        let render_context = RenderContext {
+            render_mask: Default::default(),
+            elapsed_time: 0.0,
+            observer_position: &observer_position.clone(),
+            frustum: None,
+            storage: &mut RenderDataBundleStorage::new_empty(observer_position),
+            graph: &Default::default(),
+            render_pass_name: &Default::default(),
+            dynamic_surface_cache: &mut Default::default(),
+        };
+
+        let center = u64::MAX / 2;
+
+        assert_eq!(
+            render_context.calculate_sorting_index(Vector3::repeat(0.0)),
+            center
+        );
+
+        assert_eq!(
+            render_context.calculate_sorting_index(Vector3::new(0.0, 0.0, 1.0)),
+            center + 1000
+        );
+
+        assert_eq!(
+            render_context.calculate_sorting_index(Vector3::new(0.0, 0.0, 2.0)),
+            center + 2000
+        );
+
+        assert_eq!(
+            render_context.calculate_sorting_index(Vector3::new(0.0, 0.0, -3.0)),
+            center - 3000
+        );
     }
 }

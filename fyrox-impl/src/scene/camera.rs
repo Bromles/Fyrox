@@ -20,15 +20,11 @@
 
 //! Contains all methods and structures to create and manage cameras. See [`Camera`] docs for more info.
 
-use crate::scene::node::constructor::NodeConstructor;
 use crate::{
-    asset::{
-        embedded_data_source, manager::BuiltInResource, state::LoadError, untyped::ResourceKind,
-    },
+    asset::{state::LoadError, untyped::ResourceKind},
     core::{
         algebra::{Matrix4, Point3, Vector2, Vector3, Vector4},
         color::Color,
-        log::Log,
         math::{aabb::AxisAlignedBoundingBox, frustum::Frustum, ray::Ray, Rect},
         pool::Handle,
         reflect::prelude::*,
@@ -40,18 +36,17 @@ use crate::{
     },
     graph::BaseSceneGraph,
     resource::texture::{
-        CompressionOptions, Texture, TextureImportOptions, TextureKind, TextureMinificationFilter,
-        TexturePixelKind, TextureResource, TextureResourceExtension, TextureWrapMode,
+        TextureKind, TexturePixelKind, TextureResource, TextureResourceExtension, TextureWrapMode,
     },
     scene::{
         base::{Base, BaseBuilder},
         debug::SceneDrawingContext,
         graph::Graph,
+        node::constructor::NodeConstructor,
         node::{Node, NodeTrait, UpdateContext},
     },
 };
 use fyrox_graph::constructor::ConstructorProvider;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Formatter},
@@ -355,6 +350,7 @@ impl Default for Exposure {
 /// Each camera forces engine to re-render same scene one more time, which may cause almost double load
 /// of your GPU.
 #[derive(Debug, Visit, Reflect, Clone, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Camera {
     base: Base,
 
@@ -367,9 +363,6 @@ pub struct Camera {
     #[reflect(setter = "set_enabled")]
     enabled: InheritableVariable<bool>,
 
-    #[reflect(setter = "set_skybox")]
-    sky_box: InheritableVariable<Option<SkyBox>>,
-
     #[reflect(setter = "set_environment")]
     environment: InheritableVariable<Option<TextureResource>>,
 
@@ -381,6 +374,10 @@ pub struct Camera {
 
     #[reflect(setter = "set_color_grading_enabled")]
     color_grading_enabled: InheritableVariable<bool>,
+
+    #[reflect(setter = "set_render_target")]
+    #[visit(skip)]
+    render_target: Option<TextureResource>,
 
     #[visit(skip)]
     #[reflect(hidden)]
@@ -553,26 +550,6 @@ impl Camera {
         self.enabled.set_value_and_mark_modified(enabled)
     }
 
-    /// Sets new skybox. Could be None if no skybox needed.
-    pub fn set_skybox(&mut self, skybox: Option<SkyBox>) -> Option<SkyBox> {
-        self.sky_box.set_value_and_mark_modified(skybox)
-    }
-
-    /// Return optional mutable reference to current skybox.
-    pub fn skybox_mut(&mut self) -> Option<&mut SkyBox> {
-        self.sky_box.get_value_mut_and_mark_modified().as_mut()
-    }
-
-    /// Return optional shared reference to current skybox.
-    pub fn skybox_ref(&self) -> Option<&SkyBox> {
-        self.sky_box.as_ref()
-    }
-
-    /// Replaces the skybox.
-    pub fn replace_skybox(&mut self, new: Option<SkyBox>) -> Option<SkyBox> {
-        std::mem::replace(self.sky_box.get_value_mut_and_mark_modified(), new)
-    }
-
     /// Sets new environment.
     pub fn set_environment(
         &mut self,
@@ -734,6 +711,38 @@ impl Camera {
     pub fn exposure(&self) -> Exposure {
         *self.exposure
     }
+
+    /// Sets a new render target of the camera. If set, the camera will render to the specified
+    /// render target and will not appear in the final frame. Typical usage is something like this:
+    ///
+    /// ```rust
+    /// # use fyrox_impl::scene::camera::Camera;
+    /// # use fyrox_texture::{TextureResource, TextureResourceExtension};
+    /// fn set_render_target(camera: &mut Camera) {
+    ///     // Create a render target of 256x256 pixels. The size of the render target can be changed
+    ///     // at runtime, and the engine will automatically adjust GPU resources for you. The render
+    ///     // target is a resource, thus it can be shared across multiple "users". For instance, you
+    ///     // can apply this render target texture to a quad in your game world, and it will make a
+    ///     // sort of virtual camera (surveillance camera).
+    ///     let render_target = TextureResource::new_render_target(256, 256);
+    ///     camera.set_render_target(Some(render_target));
+    /// }
+    /// ```
+    ///
+    /// # Serialization
+    ///
+    /// The render target is non-serializable, and you have to re-create it after deserialization.
+    pub fn set_render_target(
+        &mut self,
+        render_target: Option<TextureResource>,
+    ) -> Option<TextureResource> {
+        std::mem::replace(&mut self.render_target, render_target)
+    }
+
+    /// Returns a reference to the current render target (if any).
+    pub fn render_target(&self) -> Option<&TextureResource> {
+        self.render_target.as_ref()
+    }
 }
 
 impl ConstructorProvider<Node, Graph> for Camera {
@@ -764,11 +773,21 @@ impl NodeTrait for Camera {
     }
 
     fn update(&mut self, context: &mut UpdateContext) {
-        self.calculate_matrices(context.frame_size);
+        let frame_size = if let Some(TextureKind::Rectangle { width, height }) = self
+            .render_target
+            .as_ref()
+            .and_then(|rt| rt.data_ref().as_loaded_ref().map(|rt| rt.kind()))
+        {
+            Vector2::new(width as f32, height as f32)
+        } else {
+            context.frame_size
+        };
+
+        self.calculate_matrices(frame_size);
     }
 
     fn debug_draw(&self, ctx: &mut SceneDrawingContext) {
-        let transform = self.global_transform.get();
+        let transform = self.global_transform_without_scaling();
         ctx.draw_pyramid(
             self.frustum().center(),
             self.frustum().right_top_front_corner(),
@@ -923,6 +942,7 @@ impl ColorGradingLut {
                 }
 
                 let lut = TextureResource::from_bytes(
+                    Uuid::new_v4(),
                     TextureKind::Volume {
                         width: 16,
                         height: 16,
@@ -968,98 +988,6 @@ impl ColorGradingLut {
     }
 }
 
-/// A fixed set of possible sky boxes, that can be selected when building [`Camera`] scene node.
-#[derive(Default)]
-pub enum SkyBoxKind {
-    /// Uses built-in sky box. This is default sky box.
-    #[default]
-    Builtin,
-    /// No sky box. Surroundings will be filled with back buffer clear color.
-    None,
-    /// Specific skybox. One can be built using [`SkyBoxBuilder`].
-    Specific(SkyBox),
-}
-
-fn load_texture(data: &[u8], id: &str) -> TextureResource {
-    TextureResource::load_from_memory(
-        ResourceKind::External(id.into()),
-        data,
-        TextureImportOptions::default()
-            .with_compression(CompressionOptions::NoCompression)
-            .with_minification_filter(TextureMinificationFilter::Linear),
-    )
-    .ok()
-    .unwrap()
-}
-
-lazy_static! {
-    static ref BUILT_IN_SKYBOX_FRONT: BuiltInResource<Texture> =
-        BuiltInResource::new(embedded_data_source!("skybox/front.png"), |data| {
-            load_texture(data, "__BUILT_IN_SKYBOX_FRONT")
-        });
-    static ref BUILT_IN_SKYBOX_BACK: BuiltInResource<Texture> =
-        BuiltInResource::new(embedded_data_source!("skybox/back.png"), |data| {
-            load_texture(data, "__BUILT_IN_SKYBOX_BACK")
-        });
-    static ref BUILT_IN_SKYBOX_TOP: BuiltInResource<Texture> =
-        BuiltInResource::new(embedded_data_source!("skybox/top.png"), |data| {
-            load_texture(data, "__BUILT_IN_SKYBOX_TOP")
-        });
-    static ref BUILT_IN_SKYBOX_BOTTOM: BuiltInResource<Texture> =
-        BuiltInResource::new(embedded_data_source!("skybox/bottom.png"), |data| {
-            load_texture(data, "__BUILT_IN_SKYBOX_BOTTOM")
-        });
-    static ref BUILT_IN_SKYBOX_LEFT: BuiltInResource<Texture> =
-        BuiltInResource::new(embedded_data_source!("skybox/left.png"), |data| {
-            load_texture(data, "__BUILT_IN_SKYBOX_LEFT")
-        });
-    static ref BUILT_IN_SKYBOX_RIGHT: BuiltInResource<Texture> =
-        BuiltInResource::new(embedded_data_source!("skybox/right.png"), |data| {
-            load_texture(data, "__BUILT_IN_SKYBOX_RIGHT")
-        });
-    static ref BUILT_IN_SKYBOX: SkyBox = SkyBoxKind::make_built_in_skybox();
-}
-
-impl SkyBoxKind {
-    fn make_built_in_skybox() -> SkyBox {
-        let front = BUILT_IN_SKYBOX_FRONT.resource();
-        let back = BUILT_IN_SKYBOX_BACK.resource();
-        let top = BUILT_IN_SKYBOX_TOP.resource();
-        let bottom = BUILT_IN_SKYBOX_BOTTOM.resource();
-        let left = BUILT_IN_SKYBOX_LEFT.resource();
-        let right = BUILT_IN_SKYBOX_RIGHT.resource();
-
-        SkyBoxBuilder {
-            front: Some(front),
-            back: Some(back),
-            left: Some(left),
-            right: Some(right),
-            top: Some(top),
-            bottom: Some(bottom),
-        }
-        .build()
-        .unwrap()
-    }
-
-    /// Returns a references to built-in sky box.
-    pub fn built_in_skybox() -> &'static SkyBox {
-        &BUILT_IN_SKYBOX
-    }
-
-    /// Returns an array with references to the textures being used in built-in sky box. The order is:
-    /// front, back, top, bottom, left, right.
-    pub fn built_in_skybox_textures() -> [&'static BuiltInResource<Texture>; 6] {
-        [
-            &BUILT_IN_SKYBOX_FRONT,
-            &BUILT_IN_SKYBOX_BACK,
-            &BUILT_IN_SKYBOX_TOP,
-            &BUILT_IN_SKYBOX_BOTTOM,
-            &BUILT_IN_SKYBOX_LEFT,
-            &BUILT_IN_SKYBOX_RIGHT,
-        ]
-    }
-}
-
 /// Camera builder is used to create new camera in declarative manner.
 /// This is typical implementation of Builder pattern.
 pub struct CameraBuilder {
@@ -1069,12 +997,12 @@ pub struct CameraBuilder {
     z_far: f32,
     viewport: Rect<f32>,
     enabled: bool,
-    skybox: SkyBoxKind,
     environment: Option<TextureResource>,
     exposure: Exposure,
     color_grading_lut: Option<ColorGradingLut>,
     color_grading_enabled: bool,
     projection: Projection,
+    render_target: Option<TextureResource>,
 }
 
 impl CameraBuilder {
@@ -1087,12 +1015,12 @@ impl CameraBuilder {
             z_near: 0.025,
             z_far: 2048.0,
             viewport: Rect::new(0.0, 0.0, 1.0, 1.0),
-            skybox: SkyBoxKind::Builtin,
             environment: None,
             exposure: Exposure::Manual(std::f32::consts::E),
             color_grading_lut: None,
             color_grading_enabled: false,
             projection: Projection::default(),
+            render_target: None,
         }
     }
 
@@ -1126,18 +1054,6 @@ impl CameraBuilder {
         self
     }
 
-    /// Sets desired skybox.
-    pub fn with_skybox(mut self, skybox: SkyBox) -> Self {
-        self.skybox = SkyBoxKind::Specific(skybox);
-        self
-    }
-
-    /// Sets desired skybox.
-    pub fn with_specific_skybox(mut self, skybox_kind: SkyBoxKind) -> Self {
-        self.skybox = skybox_kind;
-        self
-    }
-
     /// Sets desired environment map.
     pub fn with_environment(mut self, environment: TextureResource) -> Self {
         self.environment = Some(environment);
@@ -1168,6 +1084,12 @@ impl CameraBuilder {
         self
     }
 
+    /// Sets desired render target for the camera.
+    pub fn with_render_target(mut self, render_target: Option<TextureResource>) -> Self {
+        self.render_target = render_target;
+        self
+    }
+
     /// Creates new instance of camera.
     pub fn build_camera(self) -> Camera {
         Camera {
@@ -1179,15 +1101,11 @@ impl CameraBuilder {
             // recalculated before rendering.
             view_matrix: Matrix4::identity(),
             projection_matrix: Matrix4::identity(),
-            sky_box: InheritableVariable::new_modified(match self.skybox {
-                SkyBoxKind::Builtin => Some(SkyBoxKind::built_in_skybox().clone()),
-                SkyBoxKind::None => None,
-                SkyBoxKind::Specific(skybox) => Some(skybox),
-            }),
             environment: self.environment.into(),
             exposure: self.exposure.into(),
             color_grading_lut: self.color_grading_lut.into(),
             color_grading_enabled: self.color_grading_enabled.into(),
+            render_target: self.render_target,
         }
     }
 
@@ -1199,398 +1117,5 @@ impl CameraBuilder {
     /// Creates new instance of camera node and adds it to the graph.
     pub fn build(self, graph: &mut Graph) -> Handle<Node> {
         graph.add_node(self.build_node())
-    }
-}
-
-/// SkyBox builder is used to create new skybox in declarative manner.
-pub struct SkyBoxBuilder {
-    /// Texture for front face.
-    pub front: Option<TextureResource>,
-    /// Texture for back face.
-    pub back: Option<TextureResource>,
-    /// Texture for left face.
-    pub left: Option<TextureResource>,
-    /// Texture for right face.
-    pub right: Option<TextureResource>,
-    /// Texture for top face.
-    pub top: Option<TextureResource>,
-    /// Texture for bottom face.
-    pub bottom: Option<TextureResource>,
-}
-
-impl SkyBoxBuilder {
-    /// Sets desired front face of cubemap.
-    pub fn with_front(mut self, texture: TextureResource) -> Self {
-        self.front = Some(texture);
-        self
-    }
-
-    /// Sets desired back face of cubemap.
-    pub fn with_back(mut self, texture: TextureResource) -> Self {
-        self.back = Some(texture);
-        self
-    }
-
-    /// Sets desired left face of cubemap.
-    pub fn with_left(mut self, texture: TextureResource) -> Self {
-        self.left = Some(texture);
-        self
-    }
-
-    /// Sets desired right face of cubemap.
-    pub fn with_right(mut self, texture: TextureResource) -> Self {
-        self.right = Some(texture);
-        self
-    }
-
-    /// Sets desired top face of cubemap.
-    pub fn with_top(mut self, texture: TextureResource) -> Self {
-        self.top = Some(texture);
-        self
-    }
-
-    /// Sets desired front face of cubemap.
-    pub fn with_bottom(mut self, texture: TextureResource) -> Self {
-        self.bottom = Some(texture);
-        self
-    }
-
-    /// Creates a new instance of skybox.
-    pub fn build(self) -> Result<SkyBox, SkyBoxError> {
-        let mut skybox = SkyBox {
-            left: self.left,
-            right: self.right,
-            top: self.top,
-            bottom: self.bottom,
-            front: self.front,
-            back: self.back,
-            cubemap: None,
-        };
-
-        skybox.create_cubemap()?;
-
-        Ok(skybox)
-    }
-}
-
-/// Skybox is a huge box around camera. Each face has its own texture, when textures are
-/// properly made, there is no seams and you get good decoration which contains static
-/// skies and/or some other objects (mountains, buildings, etc.). Usually skyboxes used
-/// in outdoor scenes, however real use of it limited only by your imagination. Skybox
-/// will be drawn first, none of objects could be drawn before skybox.
-#[derive(Debug, Clone, Default, PartialEq, Reflect, Visit, Eq)]
-pub struct SkyBox {
-    /// Texture for front face.
-    #[reflect(setter = "set_front")]
-    pub(crate) front: Option<TextureResource>,
-
-    /// Texture for back face.
-    #[reflect(setter = "set_back")]
-    pub(crate) back: Option<TextureResource>,
-
-    /// Texture for left face.
-    #[reflect(setter = "set_left")]
-    pub(crate) left: Option<TextureResource>,
-
-    /// Texture for right face.
-    #[reflect(setter = "set_right")]
-    pub(crate) right: Option<TextureResource>,
-
-    /// Texture for top face.
-    #[reflect(setter = "set_top")]
-    pub(crate) top: Option<TextureResource>,
-
-    /// Texture for bottom face.
-    #[reflect(setter = "set_bottom")]
-    pub(crate) bottom: Option<TextureResource>,
-
-    /// Cubemap texture
-    #[reflect(hidden)]
-    #[visit(skip)]
-    pub(crate) cubemap: Option<TextureResource>,
-}
-
-uuid_provider!(SkyBox = "45f359f1-e26f-4ace-81df-097f63474c72");
-
-/// An error that may occur during skybox creation.
-#[derive(Debug)]
-pub enum SkyBoxError {
-    /// Texture kind is not TextureKind::Rectangle
-    UnsupportedTextureKind(TextureKind),
-    /// Cube map was failed to build.
-    UnableToBuildCubeMap,
-    /// Input texture is not square.
-    NonSquareTexture {
-        /// Texture index.
-        index: usize,
-        /// Width of the faulty texture.
-        width: u32,
-        /// Height of the faulty texture.
-        height: u32,
-    },
-    /// Some input texture differs in size or pixel kind.
-    DifferentTexture {
-        /// Actual width of the first valid texture in the input set.
-        expected_width: u32,
-        /// Actual height of the first valid texture in the input set.
-        expected_height: u32,
-        /// Actual pixel kind of the first valid texture in the input set.
-        expected_pixel_kind: TexturePixelKind,
-        /// Index of the faulty input texture.
-        index: usize,
-        /// Width of the faulty texture.
-        actual_width: u32,
-        /// Height of the faulty texture.
-        actual_height: u32,
-        /// Pixel kind of the faulty texture.
-        actual_pixel_kind: TexturePixelKind,
-    },
-    /// Occurs when one of the input textures is either still loading or failed to load.
-    TextureIsNotReady {
-        /// Index of the faulty input texture.
-        index: usize,
-    },
-}
-
-impl SkyBox {
-    /// Returns cubemap texture
-    pub fn cubemap(&self) -> Option<TextureResource> {
-        self.cubemap.clone()
-    }
-
-    /// Returns cubemap texture
-    pub fn cubemap_ref(&self) -> Option<&TextureResource> {
-        self.cubemap.as_ref()
-    }
-
-    /// Validates input set of texture and checks if it possible to create a cube map from them.
-    /// There are two main conditions for successful cube map creation:
-    /// - All textures must have same width and height, and width must be equal to height.
-    /// - All textures must have same pixel kind.
-    pub fn validate(&self) -> Result<(), SkyBoxError> {
-        struct TextureInfo {
-            pixel_kind: TexturePixelKind,
-            width: u32,
-            height: u32,
-        }
-
-        let mut first_info: Option<TextureInfo> = None;
-
-        for (index, texture) in self.textures().iter().enumerate() {
-            if let Some(texture) = texture {
-                if let Some(texture) = texture.state().data() {
-                    if let TextureKind::Rectangle { width, height } = texture.kind() {
-                        if width != height {
-                            return Err(SkyBoxError::NonSquareTexture {
-                                index,
-                                width,
-                                height,
-                            });
-                        }
-
-                        if let Some(first_info) = first_info.as_mut() {
-                            if first_info.width != width
-                                || first_info.height != height
-                                || first_info.pixel_kind != texture.pixel_kind()
-                            {
-                                return Err(SkyBoxError::DifferentTexture {
-                                    expected_width: first_info.width,
-                                    expected_height: first_info.height,
-                                    expected_pixel_kind: first_info.pixel_kind,
-                                    index,
-                                    actual_width: width,
-                                    actual_height: height,
-                                    actual_pixel_kind: texture.pixel_kind(),
-                                });
-                            }
-                        } else {
-                            first_info = Some(TextureInfo {
-                                pixel_kind: texture.pixel_kind(),
-                                width,
-                                height,
-                            });
-                        }
-                    }
-                } else {
-                    return Err(SkyBoxError::TextureIsNotReady { index });
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Creates a cubemap using provided faces. If some face has not been provided corresponding side will be black.
-    ///
-    /// # Important notes.
-    ///
-    /// It will fail if provided face's kind is not TextureKind::Rectangle.
-    pub fn create_cubemap(&mut self) -> Result<(), SkyBoxError> {
-        self.validate()?;
-
-        let (kind, pixel_kind, bytes_per_face) =
-            self.textures().iter().find(|face| face.is_some()).map_or(
-                (
-                    TextureKind::Rectangle {
-                        width: 1,
-                        height: 1,
-                    },
-                    TexturePixelKind::R8,
-                    1,
-                ),
-                |face| {
-                    let face = face.clone().unwrap();
-                    let data = face.data_ref();
-
-                    (data.kind(), data.pixel_kind(), data.mip_level_data(0).len())
-                },
-            );
-
-        let (width, height) = match kind {
-            TextureKind::Rectangle { width, height } => (width, height),
-            _ => return Err(SkyBoxError::UnsupportedTextureKind(kind)),
-        };
-
-        let mut data = Vec::<u8>::with_capacity(bytes_per_face * 6);
-        for face in self.textures().iter() {
-            if let Some(f) = face.clone() {
-                data.extend(f.data_ref().mip_level_data(0));
-            } else {
-                let black_face_data = vec![0; bytes_per_face];
-                data.extend(black_face_data);
-            }
-        }
-
-        let cubemap = TextureResource::from_bytes(
-            TextureKind::Cube { width, height },
-            pixel_kind,
-            data,
-            ResourceKind::Embedded,
-        )
-        .ok_or(SkyBoxError::UnableToBuildCubeMap)?;
-
-        let mut cubemap_ref = cubemap.data_ref();
-        cubemap_ref.set_s_wrap_mode(TextureWrapMode::ClampToEdge);
-        cubemap_ref.set_t_wrap_mode(TextureWrapMode::ClampToEdge);
-        drop(cubemap_ref);
-
-        self.cubemap = Some(cubemap);
-
-        Ok(())
-    }
-
-    /// Returns slice with all textures, where: 0 - Left, 1 - Right, 2 - Top, 3 - Bottom
-    /// 4 - Front, 5 - Back.
-    ///
-    /// # Important notes.
-    ///
-    /// These textures are **not** used for rendering! The renderer uses cube map made of these
-    /// textures. Public access for these textures is needed in case you need to read internals
-    /// of the textures.
-    pub fn textures(&self) -> [Option<TextureResource>; 6] {
-        [
-            self.left.clone(),
-            self.right.clone(),
-            self.top.clone(),
-            self.bottom.clone(),
-            self.front.clone(),
-            self.back.clone(),
-        ]
-    }
-
-    /// Set new texture for the left side of the skybox.
-    pub fn set_left(&mut self, texture: Option<TextureResource>) -> Option<TextureResource> {
-        let prev = std::mem::replace(&mut self.left, texture);
-        Log::verify(self.create_cubemap());
-        prev
-    }
-
-    /// Returns a texture that is used for left face of the cube map.
-    ///
-    /// # Important notes.
-    ///
-    /// This textures is not used for rendering! The renderer uses cube map made of face textures.
-    pub fn left(&self) -> Option<TextureResource> {
-        self.left.clone()
-    }
-
-    /// Set new texture for the right side of the skybox.
-    pub fn set_right(&mut self, texture: Option<TextureResource>) -> Option<TextureResource> {
-        let prev = std::mem::replace(&mut self.right, texture);
-        Log::verify(self.create_cubemap());
-        prev
-    }
-
-    /// Returns a texture that is used for right face of the cube map.
-    ///
-    /// # Important notes.
-    ///
-    /// This textures is not used for rendering! The renderer uses cube map made of face textures.
-    pub fn right(&self) -> Option<TextureResource> {
-        self.right.clone()
-    }
-
-    /// Set new texture for the top side of the skybox.
-    pub fn set_top(&mut self, texture: Option<TextureResource>) -> Option<TextureResource> {
-        let prev = std::mem::replace(&mut self.top, texture);
-        Log::verify(self.create_cubemap());
-        prev
-    }
-
-    /// Returns a texture that is used for top face of the cube map.
-    ///
-    /// # Important notes.
-    ///
-    /// This textures is not used for rendering! The renderer uses cube map made of face textures.
-    pub fn top(&self) -> Option<TextureResource> {
-        self.top.clone()
-    }
-
-    /// Set new texture for the bottom side of the skybox.
-    pub fn set_bottom(&mut self, texture: Option<TextureResource>) -> Option<TextureResource> {
-        let prev = std::mem::replace(&mut self.bottom, texture);
-        Log::verify(self.create_cubemap());
-        prev
-    }
-
-    /// Returns a texture that is used for bottom face of the cube map.
-    ///
-    /// # Important notes.
-    ///
-    /// This textures is not used for rendering! The renderer uses cube map made of face textures.
-    pub fn bottom(&self) -> Option<TextureResource> {
-        self.bottom.clone()
-    }
-
-    /// Set new texture for the front side of the skybox.
-    pub fn set_front(&mut self, texture: Option<TextureResource>) -> Option<TextureResource> {
-        let prev = std::mem::replace(&mut self.front, texture);
-        Log::verify(self.create_cubemap());
-        prev
-    }
-
-    /// Returns a texture that is used for front face of the cube map.
-    ///
-    /// # Important notes.
-    ///
-    /// This textures is not used for rendering! The renderer uses cube map made of face textures.
-    pub fn front(&self) -> Option<TextureResource> {
-        self.front.clone()
-    }
-
-    /// Set new texture for the back side of the skybox.
-    pub fn set_back(&mut self, texture: Option<TextureResource>) -> Option<TextureResource> {
-        let prev = std::mem::replace(&mut self.back, texture);
-        Log::verify(self.create_cubemap());
-        prev
-    }
-
-    /// Returns a texture that is used for back face of the cube map.
-    ///
-    /// # Important notes.
-    ///
-    /// This textures is not used for rendering! The renderer uses cube map made of face textures.
-    pub fn back(&self) -> Option<TextureResource> {
-        self.back.clone()
     }
 }

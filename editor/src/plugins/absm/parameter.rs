@@ -44,6 +44,8 @@ use crate::plugins::inspector::editors::make_property_editors_container;
 use crate::{
     command::make_command, message::MessageSender, Message, MessageDirection, MSG_SYNC_FLAG,
 };
+use fyrox::asset::manager::ResourceManager;
+use fyrox::gui::inspector::InspectorContextArgs;
 use std::sync::Arc;
 
 pub struct ParameterPanel {
@@ -53,8 +55,12 @@ pub struct ParameterPanel {
 }
 
 impl ParameterPanel {
-    pub fn new(ctx: &mut BuildContext, sender: MessageSender) -> Self {
-        let property_editors = make_property_editors_container(sender);
+    pub fn new(
+        ctx: &mut BuildContext,
+        sender: MessageSender,
+        resource_manager: ResourceManager,
+    ) -> Self {
+        let property_editors = make_property_editors_container(sender, resource_manager);
         property_editors
             .insert(VecCollectionPropertyEditorDefinition::<ParameterDefinition>::new());
         property_editors.insert(EnumPropertyEditorDefinition::<Parameter>::new());
@@ -89,17 +95,18 @@ impl ParameterPanel {
     ) {
         let inspector_context = parameters
             .map(|parameters| {
-                InspectorContext::from_object(
-                    parameters,
-                    &mut ui.build_ctx(),
-                    self.property_editors.clone(),
-                    None,
-                    MSG_SYNC_FLAG,
-                    0,
-                    true,
-                    Default::default(),
-                    150.0,
-                )
+                InspectorContext::from_object(InspectorContextArgs {
+                    object: parameters,
+                    ctx: &mut ui.build_ctx(),
+                    definition_container: self.property_editors.clone(),
+                    environment: None,
+                    sync_flag: MSG_SYNC_FLAG,
+                    layer_index: 0,
+                    generate_property_string_values: true,
+                    filter: Default::default(),
+                    name_column_width: 150.0,
+                    base_path: Default::default(),
+                })
             })
             .unwrap_or_default();
 
@@ -126,7 +133,14 @@ impl ParameterPanel {
             .context()
             .clone();
 
-        if let Err(sync_errors) = ctx.sync(parameters, ui, 0, true, Default::default()) {
+        if let Err(sync_errors) = ctx.sync(
+            parameters,
+            ui,
+            0,
+            true,
+            Default::default(),
+            Default::default(),
+        ) {
             for error in sync_errors {
                 Log::err(format!("Failed to sync property. Reason: {error:?}"))
             }

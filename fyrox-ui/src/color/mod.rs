@@ -40,9 +40,11 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Orientation, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
+
 use fyrox_core::uuid_provider;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
+use fyrox_material::MaterialResource;
 use std::{
     ops::{Deref, DerefMut},
     sync::mpsc::Sender,
@@ -124,6 +126,7 @@ impl ColorFieldMessage {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct AlphaBar {
     pub widget: Widget,
     pub orientation: Orientation,
@@ -235,6 +238,7 @@ pub fn draw_checker_board(
     bounds: Rect<f32>,
     clip_bounds: Rect<f32>,
     size: f32,
+    material: &MaterialResource,
     drawing_context: &mut DrawingContext,
 ) {
     let h_amount = (bounds.w() / size).ceil() as usize;
@@ -259,6 +263,7 @@ pub fn draw_checker_board(
         clip_bounds,
         Brush::Solid(Color::WHITE),
         CommandTexture::None,
+        material,
         None,
     );
 }
@@ -274,6 +279,7 @@ impl Control for AlphaBar {
             bounds,
             self.clip_bounds(),
             CHECKERBOARD_SIZE,
+            &self.material,
             drawing_context,
         );
 
@@ -310,6 +316,7 @@ impl Control for AlphaBar {
             self.clip_bounds(),
             Brush::Solid(Color::WHITE),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -399,6 +406,7 @@ impl AlphaBarBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct HueBar {
     pub widget: Widget,
     pub orientation: Orientation,
@@ -468,6 +476,7 @@ impl Control for HueBar {
             self.clip_bounds(),
             Brush::Solid(Color::WHITE),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -562,6 +571,7 @@ impl HueBarBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct SaturationBrightnessField {
     pub widget: Widget,
     pub is_picking: bool,
@@ -629,6 +639,7 @@ impl Control for SaturationBrightnessField {
             self.clip_bounds(),
             Brush::Solid(Color::WHITE),
             CommandTexture::None,
+            &self.material,
             None,
         );
 
@@ -647,6 +658,7 @@ impl Control for SaturationBrightnessField {
             self.clip_bounds(),
             Brush::Solid(Color::WHITE),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -776,6 +788,7 @@ impl SaturationBrightnessFieldBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ColorPicker {
     pub widget: Widget,
     pub hue_bar: Handle<UiNode>,
@@ -1203,6 +1216,7 @@ impl ColorPickerBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ColorField {
     pub widget: Widget,
     pub popup: Handle<UiNode>,
@@ -1246,6 +1260,7 @@ impl Control for ColorField {
             self.clip_bounds(),
             Brush::Solid(self.color),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -1297,7 +1312,9 @@ impl Control for ColorField {
     // handle_routed_message won't trigger because of it.
     fn preview_message(&self, ui: &UserInterface, message: &mut UiMessage) {
         if let Some(PopupMessage::Close) = message.data::<PopupMessage>() {
-            if message.destination() == self.popup {
+            if message.destination() == self.popup
+                && message.direction() == MessageDirection::ToWidget
+            {
                 let picker = ui
                     .node(self.picker)
                     .cast::<ColorPicker>()

@@ -40,17 +40,21 @@ pub mod navmesh;
 pub mod node;
 pub mod particle_system;
 pub mod pivot;
+pub mod probe;
 pub mod ragdoll;
 pub mod rigidbody;
+pub mod skybox;
 pub mod sound;
 pub mod sprite;
 pub mod terrain;
 pub mod tilemap;
 pub mod transform;
 
-use crate::renderer::framework::PolygonFillMode;
 use crate::{
-    asset::{self, manager::ResourceManager, untyped::UntypedResource},
+    asset::{
+        self, io::ResourceIo, manager::ResourceManager, registry::ResourceRegistryStatus,
+        untyped::UntypedResource,
+    },
     core::{
         algebra::Vector2,
         color::Color,
@@ -58,25 +62,25 @@ use crate::{
         log::{Log, MessageKind},
         pool::{Handle, Pool, Ticket},
         reflect::prelude::*,
-        visitor::{Visit, VisitError, VisitResult, Visitor},
+        variable::InheritableVariable,
+        visitor::{error::VisitError, Visit, VisitResult, Visitor},
     },
     engine::SerializationContext,
     graph::NodeHandleMap,
+    renderer::framework::PolygonFillMode,
     resource::texture::TextureResource,
     scene::{
         base::BaseBuilder,
-        camera::Camera,
         debug::SceneDrawingContext,
         graph::{Graph, GraphPerformanceStatistics, GraphUpdateSwitches},
         navmesh::NavigationalMeshBuilder,
         node::Node,
+        skybox::{SkyBox, SkyBoxKind},
         sound::SoundEngine,
     },
     utils::navmesh::Navmesh,
 };
-use asset::io::ResourceIo;
 use fxhash::FxHashSet;
-use fyrox_core::variable::InheritableVariable;
 use std::{
     fmt::{Display, Formatter},
     ops::{Index, IndexMut},
@@ -225,6 +229,9 @@ pub struct Scene {
     #[reflect(hidden)]
     pub performance_statistics: PerformanceStatistics,
 
+    #[reflect(setter = "set_skybox")]
+    sky_box: InheritableVariable<Option<SkyBox>>,
+
     /// Whether the scene will be updated and rendered or not. Default is true.
     /// This flag allowing you to build a scene manager for your game. For example,
     /// you may have a scene for menu and one per level. Menu's scene is persistent,
@@ -235,6 +242,12 @@ pub struct Scene {
     pub enabled: InheritableVariable<bool>,
 }
 
+impl Clone for Scene {
+    fn clone(&self) -> Self {
+        self.clone_one_to_one().0
+    }
+}
+
 impl Default for Scene {
     fn default() -> Self {
         Self {
@@ -243,6 +256,7 @@ impl Default for Scene {
             drawing_context: Default::default(),
             performance_statistics: Default::default(),
             enabled: true.into(),
+            sky_box: Some(SkyBoxKind::built_in_skybox().clone()).into(),
         }
     }
 }
@@ -286,6 +300,7 @@ impl Display for PerformanceStatistics {
 pub struct SceneLoader {
     scene: Scene,
     path: Option<PathBuf>,
+    resource_manager: ResourceManager,
 }
 
 impl SceneLoader {
@@ -297,6 +312,21 @@ impl SceneLoader {
         serialization_context: Arc<SerializationContext>,
         resource_manager: ResourceManager,
     ) -> Result<(Self, Vec<u8>), VisitError> {
+        let registry_status = resource_manager
+            .state()
+            .resource_registry
+            .lock()
+            .status_flag();
+        // Wait until the registry is fully loaded.
+        let registry_status = registry_status.await;
+        if registry_status == ResourceRegistryStatus::Unknown {
+            return Err(VisitError::User(format!(
+                "Unable to load a scene from {} path, because the \
+            resource registry isn't loaded!",
+                path.as_ref().display()
+            )));
+        }
+
         let data = io.load_file(path.as_ref()).await?;
         let mut visitor = Visitor::load_from_memory(&data)?;
         let loader = Self::load(
@@ -324,12 +354,18 @@ impl SceneLoader {
         }
 
         visitor.blackboard.register(serialization_context);
-        visitor.blackboard.register(Arc::new(resource_manager));
+        visitor
+            .blackboard
+            .register(Arc::new(resource_manager.clone()));
 
         let mut scene = Scene::default();
         scene.visit(region_name, visitor)?;
 
-        Ok(Self { scene, path })
+        Ok(Self {
+            scene,
+            path,
+            resource_manager,
+        })
     }
 
     /// Finishes scene loading.
@@ -344,7 +380,15 @@ impl SceneLoader {
         if let Some(path) = self.path {
             let exclusion_list = used_resources
                 .iter()
-                .filter(|res| res.kind().path() == Some(&path))
+                .filter(|res| {
+                    // Calling resource_uuid means locking the header.
+                    // To minimize the number of locks we hold at once, get the UUID first,
+                    // before we lock the resource manager and registry.
+                    let uuid = res.resource_uuid();
+                    let state = self.resource_manager.state();
+                    let registry = state.resource_registry.lock();
+                    uuid.and_then(|uuid| registry.uuid_to_path(uuid)) == Some(&path)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
 
@@ -366,16 +410,11 @@ impl SceneLoader {
             "SceneLoader::finish() - All {used_resources_count} resources have finished loading."
         ));
 
-        // TODO: Move into Camera::restore_resources?
         // We have to wait until skybox textures are all loaded, because we need to read their data
         // to re-create cube map.
         let mut skybox_textures = Vec::new();
-        for node in scene.graph.linear_iter() {
-            if let Some(camera) = node.cast::<Camera>() {
-                if let Some(skybox) = camera.skybox_ref() {
-                    skybox_textures.extend(skybox.textures().iter().filter_map(|t| t.clone()));
-                }
-            }
+        if let Some(skybox) = scene.skybox_ref() {
+            skybox_textures.extend(skybox.textures().iter().filter_map(|t| t.clone()));
         }
         join_all(skybox_textures).await;
 
@@ -402,12 +441,38 @@ impl Scene {
             drawing_context: Default::default(),
             performance_statistics: Default::default(),
             enabled: true.into(),
+            sky_box: Some(SkyBoxKind::built_in_skybox().clone()).into(),
         }
+    }
+
+    /// Sets new skybox. Could be None if no skybox needed.
+    pub fn set_skybox(&mut self, skybox: Option<SkyBox>) -> Option<SkyBox> {
+        self.sky_box.set_value_and_mark_modified(skybox)
+    }
+
+    /// Return optional mutable reference to current skybox.
+    pub fn skybox_mut(&mut self) -> Option<&mut SkyBox> {
+        self.sky_box.get_value_mut_and_mark_modified().as_mut()
+    }
+
+    /// Return optional shared reference to current skybox.
+    pub fn skybox_ref(&self) -> Option<&SkyBox> {
+        self.sky_box.as_ref()
+    }
+
+    /// Replaces the skybox.
+    pub fn replace_skybox(&mut self, new: Option<SkyBox>) -> Option<SkyBox> {
+        std::mem::replace(self.sky_box.get_value_mut_and_mark_modified(), new)
     }
 
     /// Synchronizes the state of the scene with external resources.
     pub fn resolve(&mut self) {
         Log::writeln(MessageKind::Information, "Starting resolve...");
+
+        // Update cube maps for sky boxes.
+        if let Some(skybox) = self.skybox_mut() {
+            Log::verify(skybox.create_cubemap());
+        }
 
         self.graph.resolve();
 
@@ -432,7 +497,7 @@ impl Scene {
 
     /// Creates deep copy of a scene, filter predicate allows you to filter out nodes
     /// by your criteria.
-    pub fn clone<F, Pre, Post>(
+    pub fn clone_ex<F, Pre, Post>(
         &self,
         root: Handle<Node>,
         filter: &mut F,
@@ -446,7 +511,7 @@ impl Scene {
     {
         let (graph, old_new_map) =
             self.graph
-                .clone(root, filter, pre_process_callback, post_process_callback);
+                .clone_ex(root, filter, pre_process_callback, post_process_callback);
 
         (
             Self {
@@ -455,6 +520,7 @@ impl Scene {
                 drawing_context: self.drawing_context.clone(),
                 performance_statistics: Default::default(),
                 enabled: self.enabled.clone(),
+                sky_box: self.sky_box.clone(),
             },
             old_new_map,
         )
@@ -462,7 +528,7 @@ impl Scene {
 
     /// Creates deep copy of a scene. Same as [`Self::clone`], but does 1:1 cloning.
     pub fn clone_one_to_one(&self) -> (Self, NodeHandleMap<Node>) {
-        self.clone(
+        self.clone_ex(
             self.graph.get_root(),
             &mut |_, _| true,
             &mut |_, _| {},
@@ -479,6 +545,7 @@ impl Scene {
         let _ = self
             .rendering_options
             .visit("RenderingOptions", &mut region);
+        let _ = self.sky_box.visit("SkyBox", &mut region);
 
         // Backward compatibility.
         let mut navmeshes = NavMeshContainer::default();
@@ -518,8 +585,7 @@ impl Scene {
     /// let mut scene = Scene::new();
     ///
     /// MeshBuilder::new(BaseBuilder::new())
-    ///     .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok( ResourceKind::Embedded,
-    ///         SurfaceData::make_cube(Default::default()),
+    ///     .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(SurfaceData::make_cube(Default::default()),
     ///     ))
     ///     .build()])
     ///     .build(&mut scene.graph);
@@ -529,7 +595,7 @@ impl Scene {
     /// scene.save("Scene", &mut visitor).unwrap();
     ///
     /// // Write the data to a file.
-    /// visitor.save_binary("path/to/a/scene.rgs").unwrap();
+    /// visitor.save_binary_to_file("path/to/a/scene.rgs").unwrap();
     /// ```
     pub fn save(&mut self, region_name: &str, visitor: &mut Visitor) -> VisitResult {
         if visitor.is_reading() {

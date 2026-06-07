@@ -4,8 +4,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-    # This allows running it on any branch manually:
-    # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
+  # This allows running it on any branch manually:
+  # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,9 +22,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable]
+        rust: [ stable ]
         # For reference: https://github.com/actions/virtual-environments#available-environments
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -39,7 +39,7 @@ jobs:
         # and you might need to run it using xvfb-run even in headless mode.
         run: |
           sudo apt-get update # Run update first or install might start failing eventually.
-          sudo apt-get install --no-install-recommends -y libasound2-dev libudev-dev pkg-config xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+          sudo apt-get install --no-install-recommends -y libasound2-dev libudev-dev pkg-config xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libdbus-1-dev
 
       - run: rustc --version && cargo --version
 
@@ -56,7 +56,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable]
+        rust: [ stable ]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -96,7 +96,7 @@ jobs:
       - name: Install linux deps
         run: |
           sudo apt-get update # Run update first or install might start failing eventually.
-          sudo apt-get install --no-install-recommends -y libasound2-dev libudev-dev pkg-config xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+          sudo apt-get install --no-install-recommends -y libasound2-dev libudev-dev pkg-config xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libdbus-1-dev
 
       - run: cargo clippy --version
         # Using --all-targets to also check tests and examples.
@@ -188,3 +188,13 @@ jobs:
           fyrox-template upgrade --version=latest --local
           cd executor-wasm
           wasm-pack build --target=web
+  project_manager:
+    name: Project Manager
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Project Manager
+        run: |
+          cargo build --package fyrox-project-manager

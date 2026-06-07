@@ -50,7 +50,7 @@ use crate::{
         GameScene, Selection,
     },
     settings::Settings,
-    world::graph::selection::GraphSelection,
+    world::selection::GraphSelection,
     Engine, Message,
 };
 
@@ -214,7 +214,8 @@ impl MoveContext {
                 ignore_back_faces: settings.selection.ignore_back_faces,
                 // We need info only about closest intersection.
                 use_picking_loop: false,
-                only_meshes: false,
+                only_meshes: true,
+                settings: &settings.selection,
             },
         ) {
             Some(result.position)
@@ -309,7 +310,7 @@ impl InteractionMode for MoveInteractionMode {
         engine: &mut Engine,
         mouse_pos: Vector2<f32>,
         frame_size: Vector2<f32>,
-        _settings: &Settings,
+        settings: &Settings,
     ) {
         let Some(game_scene) = controller.downcast_mut::<GameScene>() else {
             return;
@@ -327,6 +328,7 @@ impl InteractionMode for MoveInteractionMode {
                 ignore_back_faces: false,
                 use_picking_loop: true,
                 only_meshes: false,
+                settings: &settings.selection,
             },
         ) {
             if let Some(plane_kind) = self.move_gizmo.handle_pick(result.node, graph) {
@@ -405,6 +407,7 @@ impl InteractionMode for MoveInteractionMode {
                         ignore_back_faces: settings.selection.ignore_back_faces,
                         use_picking_loop: true,
                         only_meshes: false,
+                        settings: &settings.selection,
                     },
                 )
                 .map(|result| {
@@ -470,6 +473,7 @@ impl InteractionMode for MoveInteractionMode {
                         ignore_back_faces: false,
                         use_picking_loop: false,
                         only_meshes: false,
+                        settings: &settings.selection,
                     },
                 )
                 .map(|r| r.node)
@@ -491,14 +495,14 @@ impl InteractionMode for MoveInteractionMode {
 
         let scene = &mut engine.scenes[game_scene.scene];
         let graph = &mut scene.graph;
-        if editor_selection.is_empty() || game_scene.preview_camera.is_some() {
+        if editor_selection.is_empty() {
             self.move_gizmo.set_visible(graph, false);
         } else {
             let scale = calculate_gizmo_distance_scaling(
                 graph,
                 game_scene.camera_controller.camera,
                 self.move_gizmo.origin,
-            );
+            ) * _settings.graphics.gizmo_scale;
             self.move_gizmo.set_visible(graph, true);
             self.move_gizmo
                 .sync_transform(scene, editor_selection, scale);

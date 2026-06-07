@@ -21,10 +21,7 @@
 use crate::{
     button::{ButtonBuilder, ButtonMessage},
     core::{
-        pool::Handle,
-        reflect::{FieldInfo, FieldValue, Reflect},
-        type_traits::prelude::*,
-        visitor::prelude::*,
+        pool::Handle, reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*,
         PhantomDataSendSync,
     },
     define_constructor,
@@ -44,6 +41,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+
 use fyrox_graph::BaseSceneGraph;
 use std::{
     any::TypeId,
@@ -59,17 +57,12 @@ pub struct Item {
     remove: Handle<UiNode>,
 }
 
-pub trait CollectionItem:
-    Clone + Reflect + Debug + Default + TypeUuidProvider + Send + 'static
-{
-}
+pub trait CollectionItem: Clone + Reflect + Default + TypeUuidProvider + Send + 'static {}
 
-impl<T> CollectionItem for T where
-    T: Clone + Reflect + Debug + Default + TypeUuidProvider + Send + 'static
-{
-}
+impl<T> CollectionItem for T where T: Clone + Reflect + Default + TypeUuidProvider + Send + 'static {}
 
 #[derive(Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct CollectionEditor<T: CollectionItem> {
     pub widget: Widget,
     pub add: Handle<UiNode>,
@@ -234,39 +227,11 @@ fn create_item_views(items: &[Item], ctx: &mut BuildContext) -> Vec<Handle<UiNod
         .collect::<Vec<_>>()
 }
 
-fn make_proxy<'a, 'b, T>(
-    collection_property_info: &'b FieldInfo<'a, 'b>,
-    item: &'a T,
-    name: &'b str,
-    display_name: &'b str,
-) -> Result<FieldInfo<'a, 'b>, InspectorError>
-where
-    T: Reflect + FieldValue,
-    'b: 'a,
-{
-    Ok(FieldInfo {
-        owner_type_id: TypeId::of::<T>(),
-        name,
-        display_name,
-        value: item,
-        reflect_value: item,
-        read_only: collection_property_info.read_only,
-        immutable_collection: collection_property_info.immutable_collection,
-        min_value: collection_property_info.min_value,
-        max_value: collection_property_info.max_value,
-        step: collection_property_info.step,
-        precision: collection_property_info.precision,
-        description: collection_property_info.description,
-        type_name: collection_property_info.type_name,
-        doc: collection_property_info.doc,
-    })
-}
-
 fn create_items<'a, 'b, T, I>(
     iter: I,
     environment: Option<Arc<dyn InspectorEnvironment>>,
     definition_container: Arc<PropertyEditorDefinitionContainer>,
-    property_info: &FieldInfo<'a, 'b>,
+    property_info: &FieldRef<'a, 'b>,
     ctx: &mut BuildContext,
     sync_flag: u64,
     layer_index: usize,
@@ -274,6 +239,7 @@ fn create_items<'a, 'b, T, I>(
     filter: PropertyFilter,
     immutable_collection: bool,
     name_column_width: f32,
+    base_path: String,
 ) -> Result<Vec<Item>, InspectorError>
 where
     T: CollectionItem,
@@ -286,12 +252,29 @@ where
             let name = format!("{}[{index}]", property_info.name);
             let display_name = format!("{}[{index}]", property_info.display_name);
 
+            let proxy_property_info = FieldRef {
+                metadata: &FieldMetadata {
+                    name: &name,
+                    display_name: &display_name,
+                    read_only: property_info.read_only,
+                    immutable_collection: property_info.immutable_collection,
+                    min_value: property_info.min_value,
+                    max_value: property_info.max_value,
+                    step: property_info.step,
+                    precision: property_info.precision,
+                    description: property_info.description,
+                    tag: property_info.tag,
+                    doc: property_info.doc,
+                },
+                value: item,
+            };
+
             let editor =
                 definition
                     .property_editor
                     .create_instance(PropertyEditorBuildContext {
                         build_context: ctx,
-                        property_info: &make_proxy::<T>(property_info, item, &name, &display_name)?,
+                        property_info: &proxy_property_info,
                         environment: environment.clone(),
                         definition_container: definition_container.clone(),
                         sync_flag,
@@ -299,6 +282,7 @@ where
                         generate_property_string_values,
                         filter: filter.clone(),
                         name_column_width,
+                        base_path: format!("{base_path}[{index}]"),
                     })?;
 
             if let PropertyEditorInstance::Simple { editor } = editor {
@@ -401,9 +385,10 @@ where
     pub fn build(
         self,
         ctx: &mut BuildContext,
-        property_info: &FieldInfo<'a, '_>,
+        property_info: &FieldRef<'a, '_>,
         sync_flag: u64,
         name_column_width: f32,
+        base_path: String,
     ) -> Result<Handle<UiNode>, InspectorError> {
         let definition_container = self
             .definition_container
@@ -423,6 +408,7 @@ where
                 self.filter,
                 self.immutable_collection,
                 name_column_width,
+                base_path,
             )?
         } else {
             Vec::new()
@@ -528,6 +514,7 @@ where
                     ctx.property_info,
                     ctx.sync_flag,
                     ctx.name_column_width,
+                    ctx.base_path.clone(),
                 )?;
                 editor
             },
@@ -553,6 +540,7 @@ where
             generate_property_string_values,
             filter,
             name_column_width,
+            base_path,
         } = ctx;
 
         let instance_ref = if let Some(instance) = ui.node(instance).cast::<CollectionEditor<T>>() {
@@ -579,6 +567,7 @@ where
                 filter,
                 property_info.immutable_collection,
                 name_column_width,
+                base_path,
             )?;
 
             Ok(Some(CollectionEditorMessage::items(
@@ -598,16 +587,28 @@ where
                     let name = format!("{}[{index}]", property_info.name);
                     let display_name = format!("{}[{index}]", property_info.display_name);
 
+                    let proxy_property_info = FieldRef {
+                        metadata: &FieldMetadata {
+                            name: &name,
+                            display_name: &display_name,
+                            read_only: property_info.read_only,
+                            immutable_collection: property_info.immutable_collection,
+                            min_value: property_info.min_value,
+                            max_value: property_info.max_value,
+                            step: property_info.step,
+                            precision: property_info.precision,
+                            description: property_info.description,
+                            tag: property_info.tag,
+                            doc: property_info.doc,
+                        },
+                        value: obj,
+                    };
+
                     if let Some(message) =
                         definition
                             .property_editor
                             .create_message(PropertyEditorMessageContext {
-                                property_info: &make_proxy::<T>(
-                                    property_info,
-                                    obj,
-                                    &name,
-                                    &display_name,
-                                )?,
+                                property_info: &proxy_property_info,
                                 environment: environment.clone(),
                                 definition_container: definition_container.clone(),
                                 sync_flag,
@@ -617,6 +618,7 @@ where
                                 generate_property_string_values,
                                 filter: filter.clone(),
                                 name_column_width,
+                                base_path: format!("{base_path}[{index}]"),
                             })?
                     {
                         ui.send_message(message.with_flags(ctx.sync_flag))
@@ -633,7 +635,6 @@ where
             if let Some(collection_changed) = ctx.message.data::<CollectionChanged>() {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    owner_type_id: ctx.owner_type_id,
                     value: FieldKind::Collection(Box::new(collection_changed.clone())),
                 });
             } else if let Some(CollectionEditorMessage::ItemChanged { index, message }) =
@@ -646,7 +647,7 @@ where
                 {
                     return Some(PropertyChanged {
                         name: ctx.name.to_string(),
-                        owner_type_id: ctx.owner_type_id,
+
                         value: FieldKind::Collection(Box::new(CollectionChanged::ItemChanged {
                             index: *index,
                             property: definition
@@ -654,7 +655,6 @@ where
                                 .translate_message(PropertyEditorTranslationContext {
                                     environment: ctx.environment.clone(),
                                     name: "",
-                                    owner_type_id: ctx.owner_type_id,
                                     message,
                                     definition_container: ctx.definition_container.clone(),
                                 })?

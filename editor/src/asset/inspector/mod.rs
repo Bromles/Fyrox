@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::fyrox::core::reflect::Reflect;
 use crate::fyrox::graph::BaseSceneGraph;
 use crate::fyrox::{
     asset::{manager::ResourceManager, options::BaseImportOptions},
@@ -39,6 +38,7 @@ use crate::fyrox::{
 };
 use crate::plugins::inspector::editors::make_property_editors_container;
 use crate::{message::MessageSender, MSG_SYNC_FLAG};
+use fyrox::gui::inspector::InspectorContextArgs;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,17 +127,21 @@ impl AssetInspector {
     ) {
         if let Some(import_options) = load_import_options_or_default(path, resource_manager) {
             import_options.as_reflect(&mut |reflect| {
-                let context = InspectorContext::from_object(
-                    reflect,
-                    &mut ui.build_ctx(),
-                    Arc::new(make_property_editors_container(sender.clone())),
-                    None,
-                    MSG_SYNC_FLAG,
-                    0,
-                    true,
-                    Default::default(),
-                    150.0,
-                );
+                let context = InspectorContext::from_object(InspectorContextArgs {
+                    object: reflect,
+                    ctx: &mut ui.build_ctx(),
+                    definition_container: Arc::new(make_property_editors_container(
+                        sender.clone(),
+                        resource_manager.clone(),
+                    )),
+                    environment: None,
+                    sync_flag: MSG_SYNC_FLAG,
+                    layer_index: 0,
+                    generate_property_string_values: true,
+                    filter: Default::default(),
+                    name_column_width: 150.0,
+                    base_path: Default::default(),
+                });
                 ui.send_message(InspectorMessage::context(
                     self.inspector,
                     MessageDirection::ToWidget,
@@ -178,6 +182,7 @@ impl AssetInspector {
                                         engine.user_interfaces.first_mut(),
                                         0,
                                         true,
+                                        Default::default(),
                                         Default::default(),
                                     )
                                     .unwrap();
@@ -221,7 +226,8 @@ fn default_import_options(
     resource_manager: &ResourceManager,
 ) -> Option<Box<dyn BaseImportOptions>> {
     let rm_state = resource_manager.state();
-    for loader in rm_state.loaders.iter() {
+    let loaders = rm_state.loaders.lock();
+    for loader in loaders.iter() {
         if loader.supports_extension(&extension.to_string_lossy()) {
             return loader.default_import_options();
         }
@@ -235,7 +241,8 @@ fn load_import_options_or_default(
 ) -> Option<Box<dyn BaseImportOptions>> {
     if let Some(extension) = resource_path.extension() {
         let rm_state = resource_manager.state();
-        for loader in rm_state.loaders.iter() {
+        let loaders = rm_state.loaders.lock();
+        for loader in loaders.iter() {
             if loader.supports_extension(&extension.to_string_lossy()) {
                 return if let Some(import_options) = block_on(loader.try_load_import_settings(
                     resource_path.to_owned(),

@@ -53,6 +53,7 @@ use crate::{
     BuildContext, Control, RcUiNodeHandle, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 use fxhash::FxHashSet;
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
 use std::{
@@ -421,6 +422,7 @@ impl CurvesContainer {
 }
 
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct CurveEditor {
     widget: Widget,
     background_curves: CurvesContainer,
@@ -582,7 +584,7 @@ impl Control for CurveEditor {
                         let is_dragging = self
                             .operation_context
                             .as_ref()
-                            .map_or(false, |ctx| ctx.is_dragging());
+                            .is_some_and(|ctx| ctx.is_dragging());
                         if self.pick(*pos).is_some() || is_dragging {
                             if self.cursor.is_none() {
                                 ui.send_message(WidgetMessage::cursor(
@@ -1400,6 +1402,7 @@ impl CurveEditor {
             self.clip_bounds(),
             self.background(),
             CommandTexture::None,
+            &self.material,
             None,
         );
     }
@@ -1421,6 +1424,7 @@ impl CurveEditor {
                 self.clip_bounds(),
                 zone.brush.clone(),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         }
@@ -1471,6 +1475,7 @@ impl CurveEditor {
             self.clip_bounds(),
             self.grid_brush.clone(),
             CommandTexture::None,
+            &self.material,
             None,
         );
 
@@ -1483,6 +1488,7 @@ impl CurveEditor {
                 ctx.draw_text(
                     self.clip_bounds(),
                     self.point_to_screen_space(Vector2::new(local_left_bottom_n.x, y)),
+                    &self.material,
                     &text,
                 );
             }
@@ -1494,6 +1500,7 @@ impl CurveEditor {
                 ctx.draw_text(
                     self.clip_bounds(),
                     self.point_to_screen_space(Vector2::new(x, local_left_bottom_n.y)),
+                    &self.material,
                     &text,
                 );
             }
@@ -1584,6 +1591,7 @@ impl CurveEditor {
                 self.clip_bounds(),
                 curve.brush.clone(),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         }
@@ -1687,6 +1695,7 @@ impl CurveEditor {
                         self.key_brush.clone()
                     },
                     CommandTexture::None,
+                    &self.material,
                     None,
                 );
             }
@@ -1706,6 +1715,7 @@ impl CurveEditor {
                 self.clip_bounds(),
                 Brush::Solid(Color::WHITE),
                 CommandTexture::None,
+                &self.material,
                 None,
             );
         }

@@ -18,6 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::renderer::cache::DynamicSurfaceCache;
+use crate::renderer::observer::Observer;
+use crate::renderer::observer::ObserverPosition;
+use crate::renderer::resources::RendererResources;
+use crate::renderer::settings::ShadowMapPrecision;
 use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector2, Vector3},
@@ -26,31 +31,31 @@ use crate::{
     },
     renderer::{
         bundle::{
-            BundleRenderContext, LightSource, LightSourceKind, ObserverInfo,
-            RenderDataBundleStorage, RenderDataBundleStorageOptions,
+            BundleRenderContext, LightSource, LightSourceKind, RenderDataBundleStorage,
+            RenderDataBundleStorageOptions,
         },
         cache::{
             geometry::GeometryCache, shader::ShaderCache, texture::TextureCache,
             uniform::UniformMemoryAllocator,
         },
         framework::{
-            error::FrameworkError,
-            framebuffer::{Attachment, AttachmentKind, FrameBuffer},
-            gpu_texture::{GpuTexture, PixelKind},
+            error::FrameworkError, framebuffer::Attachment, gpu_texture::PixelKind,
             server::GraphicsServer,
         },
-        FallbackResources, RenderPassStatistics, ShadowMapPrecision, DIRECTIONAL_SHADOW_PASS_NAME,
+        RenderPassStatistics, DIRECTIONAL_SHADOW_PASS_NAME,
     },
     scene::{
-        camera::Camera,
         graph::Graph,
         light::directional::{FrustumSplitOptions, CSM_NUM_CASCADES},
     },
 };
-use std::{cell::RefCell, rc::Rc};
+use approx::relative_eq;
+use fyrox_graphics::framebuffer::GpuFrameBuffer;
+use fyrox_graphics::gpu_texture::GpuTexture;
+use fyrox_resource::manager::ResourceManager;
 
 pub struct Cascade {
-    pub frame_buffer: Box<dyn FrameBuffer>,
+    pub frame_buffer: GpuFrameBuffer,
     pub view_proj_matrix: Matrix4<f32>,
     pub z_far: f32,
 }
@@ -62,6 +67,7 @@ impl Cascade {
         precision: ShadowMapPrecision,
     ) -> Result<Self, FrameworkError> {
         let depth = server.create_2d_render_target(
+            "CsmCascadeTexture",
             match precision {
                 ShadowMapPrecision::Full => PixelKind::D32F,
                 ShadowMapPrecision::Half => PixelKind::D16,
@@ -71,24 +77,15 @@ impl Cascade {
         )?;
 
         Ok(Self {
-            frame_buffer: server.create_frame_buffer(
-                Some(Attachment {
-                    kind: AttachmentKind::Depth,
-                    texture: depth,
-                }),
-                Default::default(),
-            )?,
+            frame_buffer: server
+                .create_frame_buffer(Some(Attachment::depth(depth)), Default::default())?,
             view_proj_matrix: Default::default(),
             z_far: 0.0,
         })
     }
 
-    pub fn texture(&self) -> Rc<RefCell<dyn GpuTexture>> {
-        self.frame_buffer
-            .depth_attachment()
-            .unwrap()
-            .texture
-            .clone()
+    pub fn texture(&self) -> &GpuTexture {
+        &self.frame_buffer.depth_attachment().unwrap().texture
     }
 }
 
@@ -99,16 +96,19 @@ pub struct CsmRenderer {
 }
 
 pub(crate) struct CsmRenderContext<'a, 'c> {
+    pub elapsed_time: f32,
     pub frame_size: Vector2<f32>,
     pub state: &'a dyn GraphicsServer,
     pub graph: &'c Graph,
     pub light: &'c LightSource,
-    pub camera: &'c Camera,
+    pub observer: &'a Observer,
     pub geom_cache: &'a mut GeometryCache,
     pub shader_cache: &'a mut ShaderCache,
     pub texture_cache: &'a mut TextureCache,
-    pub fallback_resources: &'a FallbackResources,
+    pub renderer_resources: &'a RendererResources,
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
+    pub dynamic_surface_cache: &'a mut DynamicSurfaceCache,
+    pub resource_manager: &'a ResourceManager,
 }
 
 impl CsmRenderer {
@@ -147,16 +147,19 @@ impl CsmRenderer {
         let mut stats = RenderPassStatistics::default();
 
         let CsmRenderContext {
+            elapsed_time,
             frame_size,
             state,
             graph,
             light,
-            camera,
+            observer,
             geom_cache,
             shader_cache,
             texture_cache,
-            fallback_resources,
+            renderer_resources,
             uniform_memory_allocator,
+            dynamic_surface_cache,
+            resource_manager,
         } = ctx;
 
         let LightSourceKind::Directional { ref csm_options } = light.kind else {
@@ -175,16 +178,16 @@ impl CsmRenderer {
 
         let z_values = match csm_options.split_options {
             FrustumSplitOptions::Absolute { far_planes } => [
-                camera.projection().z_near(),
+                observer.position.z_near,
                 far_planes[0],
                 far_planes[1],
                 far_planes[2],
             ],
             FrustumSplitOptions::Relative { fractions } => [
-                camera.projection().z_near(),
-                camera.projection().z_far() * fractions[0],
-                camera.projection().z_far() * fractions[1],
-                camera.projection().z_far() * fractions[2],
+                observer.position.z_near,
+                observer.position.z_far * fractions[0],
+                observer.position.z_far * fractions[1],
+                observer.position.z_far * fractions[2],
             ],
         };
 
@@ -192,20 +195,24 @@ impl CsmRenderer {
             let z_near = z_values[i];
             let mut z_far = z_values[i + 1];
 
-            if z_far.eq(&z_near) {
-                z_far += 10.0 * f32::EPSILON;
+            // Prevents z_near and z_far from being relatively equal, which would result in an invalid perspective matrix.
+            if relative_eq!(z_far, z_near) {
+                // Needs to be at least greater than f32::EPSILON to break the relative equality.
+                const MIN_DEPTH_DELTA: f32 = f32::EPSILON * 2.0;
+                z_far += MIN_DEPTH_DELTA * z_near;
             }
 
-            let projection_matrix = camera
-                .projection()
+            let projection_matrix = observer
+                .projection
                 .clone()
                 .with_z_near(z_near)
                 .with_z_far(z_far)
                 .matrix(frame_size);
 
-            let frustum =
-                Frustum::from_view_projection_matrix(projection_matrix * camera.view_matrix())
-                    .unwrap_or_default();
+            let frustum = Frustum::from_view_projection_matrix(
+                projection_matrix * observer.position.view_matrix,
+            )
+            .unwrap_or_default();
 
             let center = frustum.center();
             let observer_position = center + light_direction;
@@ -245,22 +252,26 @@ impl CsmRenderer {
             self.cascades[i].z_far = z_far;
 
             let viewport = Rect::new(0, 0, self.size as i32, self.size as i32);
-            let framebuffer = &mut *self.cascades[i].frame_buffer;
+            let framebuffer = &self.cascades[i].frame_buffer;
             framebuffer.clear(viewport, None, Some(1.0), None);
 
             let bundle_storage = RenderDataBundleStorage::from_graph(
                 graph,
-                ObserverInfo {
-                    observer_position,
+                observer.render_mask,
+                elapsed_time,
+                &ObserverPosition {
+                    translation: observer_position,
                     z_near,
                     z_far,
                     view_matrix: light_view_matrix,
                     projection_matrix: cascade_projection_matrix,
+                    view_projection_matrix: cascade_projection_matrix * light_view_matrix,
                 },
                 DIRECTIONAL_SHADOW_PASS_NAME.clone(),
                 RenderDataBundleStorageOptions {
                     collect_lights: false,
                 },
+                dynamic_surface_cache,
             );
 
             stats += bundle_storage.render_to_frame_buffer(
@@ -275,9 +286,10 @@ impl CsmRenderer {
                     frame_buffer: framebuffer,
                     viewport,
                     uniform_memory_allocator,
+                    resource_manager,
                     use_pom: false,
                     light_position: &Default::default(),
-                    fallback_resources,
+                    renderer_resources,
                     ambient_light: Color::WHITE, // TODO
                     scene_depth: None,
                 },

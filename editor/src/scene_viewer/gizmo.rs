@@ -30,7 +30,7 @@ use crate::fyrox::{
     resource::texture::{TextureResource, TextureResourceExtension},
     scene::{
         base::BaseBuilder,
-        camera::{CameraBuilder, SkyBoxKind},
+        camera::CameraBuilder,
         graph::Graph,
         light::{directional::DirectionalLightBuilder, BaseLightBuilder},
         mesh::{
@@ -44,7 +44,6 @@ use crate::fyrox::{
     },
 };
 use crate::scene::GameScene;
-use fyrox::asset::untyped::ResourceKind;
 use fyrox::scene::SceneContainer;
 
 pub struct CameraRotation {
@@ -84,11 +83,10 @@ fn make_cone(transform: Matrix4<f32>, color: Color, graph: &mut Graph) -> Handle
     material.set_property("diffuseColor", color);
 
     MeshBuilder::new(BaseBuilder::new().with_cast_shadows(false))
-        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-            ResourceKind::Embedded,
+        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
             SurfaceData::make_cone(16, 0.3, 1.0, &transform),
         ))
-        .with_material(MaterialResource::new_ok(Default::default(), material))
+        .with_material(MaterialResource::new_embedded(material))
         .build()])
         .build(graph)
 }
@@ -96,6 +94,7 @@ fn make_cone(transform: Matrix4<f32>, color: Color, graph: &mut Graph) -> Handle
 impl SceneGizmo {
     pub fn new(engine: &mut Engine) -> Self {
         let mut scene = Scene::new();
+        scene.set_skybox(None);
 
         let render_target = TextureResource::new_render_target(85, 85);
         scene.rendering_options.render_target = Some(render_target.clone());
@@ -186,8 +185,7 @@ impl SceneGizmo {
                     neg_z
                 },
             ]))
-            .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                ResourceKind::Embedded,
+            .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                 SurfaceData::make_cube(Matrix4::identity()),
             ))
             .build()])
@@ -204,7 +202,6 @@ impl SceneGizmo {
                             .build(),
                     ),
                 )
-                .with_specific_skybox(SkyBoxKind::None)
                 .build(&mut scene.graph);
                 camera
             }]))
